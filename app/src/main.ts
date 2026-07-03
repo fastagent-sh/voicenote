@@ -232,10 +232,25 @@ function buildSettings() {
 
 async function openSettings() { buildSettings(); showScreen("settings"); setStatus($("settings-status"), ""); await loadConfig(); }
 
+// Saving submits EVERY field, and empty fields are persisted as null (= delete
+// key). So a form that failed to prefill from the current config must never be
+// saved — it would silently wipe existing secrets. Saving stays disabled until
+// config_get succeeds.
+let settingsLoaded = false;
+
 async function loadConfig() {
   buildSettings();
-  let cfg: { env?: Record<string, string>; self?: { name?: string | null; aliases?: string[] } } = {};
-  try { cfg = (await invoke("config_get")) as typeof cfg; } catch { /* defaults */ }
+  let cfg: { env?: Record<string, string>; self?: { name?: string | null; aliases?: string[] } };
+  try {
+    cfg = (await invoke("config_get")) as typeof cfg;
+  } catch (e) {
+    settingsLoaded = false;
+    ($("save-btn") as HTMLButtonElement).disabled = true;
+    setStatus($("settings-status"), `读取当前配置失败：${e} —— 为避免覆盖已有配置，保存已禁用；请返回后重新进入设置`, "err");
+    return;
+  }
+  settingsLoaded = true;
+  ($("save-btn") as HTMLButtonElement).disabled = false;
   for (const f of ALL_FIELDS) {
     if (f.key.startsWith("self_")) continue;
     const el = inputEl(f.key); if (el) el.value = cfg.env?.[f.key] ?? f.default ?? "";
@@ -248,6 +263,7 @@ async function ensureAgent(force = false) { try { await invoke("ensure_agent", {
 
 async function saveSettings(e: Event) {
   e.preventDefault();
+  if (!settingsLoaded) { setStatus($("settings-status"), "配置尚未成功读取，保存被禁用（直接保存会清空已有配置）；请返回后重新进入设置", "err"); return; }
   for (const f of ALL_FIELDS) { if (f.required && !(inputEl(f.key)?.value ?? "").trim()) { setStatus($("settings-status"), `请填写「${f.label}」`, "err"); return; } }
   const env: Record<string, string | null> = {};
   for (const key of ENV_KEYS) { const v = (inputEl(key)?.value ?? "").trim(); env[key] = v === "" ? null : v; }
