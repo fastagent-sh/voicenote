@@ -1,13 +1,107 @@
 #!/usr/bin/env bun
 import { cac } from "cac";
 import { createHash, createHmac, randomUUID } from "node:crypto";
-import { appendFile, copyFile, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFile, chmod, copyFile, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { FFIType, dlopen, suffix } from "bun:ffi";
 import { basename, dirname, extname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import os from "node:os";
+//#region src/envConfig.ts
+/** File-provided values for `keys`: config.json over zshrc, $HOME expanded. */
+function parseFileEnv(keys, configData, zshrcContent, home) {
+	const out = {};
+	const expand = (v) => v.replace(/\$\{?HOME\}?/g, home);
+	for (const key of keys) {
+		const v = configData[key];
+		if (typeof v === "string") out[key] = expand(v);
+	}
+	if (zshrcContent !== null) for (const key of keys) {
+		if (out[key] !== void 0) continue;
+		const pattern = new RegExp(`(?:^|\\n)\\s*export\\s+${key}=(?:"([^"]*)"|'([^']*)'|([^\\s"'#]+))`);
+		const value = zshrcContent.match(pattern)?.slice(1).find((v) => v !== void 0);
+		if (value !== void 0) out[key] = expand(value);
+	}
+	return out;
+}
+/** Which keys to copy from fileEnv into an environment (invariant 2). */
+function hydrateFromFileEnv(keys, processEnv, fileEnv) {
+	const out = {};
+	for (const key of keys) {
+		if (processEnv[key] !== void 0) continue;
+		const v = fileEnv[key];
+		if (v !== void 0) out[key] = v;
+	}
+	return out;
+}
+/**
+* Per-key no_proxy/NO_PROXY derivation, made pure so its provenance invariant
+* is testable (it is the whole reason envKeysToEmbed exists). Given the
+* current env value, any previously-captured pre-merge original, whether the
+* key is already marked hydrated, and whether a proxy is active, returns:
+*   - runtime: the value to put in the environment (always volcano-merged)
+*   - capture: the pre-merge real-env original to remember (or undefined:
+*       either we synthesized the value, or it was already captured) — this is
+*       what the scheduler embeds, never the merged value
+*   - hydrate: true when we synthesized the value from nothing (fully
+*       rebuildable at run time, so it must NOT be embedded)
+* Merge is idempotent, so re-running on an already-merged value (reload) is
+* safe; capture-once is preserved by honoring capturedOriginal.
+*/
+function deriveNoProxy(current, capturedOriginal, alreadyHydrated, proxyActive, base, volcanoHosts) {
+	const merge = (v) => {
+		const items = v.split(",").map((s) => s.trim()).filter(Boolean);
+		for (const h of volcanoHosts) if (!items.includes(h)) items.push(h);
+		return items.join(",");
+	};
+	if (current === void 0) return {
+		runtime: merge(proxyActive ? base : ""),
+		capture: void 0,
+		hydrate: true
+	};
+	const capture = !alreadyHydrated && capturedOriginal === void 0 ? current : void 0;
+	return {
+		runtime: merge(current),
+		capture,
+		hydrate: false
+	};
+}
+/** Which env values the scheduler must snapshot (invariants 3 + 4). */
+function envKeysToEmbed(keys, processEnv, hydratedKeys, fileEnv) {
+	const embed = {};
+	const frozenOverrides = [];
+	for (const k of keys) {
+		const v = processEnv[k];
+		if (v === void 0) continue;
+		if (hydratedKeys.has(k) || fileEnv[k] === v) continue;
+		embed[k] = v;
+		if (fileEnv[k] !== void 0) frozenOverrides.push(k);
+	}
+	return {
+		embed,
+		frozenOverrides
+	};
+}
+//#endregion
+//#region src/runLock.ts
+/**
+* @param raw    lock-file contents, or null if the file could not be read
+*               (ENOENT, EBUSY under AV scan, …)
+* @param ownPid this process's pid
+*/
+function parseLockOwner(raw, ownPid) {
+	if (raw === null) return "unknown";
+	let pid;
+	try {
+		pid = Number(JSON.parse(raw)?.pid);
+	} catch {
+		return "unknown";
+	}
+	if (!Number.isFinite(pid)) return "unknown";
+	return pid === ownPid ? "mine" : "reclaimed";
+}
+//#endregion
 //#region src/cli.ts
 const VERSION = "0.17.3";
 const LAUNCH_AGENT_LABEL = "com.kid7st.voicenote";
@@ -79,11 +173,8 @@ const VOLCANO_NO_PROXY_HOSTS = [
 	".volcengineapi.com",
 	"openspeech.bytedance.com"
 ];
-function mergeVolcanoNoProxy(value) {
-	const items = (value || "").split(",").map((s) => s.trim()).filter(Boolean);
-	for (const host of VOLCANO_NO_PROXY_HOSTS) if (!items.includes(host)) items.push(host);
-	return items.join(",");
-}
+const hydratedEnvKeys = /* @__PURE__ */ new Set();
+const premergeRealNoProxy = {};
 function systemProxyUrl() {
 	if (process.platform !== "darwin") return null;
 	try {
@@ -113,59 +204,50 @@ function applyDerivedProxy() {
 		for (const k of [
 			"http_proxy",
 			"https_proxy",
-			"all_proxy"
-		]) if (needs(k)) process.env[k] = url;
-		for (const k of [
+			"all_proxy",
 			"HTTP_PROXY",
 			"HTTPS_PROXY",
 			"ALL_PROXY"
-		]) if (needs(k)) process.env[k] = url;
-		const baseNoProxy = process.env.LOCAL_NO_PROXY || "localhost,127.0.0.1,::1";
-		if (!process.env.no_proxy) process.env.no_proxy = baseNoProxy;
-		if (!process.env.NO_PROXY) process.env.NO_PROXY = baseNoProxy;
+		]) if (needs(k)) {
+			process.env[k] = url;
+			hydratedEnvKeys.add(k);
+		}
 	}
-	process.env.no_proxy = mergeVolcanoNoProxy(process.env.no_proxy);
-	process.env.NO_PROXY = mergeVolcanoNoProxy(process.env.NO_PROXY);
-}
-function loadConfigFileEnv() {
-	if (!existsSync(CONFIG_ENV_PATH)) return;
-	let data;
-	try {
-		data = JSON.parse(readFileSync(CONFIG_ENV_PATH, "utf8"));
-	} catch (e) {
-		warnSideEffect(`parse ${CONFIG_ENV_PATH}`, e);
-		return;
-	}
-	for (const key of ENV_KEYS) {
-		if (process.env[key] !== void 0) continue;
-		const v = data[key];
-		if (typeof v === "string") process.env[key] = v.replace(/\$\{?HOME\}?/g, os.homedir());
+	const baseNoProxy = process.env.LOCAL_NO_PROXY || "localhost,127.0.0.1,::1";
+	for (const k of ["no_proxy", "NO_PROXY"]) {
+		const r = deriveNoProxy(process.env[k], premergeRealNoProxy[k], hydratedEnvKeys.has(k), !!url, baseNoProxy, VOLCANO_NO_PROXY_HOSTS);
+		process.env[k] = r.runtime;
+		if (r.hydrate) hydratedEnvKeys.add(k);
+		if (r.capture !== void 0) premergeRealNoProxy[k] = r.capture;
 	}
 }
-function loadZshrcEnv() {
-	const zshrc = join(os.homedir(), ".zshrc");
-	if (!existsSync(zshrc)) return;
-	let content = "";
-	try {
-		content = readFileSync(zshrc, "utf8");
+function fileProvidedEnv() {
+	const data = loadJsonSync(CONFIG_ENV_PATH, {});
+	let zshrc = null;
+	const zshrcPath = join(os.homedir(), ".zshrc");
+	if (existsSync(zshrcPath)) try {
+		zshrc = readFileSync(zshrcPath, "utf8");
 	} catch {
-		return;
+		zshrc = null;
 	}
-	for (const key of ENV_KEYS) {
-		if (process.env[key] !== void 0) continue;
-		const pattern = new RegExp(`(?:^|\\n)\\s*export\\s+${key}=(?:"([^"]*)"|'([^']*)'|([^\\s"'#]+))`);
-		const match = content.match(pattern);
-		const value = match?.[1] ?? match?.[2] ?? match?.[3];
-		if (value !== void 0) process.env[key] = value.replace(/\$\{?HOME\}?/g, os.homedir());
-	}
+	return parseFileEnv(ENV_KEYS, data, zshrc, os.homedir());
 }
 let envConfigLoaded = false;
 function loadEnvConfig() {
 	if (envConfigLoaded) return;
 	envConfigLoaded = true;
-	loadConfigFileEnv();
-	loadZshrcEnv();
+	const toApply = hydrateFromFileEnv(ENV_KEYS, process.env, fileProvidedEnv());
+	for (const [key, v] of Object.entries(toApply)) {
+		process.env[key] = v;
+		hydratedEnvKeys.add(key);
+	}
 	applyDerivedProxy();
+}
+function reloadEnvConfig() {
+	for (const k of hydratedEnvKeys) delete process.env[k];
+	hydratedEnvKeys.clear();
+	envConfigLoaded = false;
+	loadEnvConfig();
 }
 function getVolcanoConfigFromEnv() {
 	const apiKey = process.env.VOLCANO_ASR_KEY || "";
@@ -498,12 +580,45 @@ async function acquireRunLockWindows() {
 		ts: Date.now()
 	}));
 	closeSync(fd);
+	const lockOwnership = () => {
+		let raw;
+		try {
+			raw = readFileSync(LOCK_PATH, "utf8");
+		} catch {
+			raw = null;
+		}
+		return parseLockOwner(raw, process.pid);
+	};
+	const heartbeat = setInterval(() => {
+		const owner = lockOwnership();
+		if (owner === "reclaimed") {
+			clearInterval(heartbeat);
+			console.error("Run lock was reclaimed by another process (machine slept >30min?); this run continues but is no longer protected against overlap.");
+			return;
+		}
+		if (owner === "unknown") {
+			warnSideEffect("windows lock heartbeat read", /* @__PURE__ */ new Error("lock unreadable this tick; will retry"));
+			return;
+		}
+		try {
+			const tmp = `${LOCK_PATH}.hb-${process.pid}`;
+			writeFileSync(tmp, JSON.stringify({
+				pid: process.pid,
+				ts: Date.now()
+			}));
+			renameSync(tmp, LOCK_PATH);
+		} catch (e) {
+			warnSideEffect("windows lock heartbeat", e);
+		}
+	}, 300 * 1e3);
+	heartbeat.unref?.();
 	let released = false;
 	const release = async () => {
 		if (released) return;
 		released = true;
+		clearInterval(heartbeat);
 		try {
-			unlinkSync(LOCK_PATH);
+			if (lockOwnership() === "mine") unlinkSync(LOCK_PATH);
 		} catch {}
 	};
 	process.once("exit", () => {
@@ -1004,9 +1119,27 @@ async function volcanoTranscribeAudio(volc, audioPath, rec) {
 		const maxWaitMs = Math.max(1200 * 1e3, Math.ceil(expectedSeconds * 1e3 * 1.5));
 		let lastStatusLog = 0;
 		let lastStatus = "";
+		let queryFailures = 0;
+		const transientQueryFailure = (desc) => {
+			queryFailures++;
+			if (queryFailures >= 10) throw new Error(`Volcano query failed ${queryFailures}x in a row: ${desc}`);
+			if (Date.now() - started > maxWaitMs) throw new Error(`Volcano: timeout after ${formatElapsed(Date.now() - started)} (last error: ${desc})`);
+			console.error(`… Volcano: transient query failure (attempt ${queryFailures}/10, will retry): ${desc}`);
+		};
 		for (;;) {
 			await new Promise((res) => setTimeout(res, 8e3));
-			const q = await volcanoQueryResult(volc, taskId);
+			let q;
+			try {
+				q = await volcanoQueryResult(volc, taskId);
+			} catch (e) {
+				transientQueryFailure(String(e?.message || e));
+				continue;
+			}
+			if (!q.status) {
+				transientQueryFailure(`empty status header (HTTP-level error, body: ${q.message || "none"})`);
+				continue;
+			}
+			queryFailures = 0;
 			if (q.status === "20000000" && q.result) {
 				console.log(`✓ Volcano: ASR done in ${formatElapsed(Date.now() - started)}; audio_duration=${q.audio_info?.duration ?? "unknown"}ms`);
 				return volcanoFormatTranscript(q.result);
@@ -1271,6 +1404,7 @@ async function configSetData(payload) {
 		await writeFile(tmp, JSON.stringify(current, null, 2) + "\n", { mode: 384 });
 		await rename(tmp, CONFIG_ENV_PATH);
 	}
+	reloadEnvConfig();
 	return {
 		ok: true,
 		path: CONFIG_ENV_PATH,
@@ -1286,7 +1420,10 @@ async function configSet() {
 		process.exitCode = 1;
 		return;
 	}
+	const PI_BIN = "VOICENOTE_PI_BIN";
+	const before = String(loadConfigJson()[PI_BIN] ?? "");
 	console.log(JSON.stringify(await configSetData(payload)));
+	if (payload.env && PI_BIN in payload.env && String(payload.env[PI_BIN] ?? "") !== before) console.error(`Note: ${PI_BIN} changed — re-run \`vn install-launch-agent\` to apply it to the background scheduler.`);
 }
 function piProviderCandidates() {
 	const providers = (process.env.VOICENOTE_PI_PROVIDER?.trim() || "openai-codex,openai").split(",").map((s) => s.trim()).filter(Boolean);
@@ -1798,12 +1935,14 @@ function xmlEscape(s) {
 async function launchAgentEnv() {
 	loadEnvConfig();
 	const env = { PATH: `${os.homedir()}/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin` };
-	for (const k of ENV_KEYS) {
-		const v = process.env[k];
-		if (v !== void 0) env[k] = v;
-	}
-	if (!env.VOICENOTE_PI_BIN?.startsWith("/")) {
-		const w = await runCommand(IS_WINDOWS ? "where" : "which", [env.VOICENOTE_PI_BIN || "pi"], 5e3);
+	const embedEnv = { ...process.env };
+	for (const k of ["no_proxy", "NO_PROXY"]) embedEnv[k] = premergeRealNoProxy[k];
+	const { embed, frozenOverrides } = envKeysToEmbed(ENV_KEYS, embedEnv, hydratedEnvKeys, fileProvidedEnv());
+	Object.assign(env, embed);
+	for (const k of frozenOverrides) console.error(`Warning: environment ${k} differs from the config file value; the environment value is snapshotted into the scheduler and will override config edits until you re-run \`vn install-launch-agent\`.`);
+	const configuredPi = env.VOICENOTE_PI_BIN ?? process.env.VOICENOTE_PI_BIN;
+	if (!configuredPi?.startsWith("/")) {
+		const w = await runCommand(IS_WINDOWS ? "where" : "which", [configuredPi || "pi"], 5e3);
 		const p = w.code === 0 ? w.stdout.trim().split(/\r?\n/)[0] || "" : "";
 		if (p && existsSync(p)) env.VOICENOTE_PI_BIN = p;
 	}
@@ -1848,6 +1987,7 @@ ${envEntries}
 </dict>
 </plist>
 `, "utf8");
+	await chmod(plist, 384);
 	const summary = Object.keys(env).join(", ");
 	console.log(`LaunchAgent written: ${plist}`);
 	console.log(`Embedded env keys: ${summary}`);
@@ -2190,9 +2330,34 @@ function readLogTail(path, maxBytes) {
 		return "";
 	}
 }
-function agentStatus() {
-	const plist = plistPath();
-	const logFile = join(LOG_DIR, "launchd.out.log");
+function agentLogPath() {
+	if (!IS_WINDOWS) return join(LOG_DIR, "launchd.out.log");
+	try {
+		const dated = readdirSync(LOG_DIR).filter((f) => /^\d{4}-\d{2}-\d{2}\.log$/.test(f)).map((f) => join(LOG_DIR, f));
+		let newest = null;
+		let newestMs = -Infinity;
+		for (const p of dated) {
+			const ms = statSync(p).mtimeMs;
+			if (ms > newestMs) {
+				newestMs = ms;
+				newest = p;
+			}
+		}
+		return newest ?? dailyLogPath();
+	} catch {
+		return dailyLogPath();
+	}
+}
+async function schedulerInstalledAtAll() {
+	if (IS_WINDOWS) return (await runCommand("schtasks", [
+		"/query",
+		"/tn",
+		TASK_NAME
+	], 1e4)).code === 0;
+	return existsSync(plistPath());
+}
+async function agentStatus() {
+	const logFile = agentLogPath();
 	let logTail = [];
 	let logAt = null;
 	if (existsSync(logFile)) {
@@ -2202,8 +2367,8 @@ function agentStatus() {
 		logTail = readLogTail(logFile, 16384).split("\n").map((s) => s.trim()).filter(Boolean).slice(-8);
 	}
 	return {
-		installed: existsSync(plist),
-		plist,
+		installed: await schedulerInstalledAtAll(),
+		scheduler: IS_WINDOWS ? taskXmlPath() : plistPath(),
 		logAt,
 		logTail
 	};
@@ -2259,12 +2424,11 @@ async function collectDoctor() {
 			knownCount: config.speakers.known.length
 		},
 		deps: { ffprobe: ff.code === 0 },
-		launchAgentPlist: plistPath(),
-		agent: agentStatus()
+		agent: await agentStatus()
 	};
 }
 function currentJobFromLog() {
-	const tail = readLogTail(join(LOG_DIR, "launchd.out.log"), 8192).split("\n");
+	const tail = readLogTail(agentLogPath(), 8192).split("\n");
 	let name = null;
 	let processing = false;
 	let step = "准备中";
@@ -2381,7 +2545,7 @@ async function doctor(opts = {}) {
 	console.log(`http_proxy=${s.proxy.httpProxy || "<unset>"}`);
 	console.log(`speakers.self=${s.identity.self || "<unset>"}`);
 	console.log(`speakers.known=${s.identity.knownCount}`);
-	console.log(`launch_agent_plist=${s.launchAgentPlist}`);
+	console.log(`scheduler=${s.agent.scheduler}`);
 	console.log(`ffprobe=${s.deps.ffprobe ? "ok" : "missing"}`);
 }
 async function schedulerIsCurrent() {

@@ -1,7 +1,9 @@
 import { cac } from 'cac'
+import { deriveNoProxy, envKeysToEmbed, hydrateFromFileEnv, parseFileEnv } from './envConfig'
+import { parseLockOwner } from './runLock'
 import { createHash, createHmac, randomUUID } from 'node:crypto'
-import { appendFile, mkdir, readFile, writeFile, copyFile, rename, unlink, stat, readdir, rm } from 'node:fs/promises'
-import { existsSync, readFileSync, mkdirSync, writeFileSync, appendFileSync, openSync, closeSync, statSync, readSync, unlinkSync } from 'node:fs'
+import { appendFile, chmod, mkdir, readFile, writeFile, copyFile, rename, unlink, stat, readdir, rm } from 'node:fs/promises'
+import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, appendFileSync, openSync, closeSync, statSync, readSync, unlinkSync, renameSync } from 'node:fs'
 import { dlopen, FFIType, suffix } from 'bun:ffi'
 import { basename, dirname, extname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -96,7 +98,10 @@ type Config = {
 // Single source of truth for every env var the pipeline reads. Both consumers
 // derive from this list so they can never drift:
 //   - loadEnvConfig() hydrates these from config.json / ~/.zshrc for non-interactive runs
-//   - launchAgentEnv()  embeds them into the LaunchAgent plist
+//   - launchAgentEnv() embeds the REAL-environment subset into the LaunchAgent
+//     plist (file-sourced values are skipped — vn run re-reads the files at
+//     startup, and plist env overrides config.json, so embedding a file value
+//     would freeze it: later GUI edits would silently never reach the agent)
 // Anything documented in the README as a configurable knob MUST live here.
 const ENV_KEYS = [
   'VOICENOTE_DEVICE_VOLUME',
@@ -134,11 +139,21 @@ const ENV_KEYS = [
 //   2) routing China-mainland Volcano APIs through an overseas proxy is slower / unreliable
 const VOLCANO_NO_PROXY_HOSTS = ['.volces.com', '.volcengineapi.com', 'openspeech.bytedance.com']
 
-function mergeVolcanoNoProxy(value: string | undefined): string {
-  const items = (value || '').split(',').map(s => s.trim()).filter(Boolean)
-  for (const host of VOLCANO_NO_PROXY_HOSTS) if (!items.includes(host)) items.push(host)
-  return items.join(',')
-}
+// Provenance: ENV_KEYS this process synthesized — hydrated from config.json /
+// .zshrc, or derived (http_proxy from LOCAL_PROXY_HOST or the macOS system
+// proxy; no_proxy seeded/merged below) — as opposed to inherited from the
+// real environment. Two consumers:
+//   - reloadEnvConfig() deletes exactly these before re-hydrating, so the
+//     long-lived `vn serve` picks up GUI config edits immediately;
+//   - launchAgentEnv() skips them when embedding env into the scheduler
+//     (they are recoverable at run time; real env values are not).
+const hydratedEnvKeys = new Set<string>()
+
+// Real-environment no_proxy/NO_PROXY values captured BEFORE the volcano-hosts
+// merge below. The merged value is partly synthesized and must never be
+// embedded into the scheduler (vn run re-merges at startup); launchAgentEnv
+// substitutes these originals when deciding what to embed.
+const premergeRealNoProxy: Record<string, string> = {}
 
 // Node/Bun fetch doesn't read the macOS system proxy — only http_proxy env. Read
 // the active SCDynamicStore proxy so users whose proxy app sets the system proxy
@@ -170,62 +185,65 @@ function applyDerivedProxy(): void {
     // Set when unset, OR when a config/.zshrc value came in with unexpanded shell
     // vars (e.g. "http://${LOCAL_PROXY_HOST}:...") — those are never valid as-is.
     const needs = (k: string) => !process.env[k] || process.env[k]!.includes('${')
-    for (const k of ['http_proxy', 'https_proxy', 'all_proxy']) if (needs(k)) process.env[k] = url
-    for (const k of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']) if (needs(k)) process.env[k] = url
-    const baseNoProxy = process.env.LOCAL_NO_PROXY || 'localhost,127.0.0.1,::1'
-    if (!process.env.no_proxy) process.env.no_proxy = baseNoProxy
-    if (!process.env.NO_PROXY) process.env.NO_PROXY = baseNoProxy
+    for (const k of ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']) {
+      if (needs(k)) { process.env[k] = url; hydratedEnvKeys.add(k) } // derived, not real env
+    }
   }
-  // Always ensure Volcano hosts bypass whatever proxy is configured.
-  process.env.no_proxy = mergeVolcanoNoProxy(process.env.no_proxy)
-  process.env.NO_PROXY = mergeVolcanoNoProxy(process.env.NO_PROXY)
-}
-
-// Primary file-based config: ~/.config/voicenote/config.json. ENV-style runtime
-// keys live at the top level; identity lives under `speakers`. This hydrates only
-// ENV_KEYS into process.env, filling keys not already set. $HOME tokens are
-// expanded like .zshrc does.
-function loadConfigFileEnv(): void {
-  if (!existsSync(CONFIG_ENV_PATH)) return
-  let data: Record<string, unknown>
-  try { data = JSON.parse(readFileSync(CONFIG_ENV_PATH, 'utf8')) as Record<string, unknown> }
-  catch (e) { warnSideEffect(`parse ${CONFIG_ENV_PATH}`, e); return }
-  for (const key of ENV_KEYS) {
-    if (process.env[key] !== undefined) continue
-    const v = data[key]
-    if (typeof v === 'string') process.env[key] = v.replace(/\$\{?HOME\}?/g, os.homedir())
+  // no_proxy/NO_PROXY: seed a base when a proxy is active, then always merge
+  // the Volcano bypass hosts. Provenance bookkeeping (capture pre-merge real
+  // original vs mark synthesized-hydrated) lives in deriveNoProxy — pure and
+  // tested; see envConfig.ts.
+  const baseNoProxy = process.env.LOCAL_NO_PROXY || 'localhost,127.0.0.1,::1'
+  for (const k of ['no_proxy', 'NO_PROXY'] as const) {
+    const r = deriveNoProxy(process.env[k], premergeRealNoProxy[k], hydratedEnvKeys.has(k), !!url, baseNoProxy, VOLCANO_NO_PROXY_HOSTS)
+    process.env[k] = r.runtime
+    if (r.hydrate) hydratedEnvKeys.add(k)
+    if (r.capture !== undefined) premergeRealNoProxy[k] = r.capture
   }
 }
 
-// Legacy fallback: hydrate ENV_KEYS from `export KEY=...` lines in ~/.zshrc, for
-// existing CLI installs that wrote config there before config.json existed.
-function loadZshrcEnv(): void {
-  const zshrc = join(os.homedir(), '.zshrc')
-  if (!existsSync(zshrc)) return
-  let content = ''
-  try { content = readFileSync(zshrc, 'utf8') } catch { return }
-  for (const key of ENV_KEYS) {
-    // process.env (shell / plist / CLI) wins; config.json already ran above;
-    // .zshrc only fills still-unset keys. !== undefined keeps an explicit empty
-    // string (e.g. VOICENOTE_PI_SUMMARY_TOOLS="") from being re-overridden.
-    if (process.env[key] !== undefined) continue
-    const pattern = new RegExp(`(?:^|\\n)\\s*export\\s+${key}=(?:"([^"]*)"|'([^']*)'|([^\\s"'#]+))`)
-    const match = content.match(pattern)
-    const value = match?.[1] ?? match?.[2] ?? match?.[3]
-    if (value !== undefined) process.env[key] = value.replace(/\$\{?HOME\}?/g, os.homedir())
-  }
+// What the config files would provide for each ENV_KEY, independent of this
+// process's environment. Primary source is ~/.config/voicenote/config.json
+// (ENV-style runtime keys at the top level; identity under `speakers`); the
+// legacy fallback is `export KEY=...` lines in ~/.zshrc, for CLI installs
+// that predate config.json. Precedence/expansion logic lives in envConfig.ts
+// (pure + tested). Two consumers: loadEnvConfig() hydrates these into
+// process.env for keys the real environment doesn't set, and launchAgentEnv()
+// uses them to decide which values are recoverable at run time.
+function fileProvidedEnv(): Record<string, string> {
+  const data = loadJsonSync<Record<string, unknown>>(CONFIG_ENV_PATH, {})
+  let zshrc: string | null = null
+  const zshrcPath = join(os.homedir(), '.zshrc')
+  if (existsSync(zshrcPath)) { try { zshrc = readFileSync(zshrcPath, 'utf8') } catch { zshrc = null } }
+  return parseFileEnv(ENV_KEYS, data, zshrc, os.homedir())
 }
 
 let envConfigLoaded = false
 function loadEnvConfig(): void {
   if (envConfigLoaded) return
   envConfigLoaded = true
-  // Precedence: process.env > config.json (GUI) > ~/.zshrc (legacy).
-  loadConfigFileEnv()
-  loadZshrcEnv()
+  // Precedence: process.env > config.json (GUI) > ~/.zshrc (legacy); an
+  // explicit empty string in the environment is never overridden.
+  const toApply = hydrateFromFileEnv(ENV_KEYS, process.env, fileProvidedEnv())
+  for (const [key, v] of Object.entries(toApply)) { process.env[key] = v; hydratedEnvKeys.add(key) }
   // Derive http_proxy etc. from LOCAL_PROXY_HOST/PORT regardless of source, and
   // always keep Volcano hosts on NO_PROXY. (Runs even with no config files.)
   applyDerivedProxy()
+}
+
+// Re-hydrate after config.json changes. Needed by the long-lived `vn serve`:
+// without this, a GUI config edit only reaches OTHER processes (vn run reads
+// the file fresh each start), while serve's own doctor kept reporting stale
+// values and ensure_agent re-embedded them into the scheduler env on
+// reinstall. Only hydrated/derived keys are dropped — real environment
+// variables keep their precedence (a real-env no_proxy stays merged in place;
+// its pre-merge original survives in premergeRealNoProxy, and the volcano
+// merge is idempotent on the next pass).
+function reloadEnvConfig(): void {
+  for (const k of hydratedEnvKeys) delete process.env[k]
+  hydratedEnvKeys.clear()
+  envConfigLoaded = false
+  loadEnvConfig()
 }
 
 function getVolcanoConfigFromEnv(): VolcanoConfig | null {
@@ -518,11 +536,18 @@ const FLOCK_UN = 8
 
 // Windows lock: no flock here. A pid+timestamp lockfile, created atomically with
 // 'wx'. We only reclaim an existing lock when its owner pid is dead OR the lock is
-// stale (older than STALE_MS), so a crash can't wedge us forever and a live run is
-// never stolen. Task Scheduler's IgnoreNew already blocks the common 60s overlap;
-// this only has to cover a manual `vn run` racing the scheduled one. The tiny
-// create/reclaim window is acceptable: its failure mode is conservatively skipping
-// one run (same as mac when flock is already held).
+// stale (older than STALE_MS). The holder refreshes its timestamp every 5 minutes
+// (heartbeat below), so a legitimately long RUNNING job — ASR on a multi-hour
+// recording — never looks stale. The staleness escape exists for the pid-reuse
+// false positive (owner died, an unrelated process now has its pid, the aliveness
+// probe lies); its known cost: a machine asleep >30min can lose the lock on wake
+// (timers don't fire while asleep), so the heartbeat verifies ownership before
+// each refresh and, if the lock was reclaimed, stops touching it and warns — the
+// old run finishes unprotected rather than corrupting the new holder's record.
+// Task Scheduler's IgnoreNew already blocks the common 60s overlap; this only has
+// to cover a manual `vn run` racing the scheduled one. The tiny create/reclaim
+// window is acceptable: its failure mode is conservatively skipping one run (same
+// as mac when flock is already held).
 async function acquireRunLockWindows(): Promise<{ release: () => Promise<void> } | null> {
   await mkdir(dirname(LOCK_PATH), { recursive: true })
   const STALE_MS = 30 * 60 * 1000
@@ -547,8 +572,48 @@ async function acquireRunLockWindows(): Promise<{ release: () => Promise<void> }
   }
   writeFileSync(fd, JSON.stringify({ pid: process.pid, ts: Date.now() }))
   closeSync(fd)
+  // Tri-state ownership (parse logic + its 'unknown'-on-read-failure invariant
+  // are pure + tested in runLock.ts). A transient read failure must NOT be
+  // treated as loss of ownership: that would kill the heartbeat and hand the
+  // lock away over a momentary glitch — the overlap the heartbeat prevents.
+  const lockOwnership = () => {
+    let raw: string | null
+    try { raw = readFileSync(LOCK_PATH, 'utf8') } catch { raw = null }
+    return parseLockOwner(raw, process.pid)
+  }
+  // Heartbeat: keep ts fresh while we hold the lock; verify ownership first
+  // (see header comment — the lock can be reclaimed after a long sleep).
+  // The refresh writes a temp file and renames it into place: a plain
+  // truncate+write would open a window where a concurrent acquire reads
+  // empty/partial JSON, treats the lock as corrupt, and reclaims a LIVE lock.
+  const heartbeat = setInterval(() => {
+    const owner = lockOwnership()
+    if (owner === 'reclaimed') {
+      clearInterval(heartbeat)
+      console.error('Run lock was reclaimed by another process (machine slept >30min?); this run continues but is no longer protected against overlap.')
+      return
+    }
+    if (owner === 'unknown') { warnSideEffect('windows lock heartbeat read', new Error('lock unreadable this tick; will retry')); return }
+    try {
+      const tmp = `${LOCK_PATH}.hb-${process.pid}`
+      writeFileSync(tmp, JSON.stringify({ pid: process.pid, ts: Date.now() }))
+      renameSync(tmp, LOCK_PATH) // atomic replace, also on Windows
+    } catch (e) { warnSideEffect('windows lock heartbeat', e) }
+  }, 5 * 60 * 1000)
+  ;(heartbeat as any).unref?.()
   let released = false
-  const release = async () => { if (released) return; released = true; try { unlinkSync(LOCK_PATH) } catch {} }
+  const release = async () => {
+    if (released) return
+    released = true
+    clearInterval(heartbeat)
+    // Only remove the lock when it is provably still OURS. Not 'reclaimed'
+    // (that's the new holder's lock) and not 'unknown' either: a transient
+    // read failure could be a reclaimer mid-swap, and the heartbeat does NOT
+    // rewrite on 'unknown', so unlinking here would leave a real vacuum until
+    // STALE_MS. Leaking our own lock on a rare transient failure is the lesser
+    // evil — it self-heals after STALE_MS via the staleness check.
+    try { if (lockOwnership() === 'mine') unlinkSync(LOCK_PATH) } catch {}
+  }
   process.once('exit', () => { void release() })
   process.once('SIGINT', () => { void release(); process.exit(130) })
   process.once('SIGTERM', () => { void release(); process.exit(143) })
@@ -1026,9 +1091,36 @@ async function volcanoTranscribeAudio(volc: VolcanoConfig, audioPath: string, re
     const maxWaitMs = Math.max(20 * 60 * 1000, Math.ceil(expectedSeconds * 1000 * 1.5))
     let lastStatusLog = 0
     let lastStatus = ''
+    // Tolerate transient failures while polling: by this point the audio is
+    // uploaded and the ASR task is submitted (money spent) — one dropped
+    // socket or an HTTP-level error (gateway 5xx returns no X-Api-Status-Code
+    // header, so q.status comes back empty) must not fail the whole job and
+    // trigger a full re-upload + re-submit on the next tick. Only give up
+    // after many failures in a row; throws when the budget or deadline is hit.
+    let queryFailures = 0
+    const transientQueryFailure = (desc: string): void => {
+      queryFailures++
+      if (queryFailures >= 10) throw new Error(`Volcano query failed ${queryFailures}x in a row: ${desc}`)
+      if (Date.now() - started > maxWaitMs) throw new Error(`Volcano: timeout after ${formatElapsed(Date.now() - started)} (last error: ${desc})`)
+      // console.error (not log) so wireDailyLog tags it [ERROR] and `vn errors`
+      // surfaces it — matching chatCompleteViaPiCodex's transient-retry logging.
+      // A repeatedly-near-threshold ASR wobble is exactly what ops wants to see.
+      console.error(`… Volcano: transient query failure (attempt ${queryFailures}/10, will retry): ${desc}`)
+    }
     for (;;) {
       await new Promise(res => setTimeout(res, 8000))
-      const q = await volcanoQueryResult(volc, taskId)
+      let q: VolcanoQueryResult
+      try {
+        q = await volcanoQueryResult(volc, taskId)
+      } catch (e: any) {
+        transientQueryFailure(String(e?.message || e))
+        continue
+      }
+      if (!q.status) {
+        transientQueryFailure(`empty status header (HTTP-level error, body: ${q.message || 'none'})`)
+        continue
+      }
+      queryFailures = 0
       if (q.status === '20000000' && q.result) {
         console.log(`✓ Volcano: ASR done in ${formatElapsed(Date.now() - started)}; audio_duration=${q.audio_info?.duration ?? 'unknown'}ms`)
         return volcanoFormatTranscript(q.result)
@@ -1262,7 +1354,7 @@ async function loginChatGPT(opts: { json?: boolean; deviceCode?: boolean; emit?:
 
 // ───────────────────────────────────────────────────────────────────────
 // File-based config (~/.config/voicenote/config.json) — written by the GUI
-// via `vn config set`, read by loadConfigFileEnv(). ENV config uses ENV_KEYS;
+// via `vn config set`, read by loadEnvConfig(). ENV config uses ENV_KEYS;
 // identity lives under the same file's `speakers` object.
 // ───────────────────────────────────────────────────────────────────────
 
@@ -1324,6 +1416,9 @@ async function configSetData(payload: ConfigSetPayload): Promise<{ ok: true; pat
     await rename(tmp, CONFIG_ENV_PATH)
   }
 
+  // Make the new values visible to THIS process immediately (see reloadEnvConfig).
+  reloadEnvConfig()
+
   return { ok: true, path: CONFIG_ENV_PATH, ...(ignored.length ? { ignoredKeys: ignored } : {}) }
 }
 
@@ -1331,7 +1426,19 @@ async function configSet(): Promise<void> {
   let payload: ConfigSetPayload
   try { payload = JSON.parse(await readStdin()) }
   catch (e: any) { console.error(`Invalid JSON on stdin: ${e?.message || e}`); process.exitCode = 1; return }
+  // Every other key is re-read by the agent on each run, but VOICENOTE_PI_BIN
+  // is snapshotted into the scheduler as a resolved absolute path at install
+  // time (launchd's fixed PATH can't find it otherwise). The GUI reinstalls on
+  // save; the CLI path must be told — but only when the value actually CHANGES.
+  // A GUI-style client resubmits every field on every save, so `in payload`
+  // alone would nag on every unrelated edit.
+  const PI_BIN = 'VOICENOTE_PI_BIN'
+  const before = String(loadConfigJson()[PI_BIN] ?? '')
   console.log(JSON.stringify(await configSetData(payload)))
+  const piBinChanged = payload.env && PI_BIN in payload.env && String(payload.env[PI_BIN] ?? '') !== before
+  if (piBinChanged) {
+    console.error(`Note: ${PI_BIN} changed — re-run \`vn install-launch-agent\` to apply it to the background scheduler.`)
+  }
 }
 
 function piProviderCandidates(): string[] {
@@ -1857,25 +1964,50 @@ function xmlEscape(s: string): string {
 }
 
 // Pulled in for `vn install-launch-agent`. launchd does NOT inherit your zsh
-// environment, so anything the pipeline needs (API key, proxy, etc.) has to
-// be written into the plist's EnvironmentVariables.
+// environment, so anything the pipeline needs that lives ONLY in the real
+// environment (e.g. exported from a non-zsh shell, or injected by the GUI)
+// has to be written into the plist's EnvironmentVariables. Values that came
+// from config.json/.zshrc are deliberately NOT embedded: vn run re-reads
+// those files at startup, and since plist env outranks config.json, embedding
+// them would freeze the values — later GUI edits would silently never reach
+// the background agent.
 async function launchAgentEnv(): Promise<Record<string, string>> {
   loadEnvConfig()
   const env: Record<string, string> = {
     PATH: `${os.homedir()}/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
   }
-  for (const k of ENV_KEYS) {
-    const v = process.env[k]
-    // Embed explicitly-set values, including empty strings: VOICENOTE_PI_SUMMARY_TOOLS=""
-    // is a meaningful "disable tools" signal that a truthy check would silently drop.
-    if (v !== undefined) env[k] = v
+  // Embed only what is NOT recoverable from the config files at run time —
+  // see envConfig.ts (invariants 3+4) for the full matrix. A real-env value
+  // that differs from the file value is embedded as an override but warned
+  // about: it may equally be a stale shell session, and it will keep
+  // overriding config edits until the scheduler is reinstalled.
+  //
+  // Known blind spot: the matrix compares each key against its OWN file value,
+  // so it can't see cross-key derivations. A real-env http_proxy is embedded
+  // as-is and will shadow a GUI edit to LOCAL_PROXY_HOST (different key name)
+  // until reinstall. Only no_proxy is special-cased (originals below) because
+  // WE synthesize it; http_proxy from a user's shell is left as a real value.
+  //
+  // no_proxy/NO_PROXY carry a volcano-hosts merge we added; substitute the
+  // pre-merge real-env original (or drop it entirely if we synthesized the
+  // whole value) so the scheduler never freezes our merge over config edits.
+  const embedEnv: Record<string, string | undefined> = { ...process.env }
+  for (const k of ['no_proxy', 'NO_PROXY'] as const) embedEnv[k] = premergeRealNoProxy[k]
+  const fileEnv = fileProvidedEnv()
+  const { embed, frozenOverrides } = envKeysToEmbed(ENV_KEYS, embedEnv, hydratedEnvKeys, fileEnv)
+  Object.assign(env, embed)
+  for (const k of frozenOverrides) {
+    console.error(`Warning: environment ${k} differs from the config file value; the environment value is snapshotted into the scheduler and will override config edits until you re-run \`vn install-launch-agent\`.`)
   }
   // Embed pi's ABSOLUTE path so launchd resolves it regardless of the fixed plist
   // PATH (npm global bin can live outside it under nvm / custom prefixes). Resolve
-  // the configured name (including the documented relative `VOICENOTE_PI_BIN="pi"`);
-  // only an absolute override is left as-is.
-  if (!env.VOICENOTE_PI_BIN?.startsWith('/')) {
-    const w = await runCommand(IS_WINDOWS ? 'where' : 'which', [env.VOICENOTE_PI_BIN || 'pi'], 5000)
+  // the configured name (including the documented relative `VOICENOTE_PI_BIN="pi"`
+  // and a file-sourced relative name); only an absolute override is left as-is.
+  // The resolved path is regenerated on every (re)install, so config edits that
+  // change VOICENOTE_PI_BIN take effect via ensure_agent's forced reinstall.
+  const configuredPi = env.VOICENOTE_PI_BIN ?? process.env.VOICENOTE_PI_BIN
+  if (!configuredPi?.startsWith('/')) {
+    const w = await runCommand(IS_WINDOWS ? 'where' : 'which', [configuredPi || 'pi'], 5000)
     const p = w.code === 0 ? (w.stdout.trim().split(/\r?\n/)[0] || '') : ''
     if (p && existsSync(p)) env.VOICENOTE_PI_BIN = p
   }
@@ -1922,6 +2054,10 @@ ${envEntries}
 </plist>
 `
   await writeFile(plist, content, 'utf8')
+  // The plist may embed real-env secrets (proxy credentials, exported keys);
+  // chmod explicitly — writeFile's mode only applies on creation, and existing
+  // plists from older installs are 0644.
+  await chmod(plist, 0o600)
   const summary = Object.keys(env).join(', ')
   console.log(`LaunchAgent written: ${plist}`)
   console.log(`Embedded env keys: ${summary}`)
@@ -2264,17 +2400,53 @@ function readLogTail(path: string, maxBytes: number): string {
   } catch { return '' }
 }
 
-// LaunchAgent (autonomous background processor) snapshot for the dashboard.
-function agentStatus() {
-  const plist = plistPath()
-  const logFile = join(LOG_DIR, 'launchd.out.log')
+// Where the background agent's latest activity lands. mac: launchd redirects
+// the agent's stdout to launchd.out.log. Windows: Task Scheduler redirects
+// nothing — the agent's own daily rolling log is the only mirror of its
+// output. wireDailyLog captures the log path once at process start, so a run
+// spanning midnight keeps writing to its START day's file; pick the
+// most-recently-modified dated log rather than today's by name, or a
+// still-running cross-midnight job would look idle on the dashboard.
+function agentLogPath(): string {
+  if (!IS_WINDOWS) return join(LOG_DIR, 'launchd.out.log')
+  try {
+    const dated = readdirSync(LOG_DIR)
+      .filter(f => /^\d{4}-\d{2}-\d{2}\.log$/.test(f))
+      .map(f => join(LOG_DIR, f))
+    let newest: string | null = null
+    let newestMs = -Infinity
+    for (const p of dated) {
+      const ms = statSync(p).mtimeMs
+      if (ms > newestMs) { newestMs = ms; newest = p }
+    }
+    return newest ?? dailyLogPath()
+  } catch { return dailyLogPath() }
+}
+
+// Is the background scheduler installed at all (any version)? Cheaper cousin
+// of schedulerIsCurrent(), used for the dashboard's installed/not-installed
+// pill — mac checks the plist file, Windows must ask schtasks (there is no
+// file whose existence tracks task registration).
+async function schedulerInstalledAtAll(): Promise<boolean> {
+  if (IS_WINDOWS) return (await runCommand('schtasks', ['/query', '/tn', TASK_NAME], 10000)).code === 0
+  return existsSync(plistPath())
+}
+
+// Background agent snapshot for the dashboard (LaunchAgent / Scheduled Task).
+async function agentStatus() {
+  const logFile = agentLogPath()
   let logTail: string[] = []
   let logAt: string | null = null
   if (existsSync(logFile)) {
     try { logAt = statSync(logFile).mtime.toISOString() } catch {}
     logTail = readLogTail(logFile, 16384).split('\n').map(s => s.trim()).filter(Boolean).slice(-8)
   }
-  return { installed: existsSync(plist), plist, logAt, logTail }
+  // `scheduler` points at the on-disk scheduler entry for `vn doctor` to show.
+  // mac: the plist IS the registration (its existence == installed). Windows:
+  // the task XML is only the staging file we wrote; registration lives in Task
+  // Scheduler (queried by `installed`), so the XML may lag reality — it's an
+  // inspection aid, not proof of registration.
+  return { installed: await schedulerInstalledAtAll(), scheduler: IS_WINDOWS ? taskXmlPath() : plistPath(), logAt, logTail }
 }
 
 // Structured health/config snapshot. Single source for both `vn doctor` (text)
@@ -2308,8 +2480,7 @@ async function collectDoctor() {
     proxy: { httpProxy: process.env.http_proxy || null },
     identity: { self: config.speakers.self.name || null, aliases: config.speakers.self.aliases, knownCount: config.speakers.known.length },
     deps: { ffprobe: ff.code === 0 },
-    launchAgentPlist: plistPath(),
-    agent: agentStatus(),
+    agent: await agentStatus(),
   }
 }
 
@@ -2317,7 +2488,7 @@ async function collectDoctor() {
 // Parse the agent log tail for the recording being processed right now (if any),
 // and which pipeline step it's on. Heuristic but cheap.
 function currentJobFromLog(): { status: 'processing'; name: string; step: string } | null {
-  const tail = readLogTail(join(LOG_DIR, 'launchd.out.log'), 8192).split('\n')
+  const tail = readLogTail(agentLogPath(), 8192).split('\n')
   let name: string | null = null
   let processing = false
   let step = '准备中'
@@ -2401,7 +2572,7 @@ async function doctor(opts: { json?: boolean } = {}): Promise<void> {
   console.log(`http_proxy=${s.proxy.httpProxy || '<unset>'}`)
   console.log(`speakers.self=${s.identity.self || '<unset>'}`)
   console.log(`speakers.known=${s.identity.knownCount}`)
-  console.log(`launch_agent_plist=${s.launchAgentPlist}`)
+  console.log(`scheduler=${s.agent.scheduler}`)
   console.log(`ffprobe=${s.deps.ffprobe ? 'ok' : 'missing'}`)
 }
 

@@ -35,8 +35,9 @@
     "build": "tsdown",
     "dev": "bun src/cli.ts",
     "typecheck": "tsc --noEmit",
+    "test": "bun test",
     "doctor": "bun src/cli.ts doctor",
-    "prepublishOnly": "bun run typecheck && bun run build"
+    "prepublishOnly": "bun run typecheck && bun test && bun run build"
   },
   "publishConfig": {
     "registry": "https://npm.pkg.github.com",
