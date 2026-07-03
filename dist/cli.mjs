@@ -103,7 +103,7 @@ function parseLockOwner(raw, ownPid) {
 }
 //#endregion
 //#region src/cli.ts
-const VERSION = "0.17.3";
+const VERSION = "0.17.4";
 const LAUNCH_AGENT_LABEL = "com.kid7st.voicenote";
 const TASK_NAME = "VoiceNote";
 const IS_WINDOWS = process.platform === "win32";
