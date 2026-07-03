@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl, openPath } from "@tauri-apps/plugin-opener";
+import { JobsRefreshState } from "./jobsState";
 
 // ── Settings schema (flat, grouped; lives inline in the dashboard) ───────────
 type Field = { key: string; label: string; placeholder?: string; default?: string; secret?: boolean; required?: boolean };
@@ -159,16 +160,33 @@ function renderError(containerId: string, msg: string) {
   box.appendChild(p);
 }
 
-async function refreshJobs() {
+// Refresh decisions (latest-wins rendering, cross-request explicit feedback,
+// failure escalation) live in a pure, tested state machine — see jobsState.ts
+// for the invariants and jobsState.test.ts for their proofs.
+const jobsState = new JobsRefreshState();
+
+async function refreshJobs(explicit = false) {
+  const seq = jobsState.begin(explicit);
+  // The try covers ONLY the engine round-trip: this catch feeds the state
+  // machine's failure accounting, and a renderJobs/DOM bug recorded as an
+  // engine failure would both corrupt that accounting (success then failure
+  // for one request) and misreport a frontend bug as “读取处理状态失败”.
+  let r: { items: Job[] };
   try {
-    const r = (await invoke("recent_jobs")) as { items: Job[] };
-    renderJobs(r.items ?? []);
+    r = (await invoke("recent_jobs")) as { items: Job[] };
   } catch (e) {
-    renderError("notes-list", `读取处理状态失败：${e}`);
+    if (jobsState.failure() === "error") renderError("notes-list", `读取处理状态失败：${e}`);
+    else console.error("refreshJobs (background)", e); // poll/boot/post-save flow: keep last-good list
+    return;
   }
+  const items = r.items ?? [];
+  if (jobsState.success(seq, JSON.stringify(items)) === "render") renderJobs(items);
 }
 
-async function refreshStatus() {
+// `explicit` = the user pressed the refresh button (needs failure feedback);
+// all other callers (boot, post-login, post-save) are automatic flows and keep
+// the last-good jobs list on transient errors, same as the background poll.
+async function refreshStatus(explicit = false) {
   try {
     status = (await invoke("doctor_status")) as Status;
   } catch (e) {
@@ -177,11 +195,14 @@ async function refreshStatus() {
     pill.textContent = "状态读取失败";
     pill.className = "agent-pill err";
     renderError("status-rows", `读取状态失败：${e}`);
+    // Still attempt the jobs refresh: an explicit refresh promised feedback,
+    // and jobs may succeed (or surface its own error) even when doctor fails.
+    void refreshJobs(explicit);
     return;
   }
   renderAgentPill(status.agent);
   renderStatus();
-  void refreshJobs();
+  void refreshJobs(explicit);
 }
 
 // ── Settings (inline, built once; values loaded from config) ─────────────────
@@ -253,9 +274,14 @@ type LoginEvent =
   | { event: "device_code"; userCode: string; verificationUri: string }
   | { event: "success"; provider: string }
   | { event: "error"; message: string }
-  | { event: "closed"; code: number | null };
+  | { event: "closed"; code: number | null; reason?: string };
 
 function onLoginEvent(e: LoginEvent) {
+  // No login running → every login-event is stale or synthetic (an abandoned
+  // flow's stragglers, or the engine-teardown closed) — none of them may touch
+  // the UI. This single gate keeps all branches consistent; `error` flips
+  // loginRunning off itself, which also makes its follow-up `closed` a no-op.
+  if (!loginRunning) return;
   const st = $("login-status");
   switch (e.event) {
     case "auth_url":
@@ -266,10 +292,14 @@ function onLoginEvent(e: LoginEvent) {
     case "success":
       loginSucceeded = true; setStatus(st, "✓ 登录成功", "ok"); $("auth-link-wrap").hidden = true; break;
     case "error":
+      // Terminal: end the login here so the follow-up `closed` hits the guard
+      // below and cannot overwrite this diagnostic with a generic “登录已退出”.
+      loginRunning = false;
       setStatus(st, `登录失败：${e.message}`, "err"); ($("login-btn") as HTMLButtonElement).disabled = false; break;
     case "closed":
       loginRunning = false; ($("login-btn") as HTMLButtonElement).disabled = false;
       if (loginSucceeded) ensureAgent(true).then(() => refreshStatus());
+      else if (e.reason === "engine-exited") setStatus(st, "后台引擎异常退出，登录已中止，请重试", "err");
       else if (e.code !== 0) setStatus(st, `登录已退出（code=${e.code ?? "?"}）`, "err");
       break;
   }
@@ -287,13 +317,26 @@ function startLogin() {
 window.addEventListener("DOMContentLoaded", async () => {
   listen<LoginEvent>("login-event", (e) => onLoginEvent(e.payload));
 
-  $("refresh-btn").addEventListener("click", refreshStatus);
+  $("refresh-btn").addEventListener("click", () => void refreshStatus(true));
   $("settings-btn").addEventListener("click", () => void openSettings());
   $("settings-back").addEventListener("click", (e) => { e.preventDefault(); showScreen("dash"); });
   $("open-ws").addEventListener("click", (e) => { e.preventDefault(); if (status?.workspace) openPath(status.workspace); });
   $("settings-form").addEventListener("submit", saveSettings);
   $("login-btn").addEventListener("click", startLogin);
   $("auth-link").addEventListener("click", (e) => { e.preventDefault(); const u = ($("auth-link") as HTMLAnchorElement).dataset.url; if (u) openUrl(u); });
+
+  // The background agent retries/processes recordings on its own 60s tick;
+  // poll the jobs list so 失败→完成 transitions show up without a manual refresh.
+  // Chained (next tick scheduled only after the previous settles) so at most
+  // one poll is in flight — a slow/wedged engine gets one pending request, not
+  // a new one stacking every 10s. Deliberately NOT polled: the agent pill /
+  // status rows. They come from doctor_status, which spawns sidecars
+  // (`pi --version`, ffprobe) on every call — too heavy for a 10s tick — so
+  // the pill can lag the job list until the next manual refresh.
+  // Reschedule in finally so the chain survives any rejection out of
+  // refreshJobs — a broken link would silently stop all polling.
+  const pollJobs = () => setTimeout(() => { refreshJobs().catch(console.error).finally(pollJobs); }, 10_000);
+  pollJobs();
 
   buildSettings();
   // Show the dashboard shell immediately (status rows read “检测中…”) so sidecar

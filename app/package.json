@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "test": "bun test",
+    "build": "bun test && tsc && vite build",
     "build:sidecar": "bash scripts/build-vn-sidecar.sh",
     "build:sidecar:universal": "bash scripts/build-vn-sidecar.sh universal",
     "build:sidecar:win": "powershell -ExecutionPolicy Bypass -File scripts/build-vn-sidecar.ps1",
@@ -17,6 +18,7 @@
     "@tauri-apps/plugin-opener": "^2.5.4"
   },
   "devDependencies": {
+    "@types/bun": "^1.2.14",
     "@tauri-apps/cli": "^2",
     "vite": "^6.0.3",
     "typescript": "~5.6.2"
