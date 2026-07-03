@@ -2177,7 +2177,16 @@ async function showErrors(opts: { lines?: number }): Promise<void> {
     console.log('No logs.')
     return
   }
-  const files = (await readdir(LOG_DIR)).filter(f => f.endsWith('.log')).sort().slice(-3)
+  // Only the daily rolling logs (YYYY-MM-DD.log) carry timestamped [ERROR] lines;
+  // launchd.out.log/launchd.err.log are raw, never-truncated stdout/stderr mirrors
+  // that sort after dated files alphabetically ('l' > digit) and would otherwise
+  // crowd out the real recent logs in the slice(-3) below.
+  const files = (await readdir(LOG_DIR)).filter(f => /^\d{4}-\d{2}-\d{2}\.log$/.test(f)).sort().slice(-3)
+  if (!files.length) {
+    // Distinguish "no dated logs yet" (fresh install) from "scanned, no errors".
+    console.log('No logs.')
+    return
+  }
   const lineCount = Number(opts.lines || 20)
   const errors: string[] = []
   for (const f of files) {
