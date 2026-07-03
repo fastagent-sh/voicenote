@@ -2444,10 +2444,47 @@ async function dispatchServe(req: any, send: (o: unknown) => void): Promise<void
       case 'jobs': result = await jobsListData(Number(params?.limit) || 40); break
       case 'ensure_agent': result = await ensureScheduler(!!params?.force); break
       case 'login': {
-        let ok = false
-        await loginChatGPT({ json: true, deviceCode: !!params?.deviceCode, emit: (o) => { if (o.event === 'success') ok = true; send({ type: 'event', event: 'login-event', payload: o }) } })
-        send({ type: 'event', event: 'login-event', payload: { event: 'closed', code: ok ? 0 : 1 } })
-        result = { ok }
+        // Ack immediately: the OAuth round-trip takes minutes (user in browser),
+        // and the GUI client times requests out after 60s — a long-lived login
+        // response would be misread as a wedged engine. Progress and outcome
+        // ride entirely on login-event; the response carries nothing.
+        void (async () => {
+          let ok = false
+          // Attempt latch: once this attempt settles (timeout or completion),
+          // late events from a still-dangling OAuth flow must not reach the
+          // UI — a stale success/error would clobber a NEWER login attempt's
+          // state (the closed for this attempt has already been sent).
+          let settled = false
+          const sendEvent = (o: Record<string, unknown>) => { if (!settled) send({ type: 'event', event: 'login-event', payload: o }) }
+          try {
+            // Bound the OAuth wait: if the user closes the browser without
+            // authorizing, the callback never arrives and the flow would hang
+            // forever — with the GUI's login button locked until app restart.
+            // True cancellation is not available (the browser flow of
+            // @earendil-works/pi-ai takes no AbortSignal), so on timeout the
+            // abandoned flow keeps running muted (settled latch above). Two
+            // consequences, both surfaced in the timeout message: a LATE
+            // authorization still persists credentials silently (login may
+            // actually have succeeded — hence “点刷新确认”), and the dangling
+            // localhost callback server may hold its port until serve exits,
+            // so an immediate retry can fail fast with a port-busy error.
+            const timeout = new Promise<never>((_, rej) => {
+              const t = setTimeout(() => rej(new Error('登录超时：10 分钟内未完成授权。若刚刚已在浏览器完成授权，请点刷新确认登录状态；否则请重试')), 10 * 60 * 1000)
+              ;(t as any).unref?.()
+            })
+            await Promise.race([
+              loginChatGPT({ json: true, deviceCode: !!params?.deviceCode, emit: (o) => { if (o.event === 'success') ok = true; sendEvent(o) } }),
+              timeout,
+            ])
+          } catch (e: any) {
+            // loginChatGPT handles its own errors; this catches the timeout
+            // above plus anything it lets escape (fail visibly).
+            sendEvent({ event: 'error', message: String(e?.message || e) })
+          }
+          sendEvent({ event: 'closed', code: ok ? 0 : 1 })
+          settled = true
+        })()
+        result = { started: true }
         break
       }
       default: throw new Error(`unknown method: ${method}`)

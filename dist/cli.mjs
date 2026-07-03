@@ -2096,7 +2096,11 @@ async function showErrors(opts) {
 		console.log("No logs.");
 		return;
 	}
-	const files = (await readdir(LOG_DIR)).filter((f) => f.endsWith(".log")).sort().slice(-3);
+	const files = (await readdir(LOG_DIR)).filter((f) => /^\d{4}-\d{2}-\d{2}\.log$/.test(f)).sort().slice(-3);
+	if (!files.length) {
+		console.log("No logs.");
+		return;
+	}
 	const lineCount = Number(opts.lines || 20);
 	const errors = [];
 	for (const f of files) {
@@ -2428,31 +2432,43 @@ async function dispatchServe(req, send) {
 			case "ensure_agent":
 				result = await ensureScheduler(!!params?.force);
 				break;
-			case "login": {
-				let ok = false;
-				await loginChatGPT({
-					json: true,
-					deviceCode: !!params?.deviceCode,
-					emit: (o) => {
-						if (o.event === "success") ok = true;
-						send({
+			case "login":
+				(async () => {
+					let ok = false;
+					let settled = false;
+					const sendEvent = (o) => {
+						if (!settled) send({
 							type: "event",
 							event: "login-event",
 							payload: o
 						});
+					};
+					try {
+						const timeout = new Promise((_, rej) => {
+							setTimeout(() => rej(/* @__PURE__ */ new Error("登录超时：10 分钟内未完成授权。若刚刚已在浏览器完成授权，请点刷新确认登录状态；否则请重试")), 600 * 1e3).unref?.();
+						});
+						await Promise.race([loginChatGPT({
+							json: true,
+							deviceCode: !!params?.deviceCode,
+							emit: (o) => {
+								if (o.event === "success") ok = true;
+								sendEvent(o);
+							}
+						}), timeout]);
+					} catch (e) {
+						sendEvent({
+							event: "error",
+							message: String(e?.message || e)
+						});
 					}
-				});
-				send({
-					type: "event",
-					event: "login-event",
-					payload: {
+					sendEvent({
 						event: "closed",
 						code: ok ? 0 : 1
-					}
-				});
-				result = { ok };
+					});
+					settled = true;
+				})();
+				result = { started: true };
 				break;
-			}
 			default: throw new Error(`unknown method: ${method}`);
 		}
 		send({
