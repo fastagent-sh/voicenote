@@ -2336,14 +2336,15 @@ async function showErrors(opts: { lines?: number }): Promise<void> {
 
 async function upgradeSelf(): Promise<void> {
   const cmd = IS_WINDOWS ? 'bun' : (existsSync('/opt/homebrew/bin/bun') ? '/opt/homebrew/bin/bun' : 'bun')
-  console.log(`$ ${cmd} remove -g @kid7st/voicenote || true`)
-  await new Promise<void>(res => spawn(cmd, ['remove', '-g', '@kid7st/voicenote'], { stdio: 'inherit', shell: IS_WINDOWS }).on('close', () => res()))
-  console.log(`$ ${cmd} add -g git+https://github.com/kid7st/voicenote.git#main`)
+  // `bun add -g` upgrades in place: verified no dependency loop on npm→npm re-add
+  // (the steady-state upgrade path) nor on replacing an old git-ref install. No
+  // remove-first, so a failed add leaves the running vn intact.
+  console.log(`$ ${cmd} add -g @kid7st/voicenote`)
   const addCode = await new Promise<number>(res =>
-    spawn(cmd, ['add', '-g', 'git+https://github.com/kid7st/voicenote.git#main'], { stdio: 'inherit', shell: IS_WINDOWS })
+    spawn(cmd, ['add', '-g', '@kid7st/voicenote'], { stdio: 'inherit', shell: IS_WINDOWS })
       .on('close', c => res(c ?? 1)).on('error', () => res(1)))
   if (addCode !== 0) {
-    console.error(`Upgrade failed: \`${cmd} add -g\` exited ${addCode}. The previous global install was already removed and may be gone; re-run \`vn upgrade\` (or the install command) to repair.`)
+    console.error(`Upgrade failed: \`${cmd} add -g @kid7st/voicenote\` exited ${addCode}. Your current install is unchanged; retry later.`)
     process.exitCode = 1
     return
   }

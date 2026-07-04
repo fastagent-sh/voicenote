@@ -7,7 +7,7 @@ on:
 
 permissions:
   contents: read
-  packages: write
+  id-token: write   # OIDC for npm trusted publishing (token-free + provenance)
 
 jobs:
   publish:
@@ -22,19 +22,36 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # Explicit gates: robust against a skipped lifecycle (e.g. ignore-scripts),
+      # which would otherwise let a bad tarball publish green. package.json's
+      # `prepublishOnly` mirrors these for a manual local `npm publish`; keep the
+      # two in sync when adding a gate.
       - name: Type check
         run: bun run typecheck
+
+      - name: Test
+        run: bun test src/   # CLI tests only; app/ has its own CI
 
       - name: Build
         run: bun run build
 
+      # Smoke the built artifact, not just src — a broken bundle or a misplaced
+      # runtime dep can pass typecheck+test yet fail to run.
+      - name: Smoke test built CLI
+        run: bun dist/cli.mjs --version
+
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-          registry-url: 'https://npm.pkg.github.com'
-          scope: '@kid7st'
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
 
+      # Trusted publishing needs npm >= 11.5.1, newer than what Node ships.
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest
+
+      # Token-free: OIDC (id-token: write) + a Trusted Publisher configured on
+      # npmjs.com (repo kid7st/voicenote, workflow release.yml). Provenance is
+      # generated automatically. NOTE: npm has no pending-publisher, so the FIRST
+      # version must be published manually once before this workflow can take over.
       - name: Publish
-        run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm publish --ignore-scripts

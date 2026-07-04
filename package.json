@@ -37,10 +37,9 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "doctor": "bun src/cli.ts doctor",
-    "prepublishOnly": "bun run typecheck && bun test && bun run build"
+    "prepublishOnly": "bun run typecheck && bun test src/ && bun run build"
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com",
     "access": "public"
   },
   "dependencies": {

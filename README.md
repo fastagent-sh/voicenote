@@ -17,6 +17,8 @@ CLI 命令:`vn`
 
 ## 安装(CLI)
 
+> CLI 从 npm 包 `@kid7st/voicenote` 安装。下面的安装脚本 / `bun add -g` 均需该包**已发布到 npm** 后才可用(发布流程见文末「开发」)。
+
 推荐使用安装脚本(macOS):
 
 ```bash
@@ -46,22 +48,22 @@ bash <(curl -fsSL https://raw.githubusercontent.com/kid7st/voicenote/main/script
 
 首次安装会生成 `~/.config/voicenote/config.json`。旧版本的 `speakers.json` 会被自动兼容读取/迁移到 `config.json.speakers`。配置完成后再运行 `vn doctor` 检查,需要后台自动监控时再运行 `vn install-launch-agent`。
 
-> GitHub Packages 的 npm registry 通常需要 auth token;公开分发目前默认使用 GitHub git ref 安装。
-
 手动安装:
 
 ```bash
-bun add -g git+https://github.com/kid7st/voicenote.git#main
+bun add -g @kid7st/voicenote
 mkdir -p ~/.local/bin
 ln -sf ~/.bun/bin/vn ~/.local/bin/vn
 ```
+
+旧版(`git+…#main`)安装会被 `bun add -g @kid7st/voicenote` 直接替换,无需先卸载。
 
 ### Windows(CLI)
 
 CLI 已跨平台。前置:Bun、ffmpeg(提供 `ffprobe.exe`)、Node + pi。
 
 ```powershell
-bun add -g git+https://github.com/kid7st/voicenote.git#main
+bun add -g @kid7st/voicenote
 # Windows 无 /Volumes 挂载点,录音盘按盘符设置
 setx VOICENOTE_RECORD_DIR "E:\RECORD"
 ```
@@ -135,7 +137,7 @@ vn forget <id|filename>         # 让某条录音重新被处理
 vn log                          # 打印今天日志末尾(--lines N / -f 跟随 / --err 含 launchd.err / --date YYYY-MM-DD)
 vn errors                       # 打印最近 ERROR 日志
 vn login                        # 登录 ChatGPT(Codex 设备码流,纪要后端用;无需开 pi TUI)
-vn upgrade                      # reinstall latest main from GitHub git ref
+vn upgrade                      # reinstall latest npm package
 vn install-launch-agent
 vn status
 vn uninstall-launch-agent
@@ -219,22 +221,18 @@ bun run build
 ./dist/cli.mjs doctor
 ```
 
-分发:当前公开安装默认走 GitHub git ref:
+分发:源码仓库不提交 `dist/`(`bun run build` 产出),npm 包发布时才把构建好的 `dist/` 放进 tarball。安装脚本 / `vn upgrade` 都从已发布的 npm 包安装,所以**首个 npm 版本发布后**这些入口才可用。
+
+日常发布(打 tag 触发 CI):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kid7st/voicenote/main/scripts/install.sh | bash
-```
-
-如需打 tag / 发布 GitHub Packages:
-
-```bash
-bun run typecheck
-bun run build
 npm version patch
 git push --follow-tags
 ```
 
-workflow 位于 `.github/workflows/release.yml`。注意 GitHub Packages npm registry 通常需要 npm auth token,不适合作为无 token 的公开安装入口。
+workflow 位于 `.github/workflows/release.yml`:CI 显式跑 typecheck/test/build + 产物冒烟,再 `npm publish --ignore-scripts`(确定发布,不依赖 lifecycle)。发布走 **npm trusted publishing(OIDC)**:免长期 token(`id-token: write` + npmjs.com 上配好 Trusted Publisher),自动带 provenance。本地裸 `npm publish` 则由 `prepublishOnly`(typecheck+test+build)兼底。
+
+> **首发例外**:npm 无 pending-publisher,trusted publishing 发不了包的第一个版本。先本机 `npm login` 后手动 `bun run build && npm publish --ignore-scripts` 发一次,再到 npmjs.com 包设置页加 Trusted Publisher(repo `kid7st/voicenote`、workflow `release.yml`),之后 CI 自动接管(需 npm 账号开 2FA)。
 
 ## 桌面客户端(GUI,`app/`)
 

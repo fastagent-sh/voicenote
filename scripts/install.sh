@@ -16,8 +16,7 @@ set -euo pipefail
 #   VOLCANO_TOS_SECRET_KEY="..." \
 #   bash scripts/install.sh
 
-REPO_URL="${VOICENOTE_REPO_URL:-https://github.com/kid7st/voicenote.git}"
-INSTALL_REF="${VOICENOTE_INSTALL_REF:-main}"
+PACKAGE="@kid7st/voicenote"
 WORKSPACE="${VOICENOTE_WORKSPACE:-$HOME/Documents/meetings}"
 INSTALL_LAUNCH_AGENT="${VOICENOTE_INSTALL_LAUNCH_AGENT:-}"
 
@@ -172,11 +171,11 @@ install_deps() {
 }
 
 install_voicenote() {
-  log "Installing voicenote from $REPO_URL#$INSTALL_REF"
-  # bun can report a dependency loop when upgrading an existing global git install
-  # of the same package. Removing first makes installs/upgrades idempotent.
-  bun remove -g @kid7st/voicenote >/dev/null 2>&1 || true
-  bun add -g "git+$REPO_URL#$INSTALL_REF"
+  log "Installing voicenote from npm package $PACKAGE"
+  # `bun add -g` upgrades in place: verified no dependency loop on npm→npm re-add
+  # nor on replacing an old git-ref install (git→npm). On failure it leaves the
+  # existing install intact; set -e surfaces the bun error.
+  bun add -g "$PACKAGE"
   mkdir -p "$HOME/.local/bin"
   ln -sf "$HOME/.bun/bin/vn" "$HOME/.local/bin/vn"
   vn --version || true
