@@ -217,11 +217,10 @@ git clone https://github.com/kid7st/voicenote.git
 cd voicenote
 bun install
 bun run typecheck
-bun run build
-./dist/cli.mjs doctor
+bun src/cli.ts doctor
 ```
 
-分发:源码仓库不提交 `dist/`(`bun run build` 产出),npm 包发布时才把构建好的 `dist/` 放进 tarball。安装脚本 / `vn upgrade` 都从已发布的 npm 包安装,所以**首个 npm 版本发布后**这些入口才可用。
+分发:vn 以**源码**分发,没有构建步骤 —— 它只在 bun 上运行(shebang + `bun:ffi` + `engines.bun`),而 bun 原生跑 TypeScript,所以 `bin` 直接指向 `src/cli.ts`,npm tarball 只带 `src/{cli,envConfig,runLock}.ts`。安装脚本 / `vn upgrade` 从已发布的 npm 包安装(`bun add -g @kid7st/voicenote`);`git+https` 安装也能直接用(git 树自带源码,无需 build 或安装脚本)。
 
 日常发布(打 tag 触发 CI):
 
@@ -232,7 +231,7 @@ git push --follow-tags
 
 workflow 位于 `.github/workflows/release.yml`:CI 显式跑 typecheck/test/build + 产物冒烟,再 `npm publish --ignore-scripts`(确定发布,不依赖 lifecycle)。发布走 **npm trusted publishing(OIDC)**:免长期 token(`id-token: write` + npmjs.com 上配好 Trusted Publisher),自动带 provenance。本地裸 `npm publish` 则由 `prepublishOnly`(typecheck+test+build)兼底。
 
-> **首发例外**:npm 无 pending-publisher,trusted publishing 发不了包的第一个版本。先本机 `npm login` 后手动 `bun run build && npm publish --ignore-scripts` 发一次,再到 npmjs.com 包设置页加 Trusted Publisher(repo `kid7st/voicenote`、workflow `release.yml`),之后 CI 自动接管(需 npm 账号开 2FA)。
+> **首发例外**:npm 无 pending-publisher,trusted publishing 发不了包的第一个版本。先本机 `npm login` 后手动 `npm publish --ignore-scripts` 发一次,再到 npmjs.com 包设置页加 Trusted Publisher(repo `kid7st/voicenote`、workflow `release.yml`),之后 CI 自动接管(需 npm 账号开 2FA)。
 
 ## 桌面客户端(GUI,`app/`)
 
