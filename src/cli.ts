@@ -2615,6 +2615,15 @@ async function dispatchServe(req: any, send: (o: unknown) => void): Promise<void
       case 'doctor': result = await collectDoctor(); break
       case 'jobs': result = await jobsListData(Number(params?.limit) || 40); break
       case 'ensure_agent': result = await ensureScheduler(!!params?.force); break
+      case 'run': {
+        // Long-running (minutes) like login: ack immediately so the GUI's 60s
+        // request timeout can't misread it as a wedged engine. Progress shows
+        // via the jobs poll; acquireRunLock inside runPipeline dedupes against
+        // the scheduler tick and a double-click.
+        void runPipeline({}).catch(e => console.error('manual run failed:', e?.message || e))
+        result = { started: true }
+        break
+      }
       case 'login': {
         // Ack immediately: the OAuth round-trip takes minutes (user in browser),
         // and the GUI client times requests out after 60s — a long-lived login

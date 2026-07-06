@@ -205,6 +205,37 @@ async function refreshStatus(explicit = false) {
   void refreshJobs(explicit);
 }
 
+// Manual "同步": re-detect the recorder (doctor) and, if present, kick off a
+// processing run. Gives the explicit feedback the passive ↻ refresh doesn't —
+// device-not-found is the common "插入后识别不出、GUI 无反馈" case, so we say so
+// instead of silently doing nothing.
+async function syncNow() {
+  const btn = $("sync-btn") as HTMLButtonElement;
+  // Own sync feedback slot — NOT agent-pill: the pill is the background agent's
+  // live state (renderAgentPill from logTail) and only refreshes on
+  // refreshStatus, so writing action feedback there would sit stale over the
+  // agent's real status until the next manual refresh.
+  const st = $("sync-status");
+  btn.disabled = true;
+  setStatus(st, "正在同步…", "wait");
+  try {
+    // refreshStatus swallows doctor failures (sets status=null) instead of
+    // throwing — so branch on `status`, don't rely on the catch below.
+    await refreshStatus(true); // re-detect device (updates status rows) + refresh jobs
+    if (!status) { setStatus(st, "状态读取失败，请稍后重试", "err"); return; }
+    if (!status.recorder.exists) { setStatus(st, "未检测到录音笔 · 请重新插拔后再点同步", "err"); return; }
+    await invoke("trigger_run"); // acks immediately; run proceeds in background
+    // Neutral wording: a run may be deduped by acquireRunLock (a background
+    // tick already holds it), so don't promise "新录音会显示" — point at the
+    // list, which reflects whichever run is active.
+    setStatus(st, "已触发同步 · 处理进度见下方列表", "wait");
+  } catch (e) {
+    setStatus(st, `同步失败：${e}`, "err");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ── Settings (inline, built once; values loaded from config) ─────────────────
 function makeInput(f: Field): HTMLElement {
   const wrap = document.createElement("label"); wrap.className = "field";
@@ -334,6 +365,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   listen<LoginEvent>("login-event", (e) => onLoginEvent(e.payload));
 
   $("refresh-btn").addEventListener("click", () => void refreshStatus(true));
+  $("sync-btn").addEventListener("click", () => void syncNow());
   $("settings-btn").addEventListener("click", () => void openSettings());
   $("settings-back").addEventListener("click", (e) => { e.preventDefault(); showScreen("dash"); });
   $("open-ws").addEventListener("click", (e) => { e.preventDefault(); if (status?.workspace) openPath(status.workspace); });

@@ -16,7 +16,8 @@
         <div class="brand">VoiceNote</div>
         <div class="topbar-right">
           <span id="agent-pill" class="agent-pill"></span>
-          <button id="refresh-btn" class="icon-btn" title="刷新">↻</button>
+          <button id="sync-btn" class="icon-btn sync-btn" title="重新检测录音笔并立即处理">同步</button>
+          <button id="refresh-btn" class="icon-btn" title="刷新状态">↻</button>
           <button id="settings-btn" class="icon-btn" title="设置">⚙</button>
         </div>
       </header>
@@ -27,6 +28,7 @@
             <h2>处理状态</h2>
             <a id="open-ws" href="#" class="text-link">打开纪要文件夹 ↗</a>
           </div>
+          <p id="sync-status" class="status sync-status" role="status"></p>
           <div id="notes-list" class="notes"></div>
         </main>
 

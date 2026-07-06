@@ -322,6 +322,14 @@ async fn recent_jobs(app: AppHandle) -> Result<Value, String> {
     engine_request(app, "jobs", serde_json::json!({ "limit": 40 })).await
 }
 
+/// Manually trigger a scan+process run (the same work the background scheduler
+/// does on its tick). serve acks immediately; the run proceeds in the
+/// background and progress surfaces via the jobs poll.
+#[tauri::command]
+async fn trigger_run(app: AppHandle) -> Result<Value, String> {
+    engine_request(app, "run", Value::Null).await
+}
+
 /// Ensure the autonomous background scheduler (mac LaunchAgent / Windows Task
 /// Scheduler) is installed and points at THIS app's bundled engine. The
 /// staleness check + (re)install now live in `vn` (ensureScheduler); this is a
@@ -382,6 +390,7 @@ pub fn run() {
             config_set,
             doctor_status,
             recent_jobs,
+            trigger_run,
             ensure_agent
         ])
         .run(tauri::generate_context!())

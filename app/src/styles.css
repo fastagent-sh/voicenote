@@ -52,6 +52,10 @@ body {
   font-size: 17px; cursor: pointer; transition: background .15s, color .15s;
 }
 .icon-btn:hover { background: var(--surface-2); color: var(--text); }
+.icon-btn:disabled { opacity: .5; cursor: default; }
+.sync-btn { width: auto; padding: 0 12px; font-size: 13px; font-weight: 500; }
+.sync-status { margin: 0 0 10px; }
+.sync-status:empty { display: none; }
 
 .agent-pill {
   -webkit-app-region: no-drag;
