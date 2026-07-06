@@ -301,15 +301,22 @@ irm https://raw.githubusercontent.com/kid7st/voicenote/main/scripts/install-app.
 
 > 后台 agent label 是 `com.kid7st.voicenote`(与 CLI 版同名,机器上只保留一个)。`.app` 换位置后再打开一次即可重新校准 plist。
 
+**升级**:0.1.9 起内置自动更新 —— 打开 app →「设置 → 软件更新」→「检查更新」，有新版点「下载并安装」，装好自动重启，配置/纪要均保留。首次安装、或从 0.1.8 及更早版本升级（它们还没有更新器），重跑上面的一键安装脚本即可。
+
 ### 维护者:打包 + 发布
 
-**自动(推荐)**:打 `app-v*` tag,GitHub Actions(`.github/workflows/release-app.yml`)在 macOS runner 上构建 + ad-hoc 签名 + 把 `VoiceNote.zip` 传到 Release:
+**自动(推荐)**:打 `app-v*` tag 触发 `.github/workflows/release-app.yml`:
 
 ```bash
 git tag app-v0.1.0 && git push --tags
 ```
 
-**一个 `app-v*` tag = 一个 Release、同时带 mac + Windows 两个安装包**(两个 workflow 都由 `app-v*` 触发，mac runner 传 `VoiceNote.zip`、windows runner 传 `VoiceNote-setup.exe` 到同一 Release)。这样 `install-app.sh` 和 `install-app.ps1` 的 `releases/latest/download/...` 两边都能取到。
+**一个 `app-v*` tag = 一个 Release、带 mac + Windows 两平台**。`release-app.yml` 是单一 workflow：mac（universal + ad-hoc 深度签名）与 Windows（NSIS）并行构建，再由 `release` job 汇总发布。每个 Release 同时带：
+
+- **首装包** `VoiceNote.zip`（mac）/ `VoiceNote-setup.exe`（win）—— `install-app.*` 从 `releases/latest/download/...` 取；
+- **更新器产物** `VoiceNote.app.tar.gz` + `latest.json` —— GUI 内 Tauri updater（设置→软件更新）用。
+
+> 更新器需要签名 secrets `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（`tauri signer generate` 生成，公钥填 `tauri.conf.json`）；pubkey 还是占位符时 `preflight` job 会拦下发布。
 
 > 用 `app-v*`（与 CLI 的 `v*` npm 发布 tag 区分）。产物为 **universal**（x86_64 + arm64），Intel 与 Apple Silicon 通用。
 
