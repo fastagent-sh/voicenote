@@ -1,6 +1,6 @@
 {
   "name": "@kid7st/voicenote",
-  "version": "0.17.5",
+  "version": "0.17.6",
   "description": "Voice recordings → diarized transcripts → integrated semantic Markdown notes. Currently optimized for the PHILIPS VTR6500 recorder, but the workflow is generic.",
   "type": "module",
   "license": "MIT",
@@ -24,21 +24,21 @@
     "bun"
   ],
   "bin": {
-    "vn": "dist/cli.mjs"
+    "vn": "src/cli.ts"
   },
   "files": [
-    "dist",
+    "src/cli.ts",
+    "src/envConfig.ts",
+    "src/runLock.ts",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsdown",
-    "prepare": "bun run build",
     "dev": "bun src/cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "doctor": "bun src/cli.ts doctor",
-    "prepublishOnly": "bun run typecheck && bun test src/ && bun run build"
+    "prepublishOnly": "bun run typecheck && bun test src/"
   },
   "publishConfig": {
     "access": "public"
@@ -49,7 +49,6 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "tsdown": "latest",
     "typescript": "latest",
     "unrun": "^0.3.0"
   },

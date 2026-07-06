@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 import { cac } from 'cac'
 import { deriveNoProxy, envKeysToEmbed, hydrateFromFileEnv, parseFileEnv } from './envConfig'
 import { parseLockOwner } from './runLock'
@@ -10,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
 
-const VERSION = '0.17.5'
+const VERSION = '0.17.6'
 const LAUNCH_AGENT_LABEL = 'com.kid7st.voicenote'
 const TASK_NAME = 'VoiceNote'   // Windows Task Scheduler name (mac uses LAUNCH_AGENT_LABEL)
 

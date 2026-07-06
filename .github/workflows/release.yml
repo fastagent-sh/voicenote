@@ -32,13 +32,11 @@ jobs:
       - name: Test
         run: bun test src/   # CLI tests only; app/ has its own CI
 
-      - name: Build
-        run: bun run build
-
-      # Smoke the built artifact, not just src — a broken bundle or a misplaced
-      # runtime dep can pass typecheck+test yet fail to run.
-      - name: Smoke test built CLI
-        run: bun dist/cli.mjs --version
+      # Smoke the published entry point (bin -> src/cli.ts): a bad shebang or a
+      # runtime dep that's a devDep by mistake passes typecheck+test yet fails
+      # to start. No build step — vn ships as source and runs on bun directly.
+      - name: Smoke test CLI
+        run: bun src/cli.ts --version
 
       - uses: actions/setup-node@v4
         with:
