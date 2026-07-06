@@ -29,7 +29,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhGQTgzMjE3REYxNzQ1QjIKUldTeVJSZmZGektvajJhbnRHUmZJUWE5TkVEbWNvSEhvWUl3Y2VwZi80UTV0cTNlWWx6WmNoRW8K",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhENzg1MUExQ0E1NDE4OUMKUldTY0dGVEtvVkY0ald5MzVWZjhvbVI0NWUzNWQxOVJkVmlXM1V0TkJXRHNicGlUWTA3UmtLN1IK",
       "endpoints": [
         "https://github.com/kid7st/voicenote/releases/latest/download/latest.json"
       ]
