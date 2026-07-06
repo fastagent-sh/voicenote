@@ -40,7 +40,10 @@ if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
   TARGZ="release/VoiceNote.app.tar.gz"
   rm -f "$TARGZ" "$TARGZ.sig"
   tar -czf "$TARGZ" -C "$(dirname "$BUNDLE")" "VoiceNote.app"
-  bun run tauri signer sign --private-key "$TAURI_SIGNING_PRIVATE_KEY" --password "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" "$TARGZ"
+  # Invoke the binary directly (not via `bun run`): `bun run tauri … --password ""`
+  # drops the empty arg and misaligns the FILE positional. The signer reads
+  # TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) from the env CI already exports.
+  ./node_modules/.bin/tauri signer sign "$TARGZ"
   echo "✓ $TARGZ (+ .sig)"
 fi
 
