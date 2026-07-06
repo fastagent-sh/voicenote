@@ -29,7 +29,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "REPLACE_WITH_PUBLIC_KEY_AFTER_KEYGEN",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhGQTgzMjE3REYxNzQ1QjIKUldTeVJSZmZGektvajJhbnRHUmZJUWE5TkVEbWNvSEhvWUl3Y2VwZi80UTV0cTNlWWx6WmNoRW8K",
       "endpoints": [
         "https://github.com/kid7st/voicenote/releases/latest/download/latest.json"
       ]
