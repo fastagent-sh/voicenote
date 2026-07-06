@@ -56,6 +56,8 @@ body {
 .sync-btn { width: auto; padding: 0 12px; font-size: 13px; font-weight: 500; }
 .sync-status { margin: 0 0 10px; }
 .sync-status:empty { display: none; }
+.update-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+#update-status:empty { display: none; }
 
 .agent-pill {
   -webkit-app-region: no-drag;

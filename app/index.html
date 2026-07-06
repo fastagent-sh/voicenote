@@ -56,6 +56,15 @@
       <form id="settings-form" class="settings-page" autocomplete="off">
         <div class="settings-inner">
           <div id="fields"></div>
+          <section class="settings-group">
+            <div class="group-label">软件更新</div>
+            <div class="update-row">
+              <span id="update-version" class="muted sm"></span>
+              <button type="button" id="check-update-btn" class="btn btn-ghost">检查更新</button>
+            </div>
+            <p id="update-status" class="status"></p>
+            <button type="button" id="install-update-btn" class="btn btn-primary" hidden>下载并安装</button>
+          </section>
         </div>
         <footer class="settings-foot">
           <p id="settings-status" class="status"></p>

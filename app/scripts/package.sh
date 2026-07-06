@@ -30,6 +30,20 @@ mkdir -p release
 rm -f "$OUT"
 ditto -c -k --keepParent "$BUNDLE" "$OUT"
 
+# Updater artifact (CI only; needs the signing key). A .tar.gz of the SIGNED
+# .app + its minisign signature, so a one-click update installs the SAME
+# hardened-signed bundle as the zip — sidecars keep their JIT entitlements.
+# Tauri's own createUpdaterArtifacts runs at build time, BEFORE sign-macos.sh,
+# so its tar.gz would ship an unsigned sidecar; we repackage post-sign here.
+if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+  echo "==> Updater artifact (tar.gz + sig of signed .app) …"
+  TARGZ="release/VoiceNote.app.tar.gz"
+  rm -f "$TARGZ" "$TARGZ.sig"
+  tar -czf "$TARGZ" -C "$(dirname "$BUNDLE")" "VoiceNote.app"
+  bun run tauri signer sign --private-key "$TAURI_SIGNING_PRIVATE_KEY" --password "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" "$TARGZ"
+  echo "✓ $TARGZ (+ .sig)"
+fi
+
 echo
 echo "✅ 成品: $APP/$OUT  ($(du -h "$OUT" | cut -f1))"
 echo

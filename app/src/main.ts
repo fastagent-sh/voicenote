@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 import { openUrl, openPath } from "@tauri-apps/plugin-opener";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { JobsRefreshState } from "./jobsState";
 
 // ── Settings schema (flat, grouped; lives inline in the dashboard) ───────────
@@ -261,7 +264,62 @@ function buildSettings() {
   settingsBuilt = true;
 }
 
-async function openSettings() { buildSettings(); showScreen("settings"); setStatus($("settings-status"), ""); await loadConfig(); }
+async function openSettings() { buildSettings(); showScreen("settings"); setStatus($("settings-status"), ""); void showAppVersion(); await loadConfig(); }
+
+// ── Software update (Tauri updater; static latest.json on GitHub Releases) ────
+// `check()` reads the pubkey-verified latest.json from the updater endpoint;
+// the returned Update is stashed so the install button can download+install the
+// exact artifact that was just verified, then relaunch into it.
+let pendingUpdate: Update | null = null;
+
+async function showAppVersion() {
+  try { $("update-version").textContent = `当前版本 v${await getVersion()}`; } catch (e) { console.error("getVersion", e); }
+}
+
+async function checkUpdate() {
+  const btn = $("check-update-btn") as HTMLButtonElement;
+  const st = $("update-status");
+  const installBtn = $("install-update-btn") as HTMLButtonElement;
+  btn.disabled = true; installBtn.hidden = true; pendingUpdate = null;
+  setStatus(st, "正在检查…", "wait");
+  try {
+    const update = await check();
+    if (!update) { setStatus(st, "已是最新版本", "ok"); return; }
+    pendingUpdate = update;
+    setStatus(st, `发现新版本 v${update.version}`, "");
+    installBtn.hidden = false;
+  } catch (e) {
+    setStatus(st, `检查更新失败：${e}`, "err");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function installUpdate() {
+  if (!pendingUpdate) return;
+  const st = $("update-status");
+  const installBtn = $("install-update-btn") as HTMLButtonElement;
+  const checkBtn = $("check-update-btn") as HTMLButtonElement;
+  installBtn.disabled = true; checkBtn.disabled = true;
+  let total = 0, got = 0;
+  try {
+    // downloadAndInstall verifies the signature against the configured pubkey
+    // before installing; a tampered artifact rejects here. On Windows Tauri
+    // quits the app to run the installer; on macOS we relaunch explicitly.
+    await pendingUpdate.downloadAndInstall((e) => {
+      switch (e.event) {
+        case "Started": total = e.data.contentLength ?? 0; setStatus(st, "开始下载…", "wait"); break;
+        case "Progress": got += e.data.chunkLength; setStatus(st, total ? `下载中 ${Math.round((got / total) * 100)}%` : `下载中 ${got} 字节`, "wait"); break;
+        case "Finished": setStatus(st, "下载完成，正在安装…", "wait"); break;
+      }
+    });
+    setStatus(st, "安装完成，正在重启…", "ok");
+    await relaunch();
+  } catch (e) {
+    setStatus(st, `更新失败：${e}`, "err");
+    installBtn.disabled = false; checkBtn.disabled = false;
+  }
+}
 
 // Saving submits EVERY field, and empty fields are persisted as null (= delete
 // key). So a form that failed to prefill from the current config must never be
@@ -367,6 +425,8 @@ window.addEventListener("DOMContentLoaded", async () => {
   $("refresh-btn").addEventListener("click", () => void refreshStatus(true));
   $("sync-btn").addEventListener("click", () => void syncNow());
   $("settings-btn").addEventListener("click", () => void openSettings());
+  $("check-update-btn").addEventListener("click", () => void checkUpdate());
+  $("install-update-btn").addEventListener("click", () => void installUpdate());
   $("settings-back").addEventListener("click", (e) => { e.preventDefault(); showScreen("dash"); });
   $("open-ws").addEventListener("click", (e) => { e.preventDefault(); if (status?.workspace) openPath(status.workspace); });
   $("settings-form").addEventListener("submit", saveSettings);
