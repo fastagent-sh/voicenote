@@ -33,6 +33,7 @@
   ],
   "scripts": {
     "build": "tsdown",
+    "prepare": "bun run build",
     "dev": "bun src/cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
