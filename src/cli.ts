@@ -794,7 +794,9 @@ async function scanRecordings(config: Config): Promise<Recording[]> {
       recordedAt: parseRecordedAt(file),
     })
   }
-  return recordings.sort((a, b) => b.recordedAt.getTime() - a.recordedAt.getTime())
+  // Oldest first: backlog is drained in chronological order, so every file is
+  // guaranteed a turn before newer arrivals jump the queue.
+  return recordings.sort((a, b) => a.recordedAt.getTime() - b.recordedAt.getTime())
 }
 
 function shouldSkip(rec: Recording, state: Json, config: Config, force: boolean, mode: RunMode): [boolean, string] {
@@ -1897,7 +1899,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
     ? `Skipped samples: ${Object.entries(skipSamples).map(([reason, names]) => `${reason}: ${names.slice(0, 3).join(', ')}${names.length > 3 ? `…(+${names.length - 3})` : ''}`).join(' | ')}`
     : ''
   const latestOnly = Boolean(opts.latest)
-  const targets = latestOnly ? eligible.slice(0, 1) : eligible
+  const targets = latestOnly ? eligible.slice(-1) : eligible
   // Preflight: if there is work but the run cannot complete, skip BEFORE spending
   // ASR money, rather than failing per-recording on every 60s StartInterval tick.
   // Idle-suppressed so a misconfigured daemon doesn't spam logs. Skipped for
