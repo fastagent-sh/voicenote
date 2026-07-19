@@ -2481,7 +2481,10 @@ async function collectDoctor() {
       : { configured: false as const },
     summary: { backend: `pi:${piProviderCandidates().join('→')}`, providers: piProviderCandidates(), model: piCodexModelFor(), thinking: piThinkingLevel(), tools: tools || null, contextDir: tools ? summaryContextDir(config) : null },
     pi: { bin: piCodexBin(), version: piCheck.code === 0 ? (piCheck.stdout.trim() || piCheck.stderr.trim() || null) : null, available: piCheck.code === 0, auth: piAuthAvailable() },
-    proxy: { httpProxy: process.env.http_proxy || null },
+    // Outbound proxy for HTTPS endpoints (updater/GitHub): honor the standard
+    // env chain, not just lowercase http_proxy — an https_proxy-only setup must
+    // still route the updater.
+    proxy: { url: process.env.https_proxy || process.env.HTTPS_PROXY || process.env.http_proxy || process.env.HTTP_PROXY || null },
     identity: { self: config.speakers.self.name || null, aliases: config.speakers.self.aliases, knownCount: config.speakers.known.length },
     deps: { ffprobe: ff.code === 0 },
     agent: await agentStatus(),
@@ -2510,8 +2513,9 @@ function currentJobFromLog(): { status: 'processing'; name: string; step: string
 }
 
 // Unified processing status of recent recordings (for the GUI status board):
-// the live job (if any) + completed (done) + errored (failed). Noise like
-// too_short / already_processed is omitted.
+// the live job (if any) + queued on the recorder (pending) + completed (done) +
+// transcript-saved-but-notes-failed (summary_failed) + errored (failed, will
+// auto-retry) + filtered (skipped: too_small/too_short).
 async function jobsListData(limit: number): Promise<{ items: Json[] }> {
   const config = getConfig()
   const statePath = join(config.workspace, '_state', 'processed.json')
@@ -2527,17 +2531,53 @@ async function jobsListData(limit: number): Promise<{ items: Json[] }> {
   const live = currentJobFromLog()
   if (live) items.push({ ...live, title: null, at: null, time: recTime(live.name, null), notes: null })
   const done: Json[] = []
+  const knownPaths = new Set<string>()
   for (const [id, e] of Object.entries<any>(state.processed_source_ids || {})) {
+    if (e.source_path) knownPaths.add(e.source_path)
     const name = basename(e.source_path || id)
-    done.push({ status: 'done', name, title: e.title ?? null, at: e.processed_at ?? null, time: recTime(name, e.processed_at ?? null), notes: e.final_paths?.notes ?? e.local_paths?.notes ?? null })
+    done.push({ status: isSummaryFailedEntry(e) ? 'summary_failed' : 'done', name, title: e.title ?? null, at: e.processed_at ?? null, time: recTime(name, e.processed_at ?? null), notes: e.final_paths?.notes ?? e.local_paths?.notes ?? null })
   }
   for (const [id, e] of Object.entries<any>(state.skipped_source_ids || {})) {
-    if (String(e.reason || '').startsWith('error')) { const name = basename(e.source_path || id); done.push({ status: 'failed', name, title: null, at: e.seen_at ?? null, time: recTime(name, e.seen_at ?? null), reason: e.reason ?? null, notes: null }) }
+    if (e.source_path) knownPaths.add(e.source_path)
+    const name = basename(e.source_path || id)
+    const rawReason = String(e.reason || '')
+    const isError = rawReason.startsWith('error')
+    // Filter reasons are machine diagnostics (`too_small:1234<100000`); show a
+    // human label instead. Error strings stay raw — that's the diagnostic.
+    const reason = rawReason.startsWith('too_small') ? '录音太小，已忽略' : rawReason.startsWith('too_short') ? '录音太短，已忽略' : (e.reason ?? null)
+    done.push({ status: isError ? 'failed' : 'skipped', name, title: null, at: e.seen_at ?? null, time: recTime(name, e.seen_at ?? null), reason, notes: null })
   }
   done.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')))
-  // Don't double-list the live job if it's also in done.
+  // Pending: candidate files on the recorder with no state entry yet. Matched by
+  // source_path (not sourceId) so a status poll doesn't hash every file on the
+  // recorder. ponytail: path match misses a re-recorded same-path file, and the
+  // minDurationSeconds filter is absent (ffprobe per poll is too dear) — a
+  // too-short file shows "pending" until a run flips it to "skipped". Fine for a
+  // status view — the pipeline itself still dedupes by content hash and filters
+  // by duration.
+  const pending: Json[] = []
+  if (existsSync(config.recordDir)) {
+    for await (const file of new Bun.Glob('**/*').scan({ cwd: config.recordDir, absolute: true, dot: true })) {
+      if (!isCandidateFile(file) || knownPaths.has(file)) continue
+      const st = await stat(file).catch(() => null)
+      if (!st?.isFile() || st.size < config.minBytes) continue
+      const name = basename(file)
+      pending.push({ status: 'pending', name, title: null, at: null, time: recTime(name, null), notes: null })
+    }
+    // Queue order: oldest first, same sort key as the pipeline (parseRecordedAt).
+    pending.sort((a, b) => parseRecordedAt(String(a.name)).getTime() - parseRecordedAt(String(b.name)).getTime())
+    // Cap the queue so a large backlog can't crowd done/failed out of the limit
+    // window; the overflow collapses into one aggregate row.
+    const PENDING_SHOWN = 10
+    if (pending.length > PENDING_SHOWN) {
+      const extra = pending.length - PENDING_SHOWN
+      pending.length = PENDING_SHOWN
+      pending.push({ status: 'pending', name: `…还有 ${extra} 个排队中`, title: null, at: null, time: null, notes: null })
+    }
+  }
+  // Don't double-list the live job if it's also in pending/done.
   const liveName = live?.name
-  for (const j of done) { if (liveName && j.name === liveName) continue; items.push(j) }
+  for (const j of [...pending, ...done]) { if (liveName && j.name === liveName) continue; items.push(j) }
   return { items: items.slice(0, limit) }
 }
 
@@ -2545,7 +2585,7 @@ async function jobsList(opts: { limit?: number; json?: boolean }): Promise<void>
   const data = await jobsListData(Number(opts.limit) || 30)
   if (opts.json) { console.log(JSON.stringify(data, null, 2)); return }
   if (!data.items.length) { console.log('No jobs yet.'); return }
-  for (const j of data.items) console.log(`[${j.status}] ${j.title || j.name}${j.step ? ' · ' + j.step : ''}`)
+  for (const j of data.items) console.log(`[${j.status}] ${j.title || j.name}${j.step ? ' · ' + j.step : ''}${j.reason ? ' · ' + String(j.reason).slice(0, 120) : ''}`)
 }
 
 async function doctor(opts: { json?: boolean } = {}): Promise<void> {
@@ -2573,7 +2613,7 @@ async function doctor(opts: { json?: boolean } = {}): Promise<void> {
   console.log(`pi.version=${s.pi.version || 'missing'}`)
   console.log(`pi.auth=${s.pi.auth ? 'logged-in' : 'NOT logged-in — run `vn login` to sign in, else the summary step will fail'}`)
   console.log(`defaultMode=notes`)
-  console.log(`http_proxy=${s.proxy.httpProxy || '<unset>'}`)
+  console.log(`proxy=${s.proxy.url || '<unset>'}`)
   console.log(`speakers.self=${s.identity.self || '<unset>'}`)
   console.log(`speakers.known=${s.identity.knownCount}`)
   console.log(`scheduler=${s.agent.scheduler}`)
@@ -2721,7 +2761,7 @@ cli.command('list', 'List notes in a month')
   .action(listMeetings)
 
 cli.command('last', 'Print summary of most recent processed recording').action(lastMeeting)
-cli.command('jobs', 'Show processing status of recent recordings (live + done + failed)')
+cli.command('jobs', 'Show processing status of recordings (live + pending + done + summary_failed + failed + skipped)')
   .option('--limit <n>', 'How many to list', { default: 30 })
   .option('--json', 'Output as JSON (for the GUI)')
   .action((opts: { limit?: number; json?: boolean }) => jobsList(opts))

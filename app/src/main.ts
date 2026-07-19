@@ -44,13 +44,13 @@ type Status = {
   recorder: { dir: string; exists: boolean };
   volcano: { configured: true; tos: { bucket: string } } | { configured: false };
   pi: { auth: boolean };
-  proxy: { httpProxy: string | null };
+  proxy: { url: string | null };
   identity: { self: string | null };
   deps: { ffprobe: boolean };
   agent: { installed: boolean; logTail: string[] };
 };
 type Job = {
-  status: "processing" | "done" | "failed";
+  status: "processing" | "pending" | "done" | "summary_failed" | "failed" | "skipped";
   name: string;
   title: string | null;
   step?: string;
@@ -101,7 +101,7 @@ function renderStatus() {
   const s = status;
   box.appendChild(statusRow("ChatGPT", s.pi.auth ? "已连接" : "未登录", s.pi.auth ? "ok" : "err"));
   box.appendChild(statusRow("转写", s.volcano.configured ? `已配置 · ${s.volcano.tos.bucket}` : "未配置", s.volcano.configured ? "ok" : "err"));
-  box.appendChild(statusRow("代理", s.proxy.httpProxy ?? "未设置", s.proxy.httpProxy ? "ok" : "warn"));
+  box.appendChild(statusRow("代理", s.proxy.url ?? "未设置", s.proxy.url ? "ok" : "warn"));
   box.appendChild(statusRow("录音笔", s.recorder.exists ? "已插入" : "未检测到", s.recorder.exists ? "ok" : "muted"));
   box.appendChild(statusRow("音频工具", s.deps.ffprobe ? "就绪" : "缺失", s.deps.ffprobe ? "ok" : "err"));
   const btn = $("login-btn") as HTMLButtonElement;
@@ -111,8 +111,11 @@ function renderStatus() {
 // ── Jobs (processing status of each recording) ───────────────────────────────
 const JOB_META: Record<Job["status"], { label: string; tone: string }> = {
   processing: { label: "处理中", tone: "wait" },
+  pending: { label: "排队中", tone: "" },
   done: { label: "完成", tone: "ok" },
+  summary_failed: { label: "纪要待重试", tone: "err" },
   failed: { label: "失败", tone: "err" },
+  skipped: { label: "已忽略", tone: "" },
 };
 
 function renderJobs(jobs: Job[]) {
@@ -129,8 +132,10 @@ function renderJobs(jobs: Job[]) {
     return;
   }
   for (const j of jobs) {
-    const meta = JOB_META[j.status];
-    const openable = j.status === "done" && !!j.notes;
+    const meta = JOB_META[j.status] ?? { label: j.status, tone: "" };
+    // summary_failed's stub note links the saved transcript + retry command —
+    // openable so the user can actually reach them.
+    const openable = (j.status === "done" || j.status === "summary_failed") && !!j.notes;
     const card = document.createElement("button");
     card.className = "job-card";
     card.disabled = !openable;
@@ -146,7 +151,7 @@ function renderJobs(jobs: Job[]) {
     card.append(head, title);
 
     if (j.time) { const tm = document.createElement("div"); tm.className = "job-time"; tm.textContent = j.time; card.appendChild(tm); }
-    if (j.status === "failed" && j.reason) {
+    if (j.reason) {
       const r = document.createElement("div"); r.className = "job-reason"; r.textContent = j.reason; card.appendChild(r);
     }
     if (openable) card.addEventListener("click", () => openPath(j.notes!));
@@ -283,7 +288,12 @@ async function checkUpdate() {
   btn.disabled = true; installBtn.hidden = true; pendingUpdate = null;
   setStatus(st, "正在检查…", "wait");
   try {
-    const update = await check();
+    // Route the update check (and the download, which reuses these options)
+    // through the configured/system proxy — github.com is often unreachable
+    // directly from CN networks. If status never loaded (doctor failed), fetch
+    // it now rather than silently degrading to a direct connection.
+    if (!status) await refreshStatus();
+    const update = await check(status?.proxy.url ? { proxy: status.proxy.url } : undefined);
     if (!update) { setStatus(st, "已是最新版本", "ok"); return; }
     pendingUpdate = update;
     setStatus(st, `发现新版本 v${update.version}`, "");
