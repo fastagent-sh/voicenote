@@ -2086,6 +2086,7 @@ async function uninstallLaunchAgent(): Promise<void> {
 // ────────────────────────────────────────────────────────────────────────────
 
 function taskXmlPath(): string { return join(STATE_DIR, 'task.xml') }
+function taskVbsPath(): string { return join(STATE_DIR, 'run-hidden.vbs') }
 
 // Run via the interpreter currently executing us: process.execPath is the
 // absolute bun.exe (or the compiled vn.exe). Mirrors installLaunchAgent's
@@ -2115,6 +2116,16 @@ async function installScheduledTask(opts: { load?: boolean } = {}): Promise<void
     await writeFile(CONFIG_ENV_PATH, JSON.stringify(current, null, 2) + '\n')
   }
   const { command, argLine } = schedulerProgramArgs()
+  // bun.exe / vn.exe are console-subsystem: an InteractiveToken task flashes a
+  // console window on every tick. Launch through wscript with window style 0
+  // (hidden). wait=True keeps wscript alive for the duration of `vn run` so
+  // IgnoreNew still prevents overlap, and WScript.Quit propagates vn's exit
+  // code so the task's Last Run Result stays meaningful. UTF-16 BOM so
+  // non-ASCII paths survive (wscript reads BOM-less files as ANSI).
+  const fullCmd = `"${command}" ${argLine}`
+  const vbs = `WScript.Quit CreateObject("WScript.Shell").Run("${fullCmd.replace(/"/g, '""')}", 0, True)\r\n`
+  await writeFile(taskVbsPath(), '\ufeff' + vbs, 'utf16le')
+  const wscript = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe')
   // Register the task as the current user (DOMAIN\user; DOMAIN == machine name for
   // local accounts). Without an explicit <UserId>, `schtasks /create /xml` can't tell
   // who to register as and a standard (non-admin) user gets "Access is denied".
@@ -2163,8 +2174,8 @@ async function installScheduledTask(opts: { load?: boolean } = {}): Promise<void
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>${xmlEscape(command)}</Command>
-      <Arguments>${xmlEscape(argLine)}</Arguments>
+      <Command>${xmlEscape(wscript)}</Command>
+      <Arguments>${xmlEscape(`//B //Nologo "${taskVbsPath()}"`)}</Arguments>
     </Exec>
   </Actions>
 </Task>
@@ -2179,13 +2190,18 @@ async function installScheduledTask(opts: { load?: boolean } = {}): Promise<void
     return
   }
   console.log(`Scheduled task '${TASK_NAME}' installed — runs \`vn run\` every 60s at/after logon.`)
-  console.log(`Command: ${command} ${argLine}`)
+  console.log(`Command: ${command} ${argLine} (launched hidden via wscript)`)
   console.log('Note: the task reads config from config.json — set it with `vn config set` (or the GUI) so the background run is configured.')
   if (opts.load) await runCommand('schtasks', ['/run', '/tn', TASK_NAME], 10000)
 }
 
 async function uninstallScheduledTask(): Promise<void> {
   const r = await runCommand('schtasks', ['/delete', '/tn', TASK_NAME, '/f'], 10000)
+  // Remove our artifacts too: the VBS is the task's actual entry point, and a
+  // leftover copy could make schedulerIsCurrent misjudge a future install.
+  // Only when the task is actually gone — deleting the VBS while the task is
+  // still registered would turn every tick into a silent wscript failure.
+  if (r.code === 0) for (const p of [taskVbsPath(), taskXmlPath()]) { try { unlinkSync(p) } catch {} }
   console.log(r.code === 0 ? `Scheduled task '${TASK_NAME}' removed.` : `schtasks /delete: ${(r.stderr || r.stdout).trim()}`)
 }
 
@@ -2637,7 +2653,8 @@ async function schedulerIsCurrent(): Promise<boolean> {
   const exe = process.execPath
   if (IS_WINDOWS) {
     if ((await runCommand('schtasks', ['/query', '/tn', TASK_NAME], 10000)).code !== 0) return false
-    try { return readFileSync(taskXmlPath(), 'utf8').includes(exe) } catch { return false }
+    // The task XML points at wscript; the actual engine path lives in the VBS.
+    try { return readFileSync(taskVbsPath(), 'utf16le').includes(exe) } catch { return false }
   }
   try { return readFileSync(plistPath(), 'utf8').includes(exe) } catch { return false }
 }
