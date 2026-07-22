@@ -12,7 +12,8 @@ import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
 
 const VERSION = '0.17.6'
-const LAUNCH_AGENT_LABEL = 'com.kid7st.voicenote'
+const LAUNCH_AGENT_LABEL = 'sh.fastagent.voicenote'
+const LAUNCH_AGENT_LABEL_LEGACY = 'com.kid7st.voicenote' // pre-fastagent installs; cleaned up on install
 const TASK_NAME = 'VoiceNote'   // Windows Task Scheduler name (mac uses LAUNCH_AGENT_LABEL)
 
 // Single switch every platform branch routes through. Declared before the path
@@ -76,7 +77,7 @@ type VolcanoTosConfig = {
 }
 
 type VolcanoConfig = {
-  apiKey: string              // X-Api-Key（火山新版控制台）
+  apiKey: string              // X-Api-Key (new Volcano console)
   resourceId: string
   language?: string
   tos: VolcanoTosConfig
@@ -363,7 +364,7 @@ function pad(n: number): string { return String(n).padStart(2, '0') }
 
 function dateParts(d: Date): { month: string; prefix: string } {
   const month = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`
-  // 文件名里的本地时间只用 HH-MM（录音设备同一分钟内不可能产生两条录音）
+  // Local time in filenames uses HH-MM only (the recorder cannot produce two recordings within the same minute)
   const prefix = `${month}-${pad(d.getDate())}-${pad(d.getHours())}-${pad(d.getMinutes())}`
   return { month, prefix }
 }
@@ -409,7 +410,8 @@ async function appendJsonl(path: string, data: any): Promise<void> {
 }
 
 const SUMMARY_FAILED_STATUS = 'summary_failed_transcript_saved'
-const RAW_TRANSCRIPT_MARKER = '## 原始 transcript（不做 lossy 清洗）\n\n'
+const RAW_TRANSCRIPT_MARKER = '## Raw transcript (no lossy cleanup)\n\n'
+const RAW_TRANSCRIPT_MARKER_LEGACY = '## 原始 transcript（不做 lossy 清洗）\n\n' // pre-0.18 files on disk
 
 function isSummaryFailedEntry(entry: any): boolean {
   return entry?.status === SUMMARY_FAILED_STATUS
@@ -848,9 +850,9 @@ function resumableTranscriptFiles(config: Config, rec: Recording, state: Json, m
 
 async function readSavedTranscript(path: string): Promise<string> {
   const markdown = await readFile(path, 'utf8')
-  const markerAt = markdown.indexOf(RAW_TRANSCRIPT_MARKER)
-  if (markerAt < 0) throw new Error(`Cannot resume summary: saved transcript is missing raw transcript marker: ${path}`)
-  const transcript = markdown.slice(markerAt + RAW_TRANSCRIPT_MARKER.length).trim()
+  const marker = [RAW_TRANSCRIPT_MARKER, RAW_TRANSCRIPT_MARKER_LEGACY].find(m => markdown.includes(m))
+  if (!marker) throw new Error(`Cannot resume summary: saved transcript is missing raw transcript marker: ${path}`)
+  const transcript = markdown.slice(markdown.indexOf(marker) + marker.length).trim()
   if (!transcript) throw new Error(`Cannot resume summary: saved transcript is empty: ${path}`)
   return transcript
 }
@@ -859,7 +861,7 @@ async function removeFailedSummaryStub(path: string): Promise<void> {
   if (!existsSync(path)) return
   try {
     const body = await readFile(path, 'utf8')
-    if (body.startsWith('# 待补纪要：')) await unlink(path)
+    if (body.startsWith('# Pending summary: ') || body.startsWith('# 待补纪要：')) await unlink(path)
   } catch (e) { warnSideEffect(`remove failed-summary stub ${path}`, e) }
 }
 
@@ -881,7 +883,7 @@ async function titledLocalFiles(config: Config, rec: Recording, meta: Json, file
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// Volcano (豆包 ASR + TOS upload)
+// Volcano (Doubao ASR + TOS upload)
 // ───────────────────────────────────────────────────────────────────────
 
 function sha256Hex(data: Buffer | string): string {
@@ -1138,7 +1140,7 @@ async function volcanoTranscribeAudio(volc: VolcanoConfig, audioPath: string, re
         if (Date.now() - started > maxWaitMs) throw new Error(`Volcano: timeout after ${formatElapsed(Date.now() - started)} (last status=${q.status})`)
         continue
       }
-      if (q.status === '20000003') throw new Error('Volcano: 20000003 静音音频（未检测到人声）')
+      if (q.status === '20000003') throw new Error('Volcano: 20000003 silent audio (no speech detected)')
       throw new Error(`Volcano query failed: status=${q.status} message=${q.message}`)
     }
   } finally {
@@ -1154,96 +1156,98 @@ async function transcribeAudio(config: Config, audioPath: string, rec: Recording
 
 function speakerContextBlock(speakers: SpeakersConfig): string {
   const selfPart = speakers.self.name
-    ? `用户本人：${speakers.self.name}${speakers.self.aliases.length ? `（别名：${speakers.self.aliases.join('、')}）` : ''}`
-    : '用户本人姓名未配置。'
+    ? `The user: ${speakers.self.name}${speakers.self.aliases.length ? ` (aliases: ${speakers.self.aliases.join(', ')})` : ''}`
+    : "The user's name is not configured."
   const knownPart = speakers.known.length
-    ? speakers.known.map(k => `- ${k.name}${k.aliases?.length ? `（别名：${k.aliases.join('、')}）` : ''}${k.relationship ? `，${k.relationship}` : ''}`).join('\n')
-    : '（无其他已知说话人）'
-  return `Speaker context（用于尽可能把 Speaker A/B/C 还原成真实姓名，但只在证据充分时替换）：\n- ${selfPart}\n- 其他已知说话人：\n${knownPart}\n\n判断规则：\n- 录音只有一个说话人，且本人姓名已配置，可以把 Speaker A 视为本人。\n- 多人对话中若某说话人被其他人称呼为本人姓名/别名，则该说话人为本人。\n- 多人对话中若某说话人被其他人称呼为已知说话人的姓名/别名，则该说话人为该已知说话人。\n- 其他无法确认的，保留 Speaker A/B/C，不要硬猜。`
+    ? speakers.known.map(k => `- ${k.name}${k.aliases?.length ? ` (aliases: ${k.aliases.join(', ')})` : ''}${k.relationship ? `, ${k.relationship}` : ''}`).join('\n')
+    : '(no other known speakers)'
+  return `Speaker context (use it to map Speaker A/B/C back to real names, but only when the evidence is solid):\n- ${selfPart}\n- Other known speakers:\n${knownPart}\n\nRules:\n- If the recording has a single speaker and the user's name is configured, treat Speaker A as the user.\n- In multi-speaker conversations, if a speaker is addressed by the user's name/alias, that speaker is the user.\n- In multi-speaker conversations, if a speaker is addressed by a known speaker's name/alias, that speaker is that known person.\n- Otherwise keep Speaker A/B/C as-is; never guess.`
 }
 
 
 function summaryMessages(config: Config, transcript: string, rec: Recording, localAudioPath: string): { role: 'system' | 'user'; content: string }[] {
-  const readerName = config.speakers.self.name?.trim() || '用户'
-  const system = `你是${readerName}的个人语义整理助手，不是通用会议纪要模板生成器。
+  const readerName = config.speakers.self.name?.trim() || 'the user'
+  const system = `You are ${readerName}'s personal semantic note-taking assistant, not a generic meeting-minutes template generator.
 
-你的目标不是复刻“会议纪要”格式，而是把一段录音变成一份最高效的理解材料：让${readerName}快速知道这段讨论真正讲了什么、为什么重要、里面有什么思想/判断/事项、应该关注什么、后续该做什么。
+Your goal is not to reproduce a "meeting minutes" format, but to turn a recording into the most efficient understanding material: let ${readerName} quickly grasp what the discussion was really about, why it matters, what ideas/judgments/items it contains, what deserves attention, and what to do next.
 
-特别注意：不要只输出压缩后的“结论”。很多录音的价值正在于观点如何被提出、质疑、论证、修正，以及共识或分歧如何形成。你要在不机械复刻 transcript 的前提下，尽量还原重要发言者的观点、推理过程、争论过程、决策演化和共识形成过程。
+Important: do not output only compressed "conclusions". Much of a recording's value lies in how views were raised, challenged, argued, and revised, and how consensus or disagreement formed. Without mechanically copying the transcript, reconstruct the key speakers' views, reasoning, debates, decision evolution, and how consensus emerged.
 
-核心原则：
-1. 结构完全由内容决定。不要套用任何固定模板，不要为了形式输出固定章节。
-2. 优先抓“语义价值”，而不是逐段复述；但不要把过程压扁成结论。重要的思考、争论、验证、让步、反驳和共识形成过程，本身就是语义价值。
-3. 多人沟通必须尽量还原：各方最初关心的问题/立场、各自的理由和例子、谁提出了质疑或反驳、讨论如何转向、哪些观点被修正、最后形成了什么共识、哪些分歧仍未解决。
-4. 单人思考也要还原推理路径：问题如何被提出，假设如何被检验，为什么排除某些方案，哪些经验/类比支撑判断，最后为什么形成当前结论。
-5. 可以自由选择表达形态：短备忘、战略 memo、问题树、决策记录、行动清单、思维导图式层级、阶段复盘、争论复盘、学习笔记、产品/技术分析等；选最适合这段内容的一种或几种。
-6. 如果讨论是思想性/探索性的，重点帮助读者理解思路脉络、关键概念、推理链条、观点变化、值得回看的片段；不要硬拆待办。
-7. 如果讨论是执行性/项目性的，除了结论、事项、负责人、风险、下一步，也要说明这些结论是如何被讨论出来的：背景约束是什么、哪些方案被比较、为什么选择当前路径。
-8. 如果讨论很短，只输出最少但有用的内容；如果讨论很长，可以先给阅读指南，再展开。长内容宁可稍长，也不要丢掉关键推理和争论过程。
-9. 避免空话、套话和形式主义标题。每个标题都应该有信息量。
-10. transcript 中如果出现真实姓名（参考下方 Speaker context），直接用真实姓名；只在没把握时保留 Speaker A/B/C。
-11. 不确定或疑似转写错误的词要明确标注，不要当成事实。
-12. 默认是 Integrated notes mode：输入 transcript 可能没有经过单独清洗。你必须在生成内容前先在内部完成必要清理和梳理：纠正明显错别字、统一术语、还原 speaker、合并口语重复、修正标点和断句；但不要编造原文没有的信息，也不要把真实的思考过程清洗掉。
+Core principles:
+1. Structure is entirely determined by content. Do not apply any fixed template or emit fixed sections for form's sake.
+2. Prioritize semantic value over paragraph-by-paragraph retelling; but do not flatten the process into conclusions. Important thinking, debate, validation, concession, rebuttal, and consensus-building are themselves semantic value.
+3. Multi-person conversations must be reconstructed as much as possible: each side's initial concerns/positions, their reasons and examples, who raised challenges or rebuttals, how the discussion pivoted, which views were revised, what consensus formed, and which disagreements remain open.
+4. Solo thinking must also have its reasoning path reconstructed: how the question was raised, how hypotheses were tested, why some options were ruled out, which experience/analogies supported the judgment, and why the current conclusion formed.
+5. Freely choose the form: short memo, strategy memo, question tree, decision record, action list, mind-map-style hierarchy, phase review, debate review, study notes, product/technical analysis, etc.; pick whichever fits the content best.
+6. If the discussion is conceptual/exploratory, focus on helping the reader understand the train of thought, key concepts, reasoning chains, shifts in views, and passages worth revisiting; do not force-extract to-dos.
+7. If the discussion is execution/project-oriented, then besides conclusions, items, owners, risks, and next steps, also explain how those conclusions were reached: what constraints applied, which options were compared, and why the current path was chosen.
+8. If the discussion is short, output only the minimal useful content; if long, you may start with a reading guide and then expand. For long content, err on the side of length rather than dropping key reasoning and debates.
+9. Avoid filler, boilerplate, and formalistic headings. Every heading should carry information.
+10. If real names appear in the transcript (see Speaker context below), use them directly; keep Speaker A/B/C only when unsure.
+11. Explicitly flag uncertain or likely mis-transcribed words; do not treat them as facts.
+12. Default is Integrated notes mode: the input transcript may not have been separately cleaned. Before generating content, internally perform necessary cleanup: fix obvious typos, unify terminology, restore speakers, merge verbal repetition, fix punctuation and sentence breaks; but never invent information not in the source, and never scrub away the genuine thinking process.
 
-输出必须是合法 JSON，不要 markdown fence。
+Write all output content (title, markdown, structured fields) in the dominant language of the transcript.
+
+Output must be valid JSON, no markdown fences.
 
 ${speakerContextBlock(config.speakers)}`
 
-  const user = `请基于下面 transcript 生成一份“语义整理笔记”。
+  const user = `Generate a "semantic notes" document from the transcript below.
 
-处理模式：Integrated notes mode（不做单独 transcript 清洗；请在生成笔记时完成必要清理、纠错、梳理和 speaker 还原）
+Processing mode: Integrated notes mode (no separate transcript cleanup pass; perform necessary cleanup, error correction, organization, and speaker restoration while generating the notes)
 
-你要服务的阅读场景：
-- ${readerName}以后打开这篇笔记时，应该能立刻知道：这段录音值得看什么、核心思想/事项是什么、这些观点是如何讨论/论证出来的、哪些地方需要理解、哪些问题还没解决、下一步应该做什么。
-- 不要假设这一定是“会议”；它可能是自言自语、产品思考、技术讨论、商业判断、学习笔记、灵感记录、电话沟通或执行任务。
-- 不要参考飞书/通用会议纪要结构。markdown 的结构由内容语义决定。
-- 对多人讨论，笔记要能帮助${readerName}复盘“过程”：谁提出了什么问题，谁持什么观点，谁质疑了什么，如何回应，哪里发生了转折，最后如何形成共识或保留分歧。
-- 如果 transcript 中存在明显的讨论、争论、共同推演、方案比较或观点演化，markdown 正文必须有一个能承载“过程还原”的部分（标题自拟，例如“讨论如何展开”“观点如何演化”“争论与共识形成”），不能只写结论清单。
+The reading scenario you serve:
+- When ${readerName} opens these notes later, they should immediately know: what is worth reading in this recording, what the core ideas/items are, how those views were discussed/argued, what needs understanding, which questions remain open, and what to do next.
+- Do not assume this is a "meeting"; it may be thinking aloud, product ideation, a technical discussion, a business judgment, study notes, an idea capture, a phone call, or task execution.
+- Do not follow Feishu/generic meeting-minutes structures. The markdown structure is determined by the content's semantics.
+- For multi-person discussions, the notes should help ${readerName} review the process: who raised what question, who held what view, who challenged what, how it was answered, where the turning points were, and how consensus formed or disagreements remained.
+- If the transcript clearly contains discussion, debate, joint reasoning, option comparison, or evolving views, the markdown body must include a section that carries this "process reconstruction" (title up to you, e.g. "How the discussion unfolded", "How the views evolved", "Debate and consensus"); a bare conclusion list is not acceptable.
 
-录音信息：
-- 源文件：${rec.sourcePath}
-- 本地音频：${localAudioPath}
-- 录音文件名推断时间：${rec.recordedAt.toISOString()}
-- 文件大小：${rec.sizeBytes} bytes
-- 时长：${rec.durationSeconds} seconds
+Recording info:
+- Source file: ${rec.sourcePath}
+- Local audio: ${localAudioPath}
+- Time inferred from filename: ${rec.recordedAt.toISOString()}
+- File size: ${rec.sizeBytes} bytes
+- Duration: ${rec.durationSeconds} seconds
 
-请输出 JSON，字段如下：
+Output JSON with these fields:
 {
-  "title": "中文标题，尽量表达这段内容的真实主题和价值，不要泛泛写会议纪要",
+  "title": "A title in the transcript's language that captures the real topic and value; avoid generic 'meeting minutes' phrasing",
   "date": "YYYY-MM-DD",
   "start_time": "HH:mm|null",
   "end_time": "HH:mm|null",
-  "participants": ["只填写真实识别出的人名（包括用户本人姓名）；不要填写 Speaker A/B"],
+  "participants": ["Only actually identified real names (including the user's); never Speaker A/B"],
   "organizations": ["string"],
   "projects": ["string"],
-  "markdown": "完整 markdown 正文。必须从 # 标题 开始。结构完全由你根据语义设计，不要包含底部来源 details，系统会自动追加。",
-  "discussion_flow": [{"stage": "讨论阶段/主题", "what_happened": "这一阶段发生了什么", "speaker_positions": [{"speaker": "真实姓名或Speaker标签", "position": "观点/担忧/理由"}], "turning_point": "关键转折或观点变化|null", "outcome": "阶段性共识/分歧/未决|null"}],
-  "consensus_points": [{"point": "达成的共识", "how_reached": "这个共识是如何通过讨论/论证形成的|null"}],
-  "disagreements": [{"issue": "分歧点", "positions": [{"speaker": "真实姓名或Speaker标签", "position": "立场和理由"}], "status": "resolved|unresolved|partially_resolved|null"}],
+  "markdown": "Full markdown body. Must start with an # H1 title. Structure is entirely yours based on the semantics; do not include the trailing source details block, the system appends it.",
+  "discussion_flow": [{"stage": "discussion stage/topic", "what_happened": "what happened in this stage", "speaker_positions": [{"speaker": "real name or Speaker label", "position": "view/concern/reasoning"}], "turning_point": "key pivot or change of view|null", "outcome": "stage consensus/disagreement/open|null"}],
+  "consensus_points": [{"point": "consensus reached", "how_reached": "how this consensus formed through discussion/argument|null"}],
+  "disagreements": [{"issue": "point of disagreement", "positions": [{"speaker": "real name or Speaker label", "position": "stance and reasoning"}], "status": "resolved|unresolved|partially_resolved|null"}],
   "action_items": [{"task": "string", "owner": "string|null", "due_date": "YYYY-MM-DD|null", "priority": "high|medium|low|null", "note": "string|null"}],
-  "decisions": [{"decision": "string", "reason": "string|null", "owner": "string|null", "date": "YYYY-MM-DD|null", "how_reached": "这个决定是如何形成的|null"}],
+  "decisions": [{"decision": "string", "reason": "string|null", "owner": "string|null", "date": "YYYY-MM-DD|null", "how_reached": "how this decision was reached|null"}],
   "open_questions": [{"question": "string", "next_step": "string|null"}],
   "key_quotes_or_details": ["string"],
   "transcription_uncertainties": ["string"]
 }
 
-markdown 质量要求：
-- 第一屏要高信噪比：读者不用看完整 transcript，也能知道这段内容为什么值得保留。
-- 不要输出空章节；不要输出“无明确记录/未知/未识别”这类占位内容。
-- 不要强制包含“总结、待办、智能章节、关键决策、金句”等标题；只有语义上需要时才用。
-- 如果有行动项，用具体可执行语言；如果没有明确行动项，不要硬造。
-- 如果有思想/判断，写出推理链，而不只是结论。
-- 如果有讨论、争论或共同推演，必须保留关键过程：观点提出 → 质疑/补充 → 回应/反驳 → 修正/转向 → 共识/分歧。不要把这个过程压缩成一句“最终认为……”。
-- markdown 正文应优先使用自然语言复盘过程，不要只把 discussion_flow/consensus_points/disagreements 当 metadata 填完就结束；这些结构化字段只是辅助你思考和索引。
-- 对重要共识，说明它是怎么达成的；对重要分歧，说明谁持什么观点、理由是什么、有没有被解决。
-- 如果某个结论经历了方案比较或取舍，写出被比较的方案、判断标准、为什么放弃或选择。
-- 如果会议较长，可以按“主题/阶段”复盘，而不是流水账；但每个阶段要保留关键转折点和代表性发言者观点。
-- 如果有争议、风险、待验证假设，要明显标出。
-- 如果时间戳能帮助回看关键片段，可以少量使用；不要为了形式做完整时间线。
-- 如果 transcript 有不确定词，放在上下文里提醒读者，不要把不确定词当事实。
-- Integrated notes mode 下尤其要避免把原始转写里的口吃、重复、错别字直接搬进笔记；正文应呈现清理和梳理后的内容，同时保留真实的推理、争论和观点演化。
+Markdown quality requirements:
+- The first screen must have a high signal-to-noise ratio: the reader should know why this content is worth keeping without reading the full transcript.
+- No empty sections; no placeholder content like "no clear record / unknown / unidentified".
+- Do not force headings like "Summary, To-dos, Smart sections, Key decisions, Quotes"; use them only when semantically warranted.
+- If there are action items, use concrete actionable language; if there are none, do not fabricate any.
+- If there are ideas/judgments, write out the reasoning chain, not just conclusions.
+- If there was discussion, debate, or joint reasoning, preserve the key process: view raised → challenge/addition → response/rebuttal → revision/pivot → consensus/disagreement. Do not compress it into a single "in the end they concluded…".
+- The markdown body should primarily reconstruct the process in natural language; do not just fill discussion_flow/consensus_points/disagreements as metadata and stop — those structured fields only aid your thinking and indexing.
+- For important consensus, explain how it was reached; for important disagreements, state who held what view, why, and whether it was resolved.
+- If a conclusion went through option comparison or trade-offs, write out the compared options, the criteria, and why one was dropped or chosen.
+- For long meetings, review by topic/stage rather than as a running log, but keep each stage's key turning points and representative speakers' views.
+- Clearly flag controversies, risks, and unverified assumptions.
+- Timestamps may be used sparingly when they help revisit key passages; do not build a full timeline for form's sake.
+- If the transcript has uncertain words, surface them in context as reminders; do not treat them as facts.
+- In Integrated notes mode, especially avoid carrying stutters, repetitions, and typos from the raw transcript into the notes; the body should present cleaned, organized content while preserving the genuine reasoning, debates, and evolution of views.
 
-Transcript：
+Transcript:
 ${transcript}`
   return [{ role: 'system', content: system }, { role: 'user', content: user }]
 }
@@ -1585,7 +1589,7 @@ function summaryContextDir(config: Config): string {
 }
 
 function piSummaryToolsHint(contextDir: string): string {
-  return `你在写纪要前有 read 和 grep 两个只读工具可用。你的当前工作目录（cwd）就是 \`${contextDir}\`（已配置的纪要/资料目录），可直接用相对路径 grep/read。\n\n目标：用既有上下文对齐本次纪要的人名、speaker、客户/项目名、产品名和专有术语；不要维护或假设独立 glossary。\n\n推荐流程：\n- 先从标题、文件名、transcript 中提取最可能的客户/项目/产品关键词。\n- 若命中明确主题，优先 grep/read 相关主页、项目说明、状态记录或同目录最近 3-5 篇相关纪要；用这些材料确定 Speaker B/C/F 等人物、常见别名、产品名和术语写法。\n- 若未命中明确主题，再用关键词在当前目录内 grep，选择最相关的少量文件读取。\n- 输出前做一次人名/术语 lint：尽量消除残留 Speaker A/B/C、明显误听的人名、产品名变体和旧称；上下文不足时保留不确定项，不要硬猜。\n\n约束：\n- 总共最多 10 次工具调用；如果 transcript 本身信息足够，可完全不调用。\n- 只读 \`${contextDir}\` 范围内的内容；跳过明显涉及个人隐私/凭证/财务的目录（如 identity / credentials / finance 等）。\n- 查到的信息仅用于一致性和背景校准；不要把未在本次 transcript 中出现的内容当作新的会议事实写进纪要。\n- 不要尝试写文件或调用 bash（这些工具并未启用）。`
+  return `Before writing the notes you have two read-only tools: read and grep. Your current working directory (cwd) is \`${contextDir}\` (the configured notes/reference directory); use relative paths for grep/read.\n\nGoal: use existing context to align names, speakers, client/project names, product names, and domain terms in this note; do not maintain or assume a separate glossary.\n\nSuggested flow:\n- First extract the most likely client/project/product keywords from the title, filename, and transcript.\n- If a clear topic matches, prefer grep/read on related index pages, project docs, status records, or the 3-5 most recent related notes in the same directory; use them to identify Speaker B/C/F etc., common aliases, product names, and term spellings.\n- If no clear topic matches, grep the current directory with keywords and read only the few most relevant files.\n- Before output, do one names/terms lint pass: eliminate leftover Speaker A/B/C, obviously misheard names, product-name variants, and outdated names; when context is insufficient, keep the uncertainty — never guess.\n\nConstraints:\n- At most 10 tool calls total; if the transcript alone is sufficient, make none.\n- Read only within \`${contextDir}\`; skip directories that clearly involve personal privacy/credentials/finance (e.g. identity / credentials / finance).\n- Found information is only for consistency and background calibration; never write content absent from this transcript into the notes as new meeting facts.\n- Do not attempt to write files or call bash (those tools are not enabled).`
 }
 
 // Summary runs on the pi-codex backend. The agent's working dir IS the knowledge
@@ -1645,12 +1649,12 @@ function normalizeMetadata(meta: Json, rec: Recording): Json {
 
 const SOURCE_MARKER = '<!-- voicenote:source -->'
 function sourceDetails(meta: Json, audioPath: string, transcriptPath: string): string {
-  return `${SOURCE_MARKER}\n<details>\n<summary>来源信息</summary>\n\n- 纪要生成来源：voicenote 自动转写\n- 原始音频：\`${audioPath}\`\n- 完整转写：\`${transcriptPath}\`\n\n</details>`
+  return `${SOURCE_MARKER}\n<details>\n<summary>Source</summary>\n\n- Generated by: voicenote automatic transcription\n- Original audio: \`${audioPath}\`\n- Full transcript: \`${transcriptPath}\`\n\n</details>`
 }
 
 function markdownNotes(meta: Json, audioPath: string, transcriptPath: string): string {
-  let body = typeof meta.markdown === 'string' && meta.markdown.trim() ? meta.markdown.trim() : `# ${meta.title || '未命名录音纪要'}\n`
-  if (!body.startsWith('#')) body = `# ${meta.title || '未命名录音纪要'}\n\n${body}`
+  let body = typeof meta.markdown === 'string' && meta.markdown.trim() ? meta.markdown.trim() : `# ${meta.title || 'Untitled recording notes'}\n`
+  if (!body.startsWith('#')) body = `# ${meta.title || 'Untitled recording notes'}\n\n${body}`
   if (!body.includes(SOURCE_MARKER)) body = `${body.trim()}\n\n${sourceDetails(meta, audioPath, transcriptPath)}`
   return `${body.trim()}\n`
 }
@@ -1693,8 +1697,8 @@ details { margin-top: 2em; color: #57606a; font-size: 13px; }
 }
 
 function transcriptMarkdown(config: Config, rec: Recording, transcript: string, opts: { mode?: RunMode } = {}): string {
-  const transcribeBackend = `volcano 豆包 (资源为 ${config.volcano?.resourceId || 'volc.seedasr.auc'})`
-  return `# 录音转写：${basename(rec.sourcePath)}\n\n- 源文件：\`${rec.sourcePath}\`\n- 转写后端：${transcribeBackend}\n- 处理模式：${opts.mode || 'notes'}\n- 录音时间：${rec.recordedAt.toISOString()}\n- 文件大小：${rec.sizeBytes} bytes\n- 时长：${rec.durationSeconds ?? '未知'} seconds\n- 转写时间：${nowIso()}\n\n---\n\n## 原始 transcript（不做 lossy 清洗）\n\n${transcript.trim()}`
+  const transcribeBackend = `Volcano Doubao (resource ${config.volcano?.resourceId || 'volc.seedasr.auc'})`
+  return `# Transcript: ${basename(rec.sourcePath)}\n\n- Source file: \`${rec.sourcePath}\`\n- Transcription backend: ${transcribeBackend}\n- Mode: ${opts.mode || 'notes'}\n- Recorded at: ${rec.recordedAt.toISOString()}\n- File size: ${rec.sizeBytes} bytes\n- Duration: ${rec.durationSeconds ?? 'unknown'} seconds\n- Transcribed at: ${nowIso()}\n\n---\n\n${RAW_TRANSCRIPT_MARKER}${transcript.trim()}`
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1814,7 +1818,7 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
       console.log(`✓ PDF: ${pdf}`)
     }
   } else if (needsNotes && summaryError) {
-    const stubBody = `# 待补纪要：${basename(rec.sourcePath)}\n\n> ⚠ 转写已完成并保存，但纪要生成阶段失败，需人工重试。\n\n- 转写文件：\`${files.transcript}\`\n- 原始音频：\`${rec.sourcePath}\`\n- 失败原因：${meta.summary_error}\n- 重试命令：\`vn run --latest\`\n`
+    const stubBody = `# Pending summary: ${basename(rec.sourcePath)}\n\n> ⚠ Transcription completed and saved, but the summary stage failed; retry needed.\n\n- Transcript file: \`${files.transcript}\`\n- Original audio: \`${rec.sourcePath}\`\n- Failure reason: ${meta.summary_error}\n- Retry command: \`vn run --latest\`\n`
     await writeFile(files.notes, stubBody, 'utf8')
     console.log(`⚠ Stub notes (summary failed): ${files.notes}`)
   } else if (opts.pdf) {
@@ -2066,6 +2070,12 @@ ${envEntries}
   console.log(`Embedded env keys: ${summary}`)
   if (opts.load) {
     const uid = process.getuid?.()
+    // Remove the legacy-label agent so old installs don't double-run vn.
+    const legacyPlist = join(os.homedir(), 'Library', 'LaunchAgents', `${LAUNCH_AGENT_LABEL_LEGACY}.plist`)
+    if (existsSync(legacyPlist)) {
+      await runCommand('launchctl', ['bootout', `gui/${uid}/${LAUNCH_AGENT_LABEL_LEGACY}`], 10000)
+      await unlink(legacyPlist).catch(e => warnSideEffect(`remove legacy LaunchAgent ${legacyPlist}`, e))
+    }
     await runCommand('launchctl', ['bootout', `gui/${uid}`, plist], 10000) // ignore if not loaded
     const r = await runCommand('launchctl', ['bootstrap', `gui/${uid}`, plist], 10000)
     await runCommand('launchctl', ['enable', `gui/${uid}/${LAUNCH_AGENT_LABEL}`], 10000)
@@ -2358,12 +2368,12 @@ async function upgradeSelf(): Promise<void> {
   // `bun add -g` upgrades in place: verified no dependency loop on npm→npm re-add
   // (the steady-state upgrade path) nor on replacing an old git-ref install. No
   // remove-first, so a failed add leaves the running vn intact.
-  console.log(`$ ${cmd} add -g @kid7st/voicenote`)
+  console.log(`$ ${cmd} add -g @fastagent-sh/voicenote`)
   const addCode = await new Promise<number>(res =>
-    spawn(cmd, ['add', '-g', '@kid7st/voicenote'], { stdio: 'inherit', shell: IS_WINDOWS })
+    spawn(cmd, ['add', '-g', '@fastagent-sh/voicenote'], { stdio: 'inherit', shell: IS_WINDOWS })
       .on('close', c => res(c ?? 1)).on('error', () => res(1)))
   if (addCode !== 0) {
-    console.error(`Upgrade failed: \`${cmd} add -g @kid7st/voicenote\` exited ${addCode}. Your current install is unchanged; retry later.`)
+    console.error(`Upgrade failed: \`${cmd} add -g @fastagent-sh/voicenote\` exited ${addCode}. Your current install is unchanged; retry later.`)
     process.exitCode = 1
     return
   }
@@ -2514,15 +2524,15 @@ function currentJobFromLog(): { status: 'processing'; name: string; step: string
   const tail = readLogTail(agentLogPath(), 8192).split('\n')
   let name: string | null = null
   let processing = false
-  let step = '准备中'
+  let step = 'Preparing'
   for (const line of tail) {
     const m = line.match(/voicenote job:\s*(.+?)\s*===/)
-    if (m) { name = m[1]!; processing = true; step = '准备中'; continue }
+    if (m) { name = m[1]!; processing = true; step = 'Preparing'; continue }
     if (/✓ Completed|Idle:|ERROR processing/i.test(line)) processing = false
     if (processing) {
-      if (/Step 3|integrated semantic notes|generate/i.test(line)) step = '生成纪要中'
-      else if (/Step 2|Transcribe|Volcano|transcrib/i.test(line)) step = '转写中'
-      else if (/Step 1|Copy audio/i.test(line)) step = '准备中'
+      if (/Step 3|integrated semantic notes|generate/i.test(line)) step = 'Generating notes'
+      else if (/Step 2|Transcribe|Volcano|transcrib/i.test(line)) step = 'Transcribing'
+      else if (/Step 1|Copy audio/i.test(line)) step = 'Preparing'
     }
   }
   return processing && name ? { status: 'processing', name, step } : null
@@ -2560,7 +2570,7 @@ async function jobsListData(limit: number): Promise<{ items: Json[] }> {
     const isError = rawReason.startsWith('error')
     // Filter reasons are machine diagnostics (`too_small:1234<100000`); show a
     // human label instead. Error strings stay raw — that's the diagnostic.
-    const reason = rawReason.startsWith('too_small') ? '录音太小，已忽略' : rawReason.startsWith('too_short') ? '录音太短，已忽略' : (e.reason ?? null)
+    const reason = rawReason.startsWith('too_small') ? 'Recording too small, skipped' : rawReason.startsWith('too_short') ? 'Recording too short, skipped' : (e.reason ?? null)
     done.push({ status: isError ? 'failed' : 'skipped', name, title: null, at: e.seen_at ?? null, time: recTime(name, e.seen_at ?? null), reason, notes: null })
   }
   done.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')))
@@ -2588,7 +2598,7 @@ async function jobsListData(limit: number): Promise<{ items: Json[] }> {
     if (pending.length > PENDING_SHOWN) {
       const extra = pending.length - PENDING_SHOWN
       pending.length = PENDING_SHOWN
-      pending.push({ status: 'pending', name: `…还有 ${extra} 个排队中`, title: null, at: null, time: null, notes: null })
+      pending.push({ status: 'pending', name: `…${extra} more queued`, title: null, at: null, time: null, notes: null })
     }
   }
   // Don't double-list the live job if it's also in pending/done.
@@ -2706,11 +2716,11 @@ async function dispatchServe(req: any, send: (o: unknown) => void): Promise<void
             // abandoned flow keeps running muted (settled latch above). Two
             // consequences, both surfaced in the timeout message: a LATE
             // authorization still persists credentials silently (login may
-            // actually have succeeded — hence “点刷新确认”), and the dangling
+            // actually have succeeded — hence “refresh to confirm”), and the dangling
             // localhost callback server may hold its port until serve exits,
             // so an immediate retry can fail fast with a port-busy error.
             const timeout = new Promise<never>((_, rej) => {
-              const t = setTimeout(() => rej(new Error('登录超时：10 分钟内未完成授权。若刚刚已在浏览器完成授权，请点刷新确认登录状态；否则请重试')), 10 * 60 * 1000)
+              const t = setTimeout(() => rej(new Error('Login timed out: authorization was not completed within 10 minutes. If you just authorized in the browser, click Refresh to confirm login status; otherwise retry')), 10 * 60 * 1000)
               ;(t as any).unref?.()
             })
             await Promise.race([

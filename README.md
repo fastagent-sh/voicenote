@@ -1,87 +1,89 @@
-# @kid7st/voicenote
+# voicenote
 
 Voice recordings → diarized transcripts → integrated semantic Markdown notes.
 
-CLI 命令:`vn`
+CLI command: `vn`
 
-当前主要适配 PHILIPS VTR6500 录音设备,但工作流通用:扫描某个挂载点下的录音 → 转写并按说话人分离 → GPT 在纪要生成阶段内部完成必要清理与过程还原 → 生成智能纪要。
+[中文文档 / Chinese documentation](README.zh-CN.md)
 
-**两种用法:**
+Currently tuned for the PHILIPS VTR6500 voice recorder, but the workflow is generic: scan recordings under a mount point → transcribe with speaker diarization → GPT performs the necessary cleanup and process reconstruction inside the notes-generation stage → produce smart notes.
 
-- 🖥️ **桌面客户端(GUI)** -- 面向不用终端的用户,自包含 `.app`,一键安装:
+**Two ways to use it:**
+
+- 🖥️ **Desktop app (GUI)** — for non-terminal users, a self-contained `.app`, one-line install:
   ```bash
-  curl -fsSL https://raw.githubusercontent.com/kid7st/voicenote/main/scripts/install-app.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install-app.sh | bash
   ```
-  详见下方 [桌面客户端](#桌面客户端guiapp)。
-- ⌨️ **CLI(`vn`)** -- 面向终端用户/开发者,见下方「安装(CLI)」。
+  See [Desktop app](#desktop-app-gui-app) below.
+- ⌨️ **CLI (`vn`)** — for terminal users / developers, see "Install (CLI)" below.
 
-## 安装(CLI)
+## Install (CLI)
 
-> CLI 从 npm 包 `@kid7st/voicenote` 安装。下面的安装脚本 / `bun add -g` 均需该包**已发布到 npm** 后才可用(发布流程见文末「开发」)。
+> The CLI installs from the npm package `@fastagent-sh/voicenote`. The install script / `bun add -g` below require the package to be **published to npm** (see "Development" at the end for the release flow).
 
-推荐使用安装脚本(macOS):
+Recommended: the install script (macOS):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kid7st/voicenote/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install.sh | bash
 ```
 
-安装脚本默认**不做交互式配置**:先安装/检查 `ffmpeg`、Bun、Node/npm、pi、`vn`,然后生成可编辑的 `config.json` 模板。安装完成后打开配置文件填写密钥和姓名:
+The install script does **no interactive configuration** by default: it installs/checks `ffmpeg`, Bun, Node/npm, pi, and `vn`, then writes an editable `config.json` template. After installation, open the config file and fill in your keys and name:
 
 ```bash
 open ~/.config/voicenote/config.json
-# 或打开目录
+# or open the directory
 vn open config
 ```
 
-高级用户也可以用环境变量预填模板:
+Advanced users can preseed the template with environment variables:
 
 ```bash
-VOICENOTE_NAME="李元" \
-VOICENOTE_ALIAS="Vincent" \
+VOICENOTE_NAME="Jane Doe" \
+VOICENOTE_ALIAS="jane" \
 VOICENOTE_WORKSPACE="$HOME/Documents/meetings" \
 VOLCANO_ASR_KEY="..." \
 VOLCANO_TOS_BUCKET="..." \
 VOLCANO_TOS_ACCESS_KEY="..." \
 VOLCANO_TOS_SECRET_KEY="..." \
-bash <(curl -fsSL https://raw.githubusercontent.com/kid7st/voicenote/main/scripts/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install.sh)
 ```
 
-首次安装会生成 `~/.config/voicenote/config.json`。旧版本的 `speakers.json` 会被自动兼容读取/迁移到 `config.json.speakers`。配置完成后再运行 `vn doctor` 检查,需要后台自动监控时再运行 `vn install-launch-agent`。
+The first install creates `~/.config/voicenote/config.json`. A legacy `speakers.json` is still read for compatibility and migrated into `config.json.speakers`. Once configured, run `vn doctor` to check the environment, and `vn install-launch-agent` if you want background monitoring.
 
-手动安装:
+Manual install:
 
 ```bash
-bun add -g @kid7st/voicenote
+bun add -g @fastagent-sh/voicenote
 mkdir -p ~/.local/bin
 ln -sf ~/.bun/bin/vn ~/.local/bin/vn
 ```
 
-旧版(`git+…#main`)安装会被 `bun add -g @kid7st/voicenote` 直接替换,无需先卸载。
+An older `git+…#main` install is replaced in place by `bun add -g @fastagent-sh/voicenote`; no uninstall needed.
 
-### Windows(CLI)
+### Windows (CLI)
 
-CLI 已跨平台。前置:Bun、ffmpeg(提供 `ffprobe.exe`)、Node + pi。
+The CLI is cross-platform. Prerequisites: Bun, ffmpeg (provides `ffprobe.exe`), Node + pi.
 
 ```powershell
-bun add -g @kid7st/voicenote
-# Windows 无 /Volumes 挂载点,录音盘按盘符设置
+bun add -g @fastagent-sh/voicenote
+# Windows has no /Volumes mount points; set the recorder drive explicitly
 setx VOICENOTE_RECORD_DIR "E:\RECORD"
 ```
 
-- 配置:`%APPDATA%\voicenote\config.json`;日志/锁:`%LOCALAPPDATA%\voicenote\`
-- 后台自动化走 **Windows 任务计划程序**:`vn install-launch-agent` 注册 / `vn status` 查看 / `vn uninstall-launch-agent` 移除(命令名与 macOS 一致,内部按平台分派)
+- Config: `%APPDATA%\voicenote\config.json`; logs/locks: `%LOCALAPPDATA%\voicenote\`
+- Background automation uses the **Windows Task Scheduler**: `vn install-launch-agent` to register / `vn status` to inspect / `vn uninstall-launch-agent` to remove (same command names as macOS; dispatched per platform internally)
 
-## 依赖
+## Dependencies
 
-- **Bun >= 1.3(运行时必需)** -- 代码用到 `Bun.Glob` / `Bun.file`,纯 Node 无法运行
-- Node / npm -- 仅用于安装 pi CLI(pi-codex 后端)
-- ffmpeg / ffprobe(音频时长检测):
+- **Bun >= 1.3 (required at runtime)** — the code uses `Bun.Glob` / `Bun.file`; plain Node cannot run it
+- Node / npm — only used to install the pi CLI (pi-codex backend)
+- ffmpeg / ffprobe (audio duration detection):
 
 ```bash
 brew install ffmpeg
 ```
 
-安装脚本只会把 `vn` / Bun / Homebrew 的 PATH 写入当前 shell 配置;应用配置写在 `~/.config/voicenote/config.json`。手动配置时至少需要:
+The install script only writes `vn` / Bun / Homebrew PATH entries to your shell config; app configuration lives in `~/.config/voicenote/config.json`. A manual setup needs at least:
 
 ```json
 {
@@ -95,13 +97,13 @@ brew install ffmpeg
   "VOLCANO_TOS_SECRET_KEY": "...",
   "VOLCANO_TOS_KEEP": "0",
   "speakers": {
-    "self": { "name": "你的姓名", "aliases": ["你的别名", "英文名", "昵称"] },
+    "self": { "name": "Your name", "aliases": ["nickname", "alias"] },
     "known": []
   }
 }
 ```
 
-可选配置:
+Optional settings:
 
 ```json
 {
@@ -116,229 +118,229 @@ brew install ffmpeg
 }
 ```
 
-## 用法
+## Usage
 
 ```bash
-vn doctor                       # 检查环境与配置
-vn run                          # 默认:Volcano ASR + pi-codex 纪要
-vn run --mode transcript        # 只生成 transcript,跳过语义整理
-vn run --latest                 # 只处理最新有效录音
-vn run --latest --force         # 重跑最新条
-vn run --pdf                    # 生成纪要后额外渲染 PDF
-vn run --dry-run                # 仅列出计划
-vn list                         # 列出本月笔记
-vn list --month 2026-05         # 指定月份
-vn last                         # 打印最新处理摘要
-vn open                         # Finder 打开笔记目录
-vn open config                  # 打开 ~/.config/voicenote/
-vn open logs                    # 打开日志目录
-vn open <slug>                  # 按文件名片段打开纪要
-vn forget <id|filename>         # 让某条录音重新被处理
-vn log                          # 打印今天日志末尾(--lines N / -f 跟随 / --err 含 launchd.err / --date YYYY-MM-DD)
-vn errors                       # 打印最近 ERROR 日志
-vn login                        # 登录 ChatGPT(Codex 设备码流,纪要后端用;无需开 pi TUI)
+vn doctor                       # check environment and config
+vn run                          # default: Volcano ASR + pi-codex notes
+vn run --mode transcript        # transcript only, skip semantic notes
+vn run --latest                 # process only the latest valid recording
+vn run --latest --force         # re-run the latest one
+vn run --pdf                    # additionally render a PDF after notes
+vn run --dry-run                # print the plan only
+vn list                         # list this month's notes
+vn list --month 2026-05         # specific month
+vn last                         # print the latest processing summary
+vn open                         # open the notes directory in Finder
+vn open config                  # open ~/.config/voicenote/
+vn open logs                    # open the logs directory
+vn open <slug>                  # open a note by filename fragment
+vn forget <id|filename>         # let a recording be processed again
+vn log                          # print today's log tail (--lines N / -f follow / --err include launchd.err / --date YYYY-MM-DD)
+vn errors                       # print recent ERROR logs
+vn login                        # sign in to ChatGPT (Codex device-code flow, for the notes backend; no pi TUI needed)
 vn upgrade                      # reinstall latest npm package
 vn install-launch-agent
 vn status
 vn uninstall-launch-agent
 ```
 
-## 配置文件
+## Configuration file
 
-安装脚本会生成一个可编辑模板:
+The install script writes an editable template:
 
 ```text
-~/.config/voicenote/config.json     # workspace、Volcano ASR/TOS、summary 后端、本人姓名/别名等
+~/.config/voicenote/config.json     # workspace, Volcano ASR/TOS, summary backend, your name/aliases, etc.
 ```
 
-其中 `speakers` 用于把 Speaker A/B/C 还原成真实姓名,`known` 是已知联系人:
+`speakers` maps Speaker A/B/C back to real names; `known` lists known contacts:
 
 ```json
 {
   "speakers": {
-    "self": { "name": "你的姓名", "aliases": ["你的别名", "英文名", "昵称"] },
+    "self": { "name": "Your name", "aliases": ["nickname", "alias"] },
     "known": []
   }
 }
 ```
 
-修改后下一次 `vn run` 即生效。旧版 `~/.config/voicenote/speakers.json` 仍会作为兼容 fallback 读取。
+Changes take effect on the next `vn run`. A legacy `~/.config/voicenote/speakers.json` is still read as a compatibility fallback.
 
-## 工作流程
+## Workflow
 
-1. 扫描 `/Volumes/VTR6500/RECORD/` 下的录音
-2. 过滤:忽略 `._*`、小文件(<100KB)、短录音(<60s)、已完成录音;如果上次只是在 summary 阶段失败且 transcript 已保存,则不视为完成,会断点继续
-3. 复制原始音频到 `${VOICENOTE_WORKSPACE}/_audio/YYYY-MM/`
-4. 转写:火山豆包【大模型录音文件识别标准版 API】,本地音频先传到 TOS,提交任务后轮询结果,完成后默认删除 TOS 对象
-5. 转写完成后立刻落盘原始 transcript(不做 lossy 清洗),避免后面步骤失败导致 ASR 费用白付
-6. summary 模型(默认 pi codex 走 ChatGPT Plus)直接看原始 transcript,在纪要生成阶段内部完成必要清理、说话人还原、观点/争论/共识形成过程还原;如果 summary 失败,下一次 `vn run` / `vn run --latest` 会复用已保存 transcript,直接重试纪要生成,不需要 `vn forget`
-7. 写出 notes / metadata;系统不做任何归档决定,文件留在配置的 workspace 中
+1. Scan recordings under `/Volumes/VTR6500/RECORD/`
+2. Filter: ignore `._*`, small files (<100KB), short recordings (<60s), and already-processed recordings; if a previous run failed only at the summary stage and the transcript is saved, it is not considered done — processing resumes from there
+3. Copy the original audio into `${VOICENOTE_WORKSPACE}/_audio/YYYY-MM/`
+4. Transcribe with the Volcano Doubao large-model audio-file recognition API: upload local audio to TOS, submit the job, poll for results, and delete the TOS object by default when done
+5. Persist the raw transcript immediately after transcription (no lossy cleanup), so a later-stage failure never wastes the ASR spend
+6. The summary model (default: pi codex via ChatGPT Plus) reads the raw transcript directly, performing necessary cleanup, speaker restoration, and reconstruction of views/debates/consensus inside the notes-generation stage; if the summary fails, the next `vn run` / `vn run --latest` reuses the saved transcript and retries only the notes generation — no `vn forget` needed
+7. Write notes / metadata; the system makes no archiving decisions — files stay in the configured workspace
 
-## 输出位置
+## Output locations
 
-installer 默认设置:`VOICENOTE_WORKSPACE=~/Documents/meetings`。
+The installer defaults to `VOICENOTE_WORKSPACE=~/Documents/meetings`.
 
-- 笔记入口:`${VOICENOTE_WORKSPACE}/YYYY-MM/`
-- 原始音频:`${VOICENOTE_WORKSPACE}/_audio/YYYY-MM/`
-- 完整转写:`${VOICENOTE_WORKSPACE}/_transcripts/YYYY-MM/`
-- metadata:`${VOICENOTE_WORKSPACE}/_metadata/YYYY-MM/`
-- 状态:`${VOICENOTE_WORKSPACE}/_state/processed.json`
-- 索引:`${VOICENOTE_WORKSPACE}/_index/notes.jsonl`
+- Notes entry point: `${VOICENOTE_WORKSPACE}/YYYY-MM/`
+- Original audio: `${VOICENOTE_WORKSPACE}/_audio/YYYY-MM/`
+- Full transcripts: `${VOICENOTE_WORKSPACE}/_transcripts/YYYY-MM/`
+- Metadata: `${VOICENOTE_WORKSPACE}/_metadata/YYYY-MM/`
+- State: `${VOICENOTE_WORKSPACE}/_state/processed.json`
+- Index: `${VOICENOTE_WORKSPACE}/_index/notes.jsonl`
 
-## 自动化
+## Automation
 
-安装脚本可自动安装。手动安装:
+The install script can set this up automatically. Manual setup:
 
 ```bash
 vn install-launch-agent
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.kid7st.voicenote.plist 2>/dev/null || true
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.kid7st.voicenote.plist
-launchctl enable gui/$(id -u)/com.kid7st.voicenote
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/sh.fastagent.voicenote.plist 2>/dev/null || true
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/sh.fastagent.voicenote.plist
+launchctl enable gui/$(id -u)/sh.fastagent.voicenote
 vn status
 ```
 
-LaunchAgent 每 60 秒调用 `vn run`。没插录音笔时安全跳过;插上 VTR6500 后自动处理新录音。
+The LaunchAgent invokes `vn run` every 60 seconds. It skips safely when no recorder is plugged in; once the VTR6500 is connected, new recordings are processed automatically.
 
-> 配置改动（`config.json` 或 `~/.zshrc`）会被后台 agent 在下一次运行时自动读取，无需重装。plist 只快照真实环境变量和 pi 的绝对路径：**改了 `VOICENOTE_PI_BIN` 后需重跑 `vn install-launch-agent` 并 reload**（`vn upgrade` 会自动重生成 plist）。未登录 pi / ASR 未配置时，agent 会跳过处理而不会白烧 ASR。
+> Config changes (`config.json` or `~/.zshrc`) are picked up automatically by the background agent on its next run — no reinstall needed. The plist only snapshots real environment variables and pi's absolute path: **after changing `VOICENOTE_PI_BIN`, re-run `vn install-launch-agent` and reload** (`vn upgrade` regenerates the plist automatically). If pi is not signed in or ASR is not configured, the agent skips processing instead of burning ASR spend.
 >
-> 例外：若你在 shell 里直接 `export http_proxy=...`（而非用 `LOCAL_PROXY_HOST`）后跑 `vn install-launch-agent`，这个真实环境值会被快照进 plist 并持续覆盖后续对 `LOCAL_PROXY_HOST` 的修改；需重跑 `vn install-launch-agent` 才能清除。推荐统一用 `LOCAL_PROXY_HOST`/`LOCAL_PROXY_PORT` 配置代理。
+> Exception: if you `export http_proxy=...` directly in your shell (instead of using `LOCAL_PROXY_HOST`) and then run `vn install-launch-agent`, that real env value is snapshotted into the plist and keeps overriding later `LOCAL_PROXY_HOST` changes; re-run `vn install-launch-agent` to clear it. Prefer `LOCAL_PROXY_HOST`/`LOCAL_PROXY_PORT` for proxy configuration.
 
-日志:
+Logs:
 
 ```text
 ~/.local/state/voicenote/logs/launchd.out.log
 ~/.local/state/voicenote/logs/launchd.err.log
 ```
 
-## 开发
+## Development
 
 ```bash
-git clone https://github.com/kid7st/voicenote.git
+git clone https://github.com/fastagent-sh/voicenote.git
 cd voicenote
 bun install
 bun run typecheck
 bun src/cli.ts doctor
 ```
 
-分发:vn 以**源码**分发,没有构建步骤 —— 它只在 bun 上运行(shebang + `bun:ffi` + `engines.bun`),而 bun 原生跑 TypeScript,所以 `bin` 直接指向 `src/cli.ts`,npm tarball 只带 `src/{cli,envConfig,runLock}.ts`。安装脚本 / `vn upgrade` 从已发布的 npm 包安装(`bun add -g @kid7st/voicenote`);`git+https` 安装也能直接用(git 树自带源码,无需 build 或安装脚本)。
+Distribution: vn ships as **source** with no build step — it only runs on bun (shebang + `bun:ffi` + `engines.bun`), and bun runs TypeScript natively, so `bin` points straight at `src/cli.ts` and the npm tarball only contains `src/{cli,envConfig,runLock}.ts`. The install script / `vn upgrade` install from the published npm package (`bun add -g @fastagent-sh/voicenote`); a `git+https` install also works directly (the git tree carries the source; no build or install script needed).
 
-日常发布(打 tag 触发 CI):
+Routine release (tag triggers CI):
 
 ```bash
 npm version patch
 git push --follow-tags
 ```
 
-workflow 位于 `.github/workflows/release.yml`:CI 显式跑 typecheck/test/build + 产物冒烟,再 `npm publish --ignore-scripts`(确定发布,不依赖 lifecycle)。发布走 **npm trusted publishing(OIDC)**:免长期 token(`id-token: write` + npmjs.com 上配好 Trusted Publisher),自动带 provenance。本地裸 `npm publish` 则由 `prepublishOnly`(typecheck+test+build)兼底。
+The workflow lives at `.github/workflows/release.yml`: CI explicitly runs typecheck/test/build + an artifact smoke test, then `npm publish --ignore-scripts` (deterministic publishing, no lifecycle dependence). Publishing uses **npm trusted publishing (OIDC)**: no long-lived token (`id-token: write` + a Trusted Publisher configured on npmjs.com), with provenance attached automatically. A bare local `npm publish` is still guarded by `prepublishOnly` (typecheck+test+build).
 
-> **首发例外**:npm 无 pending-publisher,trusted publishing 发不了包的第一个版本。先本机 `npm login` 后手动 `npm publish --ignore-scripts` 发一次,再到 npmjs.com 包设置页加 Trusted Publisher(repo `kid7st/voicenote`、workflow `release.yml`),之后 CI 自动接管(需 npm 账号开 2FA)。
+> **First-release exception**: npm has no pending-publisher, so trusted publishing cannot publish a package's very first version. Publish once manually with `npm login` + `npm publish --ignore-scripts`, then add a Trusted Publisher on the package settings page at npmjs.com (repo `fastagent-sh/voicenote`, workflow `release.yml`); CI takes over afterwards (the npm account needs 2FA).
 
-## 桌面客户端(GUI,`app/`)
+## Desktop app (GUI, `app/`)
 
-面向**非终端用户的内部分发**:一个自包含的 macOS `.app`(Tauri v2),目标机器无需预装 bun / pi / ffprobe / 全局 `vn`。
+A self-contained macOS `.app` (Tauri v2) for **non-terminal users**: the target machine needs no pre-installed bun / pi / ffprobe / global `vn`.
 
-**定位**:GUI 只是「工作状态 dashboard + 产出快捷入口」,**不驱动处理**。真正的全流程由后台 LaunchAgent 用包内引擎每 60s 自主运行(关掉 GUI 也跑)。
+**Positioning**: the GUI is only a "status dashboard + quick access to output" — it does **not** drive processing. The full pipeline runs autonomously every 60s via the background LaunchAgent using the bundled engine (it keeps running with the GUI closed).
 
-- 首次:配置向导(身份 / Volcano keys / 代理)→ ChatGPT 登录(设备无终端,走 `vn login` 的浏览器回调流)
-- 之后:主界面显示 agent 活动 + 最近纪要(点开 / 打开文件夹)
+- First run: setup wizard (identity / Volcano keys / proxy) → ChatGPT sign-in (no terminal on the device; uses `vn login`'s browser-callback flow)
+- After that: the main view shows agent activity + recent notes (open note / open folder)
 
-### 打包内容
+### What's bundled
 
-`bun build --compile` 把 `vn` 引擎(含 bun 运行时 + pi-ai)编成单文件 sidecar;pi 不能 compile(运行时读磁盘数据文件),故整包随行,用一个随包的 `bun` 运行:
+`bun build --compile` compiles the `vn` engine (bun runtime + pi-ai included) into a single-file sidecar; pi cannot be compiled (it reads data files from disk at runtime), so the whole package ships alongside and runs with a bundled `bun`:
 
-| 组件 | 形式 | 用途 |
+| Component | Form | Purpose |
 |------|------|------|
-| `vn`(编译版) | externalBin | pipeline + ChatGPT 登录 |
-| `bun` | externalBin | 跑 pi |
-| `ffprobe`(原生 arm64 静态) | externalBin | 音频时长(pi 只用 ffprobe,不用整个 ffmpeg) |
-| `pi` + node_modules | resource | 纪要后端(ChatGPT Codex agent) |
+| `vn` (compiled) | externalBin | pipeline + ChatGPT sign-in |
+| `bun` | externalBin | runs pi |
+| `ffprobe` (native arm64 static) | externalBin | audio duration (pi only needs ffprobe, not all of ffmpeg) |
+| `pi` + node_modules | resource | notes backend (ChatGPT Codex agent) |
 
-运行时 Rust 生成一个 wrapper（`exec <包内bun> <包内pi/cli.js> "$@"`）并给 `vn` 注入 `VOICENOTE_PI_BIN` / `VOICENOTE_FFPROBE_BIN`。发布构建为 **universal**（x86_64 + arm64，vn/bun/ffprobe 各自 `lipo` 合并；pi 是 JS 无需）。
+At runtime, Rust generates a wrapper (`exec <bundled bun> <bundled pi/cli.js> "$@"`) and injects `VOICENOTE_PI_BIN` / `VOICENOTE_FFPROBE_BIN` into `vn`. Release builds are **universal** (x86_64 + arm64; vn/bun/ffprobe each merged with `lipo`; pi is JS and needs none).
 
-### 构建
+### Build
 
-前置:Rust + cargo、bun、node/npm、Xcode CLT,且**本机全局装有 pi**(`npm i -g @earendil-works/pi-coding-agent`,构建脚本从这里取 pi 整包)。
+Prerequisites: Rust + cargo, bun, node/npm, Xcode CLT, and **pi installed globally on the build machine** (`npm i -g @earendil-works/pi-coding-agent`; the build script stages pi from there).
 
 ```bash
 cd app
 bun install
 bun run tauri build
-# 产物:src-tauri/target/release/bundle/macos/VoiceNote.app
+# Output: src-tauri/target/release/bundle/macos/VoiceNote.app
 ```
 
-**Windows**(需在 Windows + Rust + MSVC C++ 生成工具上构建;WebView2 在 Win10/11 已预装,NSIS 由 Tauri 自动下载):
+**Windows** (build on Windows with Rust + MSVC C++ build tools; WebView2 is preinstalled on Win10/11, NSIS is downloaded by Tauri automatically):
 
 ```powershell
 cd app
 bun install
 bun run tauri build --config src-tauri/tauri.windows.conf.json
-# 产物:app\src-tauri\target\release\bundle\nsis\VoiceNote_<版本>_x64-setup.exe
+# Output: app\src-tauri\target\release\bundle\nsis\VoiceNote_<version>_x64-setup.exe
 ```
 
-Windows 用 `scripts/build-vn-sidecar.ps1` 暂存 `vn.exe`(`--windows-hide-console` 无控制台)/`bun.exe`/`ffprobe.exe` + pi;`tauri.windows.conf.json` 出 NSIS(currentUser 免管理员)。
+Windows uses `scripts/build-vn-sidecar.ps1` to stage `vn.exe` (`--windows-hide-console`, no console window) / `bun.exe` / `ffprobe.exe` + pi; `tauri.windows.conf.json` produces the NSIS installer (currentUser, no admin).
 
-`beforeBuildCommand` 会先跑 `scripts/build-vn-sidecar.sh` 暂存 vn/bun/ffprobe/pi(`binaries/`、`resources/` 均已 gitignore;pi/ffprobe 拷贝幂等)。开发调试用 `bun run tauri dev`(dev 模式直接跑 `../src/cli.ts`,不打包、不装后台 agent)。
+`beforeBuildCommand` first runs `scripts/build-vn-sidecar.sh` to stage vn/bun/ffprobe/pi (`binaries/` and `resources/` are gitignored; pi/ffprobe copying is idempotent). For development use `bun run tauri dev` (dev mode runs `../src/cli.ts` directly, no bundling, no background agent install).
 
-### 用户怎么安装(一键,推荐)
+### How users install (one line, recommended)
 
-> 与上面 CLI 的 `install.sh` 是两套:CLI 面向开发者(装 bun/pi/vn);这里是面向**非技术用户**的桌面 app(下载 .app → /Applications)。
+> This is separate from the CLI `install.sh` above: the CLI script targets developers (installs bun/pi/vn); this one targets **non-technical users** (download .app → /Applications).
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kid7st/voicenote/main/scripts/install-app.sh | bash
+curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install-app.sh | bash
 ```
 
-**Windows**(一键,免管理员):
+**Windows** (one line, no admin):
 
 ```powershell
-irm https://raw.githubusercontent.com/kid7st/voicenote/main/scripts/install-app.ps1 | iex
+irm https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install-app.ps1 | iex
 ```
 
-`install-app.ps1` 从 GitHub Release 下载 NSIS 安装器(自包含 vn/bun/ffprobe/pi)→ 静默装到 `%LOCALAPPDATA%`(无需管理员)→ 启动。
+`install-app.ps1` downloads the NSIS installer from the GitHub Release (self-contained vn/bun/ffprobe/pi) → silent install into `%LOCALAPPDATA%` (no admin) → launches it.
 
-`install-app.sh` 会:从 GitHub Releases 下载已打包的 `.app` → 装到 `/Applications` → **替用户去掉隔离标记**(未公证时绕过 Gatekeeper)→ 打开。目标机器无需 bun/pi/ffprobe/全局 vn(全内置)。
+`install-app.sh` downloads the packaged `.app` from GitHub Releases → installs to `/Applications` → **removes the quarantine flag for the user** (Gatekeeper bypass for un-notarized builds) → opens it. The target machine needs no bun/pi/ffprobe/global vn (all bundled).
 
-**首次打开**:应用落在「设置」页 → 填身份 + 自己的火山 ASR/TOS 密钥 + 代理(BYOK)→ 保存 → 「状态」面板点「登录 ChatGPT」(浏览器授权一次)。完成后 GUI 自动安装并加载后台 LaunchAgent(指向包内引擎),插上录音笔即自动转写+生成纪要。
+**First launch**: the app lands on Settings → fill in identity + your own Volcano ASR/TOS keys + proxy (BYOK) → save → click "Sign in to ChatGPT" in the Status panel (one-time browser authorization). The GUI then installs and loads the background LaunchAgent (pointing at the bundled engine); plug in the recorder and transcription + notes happen automatically.
 
-> 后台 agent label 是 `com.kid7st.voicenote`(与 CLI 版同名,机器上只保留一个)。`.app` 换位置后再打开一次即可重新校准 plist。
+> The background agent label is `sh.fastagent.voicenote` (same as the CLI version; only one exists per machine). If the `.app` is moved, open it once to recalibrate the plist.
 
-**升级**:0.1.9 起内置自动更新 —— 打开 app →「设置 → 软件更新」→「检查更新」，有新版点「下载并安装」，装好自动重启，配置/纪要均保留。首次安装、或从 0.1.8 及更早版本升级（它们还没有更新器），重跑上面的一键安装脚本即可。
+**Upgrades**: since 0.1.9 the app has a built-in updater — open the app → "Settings → Software update" → "Check for updates"; when a new version appears, click "Download & install"; the app restarts automatically with config/notes preserved. For first installs, or upgrades from 0.1.8 and earlier (which had no updater), re-run the one-line install script above.
 
-### 维护者:打包 + 发布
+### Maintainers: packaging + release
 
-**自动(推荐)**:打 `app-v*` tag 触发 `.github/workflows/release-app.yml`:
+**Automatic (recommended)**: push an `app-v*` tag to trigger `.github/workflows/release-app.yml`:
 
 ```bash
 git tag app-v0.1.0 && git push --tags
 ```
 
-**一个 `app-v*` tag = 一个 Release、带 mac + Windows 两平台**。`release-app.yml` 是单一 workflow：mac（universal + ad-hoc 深度签名）与 Windows（NSIS）并行构建，再由 `release` job 汇总发布。每个 Release 同时带：
+**One `app-v*` tag = one Release covering mac + Windows.** `release-app.yml` is a single workflow: mac (universal + ad-hoc deep signing) and Windows (NSIS) build in parallel, then the `release` job publishes. Each Release carries:
 
-- **首装包** `VoiceNote.zip`（mac）/ `VoiceNote-setup.exe`（win）—— `install-app.*` 从 `releases/latest/download/...` 取；
-- **更新器产物** `VoiceNote.app.tar.gz` + `latest.json` —— GUI 内 Tauri updater（设置→软件更新）用。
+- **First-install packages** `VoiceNote.zip` (mac) / `VoiceNote-setup.exe` (win) — fetched by `install-app.*` from `releases/latest/download/...`;
+- **Updater artifacts** `VoiceNote.app.tar.gz` + `latest.json` — used by the in-app Tauri updater (Settings → Software update).
 
-> 更新器需要签名 secrets `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（`tauri signer generate` 生成，公钥填 `tauri.conf.json`）；pubkey 还是占位符时 `preflight` job 会拦下发布。
+> The updater needs signing secrets `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (generated with `tauri signer generate`; the public key goes in `tauri.conf.json`); the `preflight` job blocks the release while the pubkey is still a placeholder.
 
-> 用 `app-v*`（与 CLI 的 `v*` npm 发布 tag 区分）。产物为 **universal**（x86_64 + arm64），Intel 与 Apple Silicon 通用。
+> Use `app-v*` (distinct from the CLI's `v*` npm release tags). Artifacts are **universal** (x86_64 + arm64), working on both Intel and Apple Silicon.
 
-**手动**:
+**Manual**:
 
 ```bash
 cd app
-bash scripts/package.sh          # → app/release/VoiceNote-<版本>.zip(约 110MB)
-gh release create app-v0.1.0 app/release/VoiceNote-<版本>.zip#VoiceNote.zip -t "VoiceNote 0.1.0" -n "桌面客户端"
+bash scripts/package.sh          # → app/release/VoiceNote-<version>.zip (~110MB)
+gh release create app-v0.1.0 app/release/VoiceNote-<version>.zip#VoiceNote.zip -t "VoiceNote 0.1.0" -n "Desktop app"
 ```
 
-资产名必须是 **`VoiceNote.zip`**(`install-app.sh` 从 `releases/latest/download/VoiceNote.zip` 取)。本地测试可绕过 Release:`VOICENOTE_APP_URL=file:///path/to/VoiceNote.zip bash scripts/install-app.sh`。
+The asset name must be **`VoiceNote.zip`** (`install-app.sh` fetches `releases/latest/download/VoiceNote.zip`). For local testing bypass the Release with: `VOICENOTE_APP_URL=file:///path/to/VoiceNote.zip bash scripts/install-app.sh`.
 
-### 签名 / 公证(免 `xattr`、双击即用)
+### Signing / notarization (no `xattr`, double-click to run)
 
-JIT entitlements 已就绪(`src-tauri/entitlements.plist`:bun/vn 的 `allow-jit` 等;`tauri.conf.json` 已引用)。`scripts/sign-macos.sh` 做 inside-out 深度签名(hardened runtime + entitlements):
+JIT entitlements are in place (`src-tauri/entitlements.plist`: `allow-jit` etc. for bun/vn; referenced from `tauri.conf.json`). `scripts/sign-macos.sh` performs inside-out deep signing (hardened runtime + entitlements):
 
 ```bash
-# 内部 ad-hoc(已验证 JIT 在 hardened runtime 下存活)
+# Internal ad-hoc (JIT verified to survive under hardened runtime)
 bash scripts/sign-macos.sh /Applications/VoiceNote.app
 
-# 正式分发(需 Apple Developer Program $99/年 的 Developer ID 证书)
+# Official distribution (requires a Developer ID certificate, Apple Developer Program $99/yr)
 bash scripts/sign-macos.sh VoiceNote.app "Developer ID Application: NAME (TEAMID)"
 xcrun notarytool submit ... && xcrun stapler staple VoiceNote.app
 ```

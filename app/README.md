@@ -1,16 +1,16 @@
-# VoiceNote 桌面客户端
+# VoiceNote desktop app
 
-自包含的 macOS GUI（Tauri v2）。定位:工作状态 dashboard + 纪要快捷入口;真正的转写/纪要由后台 LaunchAgent 用**包内引擎**自主运行。
+Self-contained macOS GUI (Tauri v2). Positioning: a status dashboard + quick access to notes; the actual transcription/notes pipeline runs autonomously via the background LaunchAgent using the **bundled engine**.
 
-完整说明(架构 / 打包内容 / 安装 / 分发 / 签名)见仓库根 `README.md` 的「桌面客户端」一节。
+Full documentation (architecture / bundle contents / install / distribution / signing) lives in the "Desktop app" section of the repo root `README.md`.
 
 ```bash
 bun install
-bun run tauri dev          # 开发(直接跑 ../src/cli.ts,不打包、不装后台 agent)
-bun run tauri build        # 仅构建 .app
-bash scripts/package.sh    # 构建 + 签名 + 压缩 → release/VoiceNote-<版本>.zip(发这个)
+bun run tauri dev          # development (runs ../src/cli.ts directly; no bundling, no background agent)
+bun run tauri build        # build the .app only
+bash scripts/package.sh    # build + sign + zip → release/VoiceNote-<version>.zip (ship this)
 ```
 
-- `scripts/build-vn-sidecar.sh` — 暂存 vn(编译版)/bun/ffprobe/pi 到 `binaries/`、`resources/`(已 gitignore)
-- `scripts/sign-macos.sh` — inside-out 深度签名(hardened runtime + JIT entitlements)
-- `src-tauri/entitlements.plist` — bun/vn 的 JIT entitlements
+- `scripts/build-vn-sidecar.sh` — stages vn (compiled) / bun / ffprobe / pi into `binaries/` and `resources/` (gitignored)
+- `scripts/sign-macos.sh` — inside-out deep signing (hardened runtime + JIT entitlements)
+- `src-tauri/entitlements.plist` — JIT entitlements for bun/vn

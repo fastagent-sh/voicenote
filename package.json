@@ -1,17 +1,17 @@
 {
-  "name": "@kid7st/voicenote",
+  "name": "@fastagent-sh/voicenote",
   "version": "0.17.8",
   "description": "Voice recordings → diarized transcripts → integrated semantic Markdown notes. Currently optimized for the PHILIPS VTR6500 recorder, but the workflow is generic.",
   "type": "module",
   "license": "MIT",
-  "author": "kid7st",
-  "homepage": "https://github.com/kid7st/voicenote",
+  "author": "fastagent-sh",
+  "homepage": "https://github.com/fastagent-sh/voicenote",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kid7st/voicenote.git"
+    "url": "git+https://github.com/fastagent-sh/voicenote.git"
   },
   "bugs": {
-    "url": "https://github.com/kid7st/voicenote/issues"
+    "url": "https://github.com/fastagent-sh/voicenote/issues"
   },
   "keywords": [
     "voice",

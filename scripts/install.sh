@@ -4,11 +4,11 @@ set -euo pipefail
 # voicenote installer for macOS
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/kid7st/voicenote/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install.sh | bash
 #
 # Optional preseed example (otherwise the installer writes editable templates):
-#   VOICENOTE_NAME="李元" \
-#   VOICENOTE_ALIAS="Vincent" \
+#   VOICENOTE_NAME="Jane Doe" \
+#   VOICENOTE_ALIAS="jane" \
 #   VOICENOTE_WORKSPACE="$HOME/Documents/meetings" \
 #   VOLCANO_ASR_KEY="..." \
 #   VOLCANO_TOS_BUCKET="..." \
@@ -16,7 +16,7 @@ set -euo pipefail
 #   VOLCANO_TOS_SECRET_KEY="..." \
 #   bash scripts/install.sh
 
-PACKAGE="@kid7st/voicenote"
+PACKAGE="@fastagent-sh/voicenote"
 WORKSPACE="${VOICENOTE_WORKSPACE:-$HOME/Documents/meetings}"
 INSTALL_LAUNCH_AGENT="${VOICENOTE_INSTALL_LAUNCH_AGENT:-}"
 
@@ -198,10 +198,10 @@ install_launch_agent() {
   fi
   log "Installing LaunchAgent"
   vn install-launch-agent
-  local plist="$HOME/Library/LaunchAgents/com.kid7st.voicenote.plist"
+  local plist="$HOME/Library/LaunchAgents/sh.fastagent.voicenote.plist"
   launchctl bootout "gui/$(id -u)" "$plist" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$plist"
-  launchctl enable "gui/$(id -u)/com.kid7st.voicenote"
+  launchctl enable "gui/$(id -u)/sh.fastagent.voicenote"
   vn status || true
 }
 

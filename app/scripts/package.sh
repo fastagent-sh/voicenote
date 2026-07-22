@@ -48,24 +48,24 @@ if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
 fi
 
 echo
-echo "✅ 成品: $APP/$OUT  ($(du -h "$OUT" | cut -f1))"
+echo "✅ Output: $APP/$OUT  ($(du -h "$OUT" | cut -f1))"
 echo
 if [ "$IDENTITY" = "-" ]; then
   cat <<EOF
-未公证(内部分发)。把 zip 发给用户,让其在终端粘贴这一行安装:
+Not notarized (internal distribution). Send the zip to users and have them paste this one line in a terminal:
 
   unzip -o ~/Downloads/VoiceNote-$VER.zip -d /Applications \\
     && xattr -dr com.apple.quarantine /Applications/VoiceNote.app \\
     && open /Applications/VoiceNote.app
 
-(那条 xattr 是未公证时绕过 Gatekeeper 的唯一手动步骤;做了 Developer ID 公证后即可省略,双击即用。)
+(The xattr line is the only manual Gatekeeper bypass for un-notarized builds; with Developer ID notarization it can be dropped — double-click just works.)
 EOF
 else
   cat <<EOF
-已用 Developer ID 签名。下一步公证后即可双击安装:
+Signed with Developer ID. Notarize next, then it installs by double-click:
 
   xcrun notarytool submit "$OUT" --keychain-profile <profile> --wait
   unzip -o "$OUT" -d /tmp && xcrun stapler staple /tmp/VoiceNote.app
-  # 重新 zip 已 staple 的 .app 再分发
+  # re-zip the stapled .app before distributing
 EOF
 fi

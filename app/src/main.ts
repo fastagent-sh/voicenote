@@ -11,25 +11,25 @@ type Field = { key: string; label: string; placeholder?: string; default?: strin
 type Group = { label: string; fields: Field[] };
 
 const GROUPS: Group[] = [
-  { label: "身份", fields: [
-    { key: "self_name", label: "你的名字", placeholder: "张续" },
-    { key: "self_aliases", label: "别名（逗号分隔，可选）", placeholder: "zack, 张总" },
+  { label: "Identity", fields: [
+    { key: "self_name", label: "Your name", placeholder: "Jane Doe" },
+    { key: "self_aliases", label: "Aliases (comma-separated, optional)", placeholder: "jane, JD" },
   ]},
-  { label: "录音与输出", fields: [
-    { key: "VOICENOTE_RECORD_DIR", label: "录音目录", placeholder: "留空=自动(macOS 的 VTR6500)；Windows 填盘符，如 E:\\RECORD" },
-    { key: "VOICENOTE_WORKSPACE", label: "纪要输出目录", default: "$HOME/Documents/meetings" },
+  { label: "Recording & output", fields: [
+    { key: "VOICENOTE_RECORD_DIR", label: "Recording directory", placeholder: "Empty = auto (VTR6500 on macOS); on Windows use a drive path like E:\\RECORD" },
+    { key: "VOICENOTE_WORKSPACE", label: "Notes output directory", default: "$HOME/Documents/meetings" },
   ]},
-  { label: "转写（火山 / 豆包）", fields: [
+  { label: "Transcription (Volcano / Doubao)", fields: [
     { key: "VOLCANO_ASR_KEY", label: "ASR Key", secret: true, required: true },
     { key: "VOLCANO_TOS_BUCKET", label: "TOS Bucket", required: true },
     { key: "VOLCANO_TOS_ACCESS_KEY", label: "TOS Access Key", secret: true, required: true },
     { key: "VOLCANO_TOS_SECRET_KEY", label: "TOS Secret Key", secret: true, required: true },
   ]},
-  { label: "网络代理（访问 ChatGPT 用；留空自动用系统代理）", fields: [
-    { key: "LOCAL_PROXY_HOST", label: "代理 Host（可选）", placeholder: "留空 = 跟随系统代理" },
-    { key: "LOCAL_PROXY_PORT", label: "代理 Port（可选）", placeholder: "留空 = 跟随系统代理" },
+  { label: "Network proxy (for reaching ChatGPT; empty = system proxy)", fields: [
+    { key: "LOCAL_PROXY_HOST", label: "Proxy host (optional)", placeholder: "Empty = follow system proxy" },
+    { key: "LOCAL_PROXY_PORT", label: "Proxy port (optional)", placeholder: "Empty = follow system proxy" },
   ]},
-  { label: "高级（一般用默认即可）", fields: [
+  { label: "Advanced (defaults are usually fine)", fields: [
     { key: "VOLCANO_ASR_RESOURCE_ID", label: "ASR Resource ID", default: "volc.seedasr.auc" },
     { key: "VOLCANO_TOS_REGION", label: "TOS Region", default: "cn-guangzhou" },
     { key: "VOLCANO_TOS_ENDPOINT", label: "TOS Endpoint", default: "tos-s3-cn-guangzhou.volces.com" },
@@ -72,14 +72,14 @@ function showScreen(which: "dash" | "settings") { $("dash").hidden = which !== "
 // ── Agent pill ───────────────────────────────────────────────────────────────
 function renderAgentPill(a: Status["agent"]) {
   const pill = $("agent-pill");
-  let text = "后台运行中", tone = "ok";
+  let text = "Agent running", tone = "ok";
   const last = (a.logTail ?? []).slice(-1)[0] ?? "";
-  if (!a.installed) { text = "后台未启用"; tone = "err"; }
-  else if (/ERROR|failed|失败/i.test(last)) { text = "后台出错 · 查看日志"; tone = "err"; }
-  else if (/Idle|no new recordings/i.test(last)) { text = "待命中 · 插上录音笔即自动处理"; tone = "ok"; }
-  else if (/transcrib|Volcano|Step 2|转写/i.test(last)) { text = "正在转写录音…"; tone = "wait"; }
-  else if (/generate|notes|Step 3|纪要/i.test(last)) { text = "正在生成纪要…"; tone = "wait"; }
-  else if (/Completed|✓|Queue|processing/i.test(last)) { text = "正在处理…"; tone = "wait"; }
+  if (!a.installed) { text = "Agent not enabled"; tone = "err"; }
+  else if (/ERROR|failed|失败/i.test(last)) { text = "Agent error · check logs"; tone = "err"; }
+  else if (/Idle|no new recordings/i.test(last)) { text = "Idle · plug in the recorder to process"; tone = "ok"; }
+  else if (/transcrib|Volcano|Step 2|转写/i.test(last)) { text = "Transcribing…"; tone = "wait"; }
+  else if (/generate|notes|Step 3|纪要/i.test(last)) { text = "Generating notes…"; tone = "wait"; }
+  else if (/Completed|✓|Queue|processing/i.test(last)) { text = "Processing…"; tone = "wait"; }
   pill.textContent = text; pill.className = `agent-pill ${tone}`;
 }
 
@@ -97,25 +97,25 @@ function statusRow(label: string, value: string, tone: "ok" | "warn" | "err" | "
 function renderStatus() {
   const box = $("status-rows");
   box.innerHTML = "";
-  if (!status) { box.appendChild(statusRow("状态", "检测中…", "muted")); return; }
+  if (!status) { box.appendChild(statusRow("Status", "Checking…", "muted")); return; }
   const s = status;
-  box.appendChild(statusRow("ChatGPT", s.pi.auth ? "已连接" : "未登录", s.pi.auth ? "ok" : "err"));
-  box.appendChild(statusRow("转写", s.volcano.configured ? `已配置 · ${s.volcano.tos.bucket}` : "未配置", s.volcano.configured ? "ok" : "err"));
-  box.appendChild(statusRow("代理", s.proxy.url ?? "未设置", s.proxy.url ? "ok" : "warn"));
-  box.appendChild(statusRow("录音笔", s.recorder.exists ? "已插入" : "未检测到", s.recorder.exists ? "ok" : "muted"));
-  box.appendChild(statusRow("音频工具", s.deps.ffprobe ? "就绪" : "缺失", s.deps.ffprobe ? "ok" : "err"));
+  box.appendChild(statusRow("ChatGPT", s.pi.auth ? "Connected" : "Not signed in", s.pi.auth ? "ok" : "err"));
+  box.appendChild(statusRow("Transcription", s.volcano.configured ? `Configured · ${s.volcano.tos.bucket}` : "Not configured", s.volcano.configured ? "ok" : "err"));
+  box.appendChild(statusRow("Proxy", s.proxy.url ?? "Not set", s.proxy.url ? "ok" : "warn"));
+  box.appendChild(statusRow("Recorder", s.recorder.exists ? "Connected" : "Not detected", s.recorder.exists ? "ok" : "muted"));
+  box.appendChild(statusRow("Audio tools", s.deps.ffprobe ? "Ready" : "Missing", s.deps.ffprobe ? "ok" : "err"));
   const btn = $("login-btn") as HTMLButtonElement;
-  btn.textContent = s.pi.auth ? "重新登录 ChatGPT" : "登录 ChatGPT";
+  btn.textContent = s.pi.auth ? "Re-sign in to ChatGPT" : "Sign in to ChatGPT";
 }
 
 // ── Jobs (processing status of each recording) ───────────────────────────────
 const JOB_META: Record<Job["status"], { label: string; tone: string }> = {
-  processing: { label: "处理中", tone: "wait" },
-  pending: { label: "排队中", tone: "" },
-  done: { label: "完成", tone: "ok" },
-  summary_failed: { label: "纪要待重试", tone: "err" },
-  failed: { label: "失败", tone: "err" },
-  skipped: { label: "已忽略", tone: "" },
+  processing: { label: "Processing", tone: "wait" },
+  pending: { label: "Queued", tone: "" },
+  done: { label: "Done", tone: "ok" },
+  summary_failed: { label: "Notes retry pending", tone: "err" },
+  failed: { label: "Failed", tone: "err" },
+  skipped: { label: "Skipped", tone: "" },
 };
 
 function renderJobs(jobs: Job[]) {
@@ -126,7 +126,7 @@ function renderJobs(jobs: Job[]) {
     e.className = "empty";
     e.innerHTML = `<div class="e-icon">🎙️</div>`;
     const p = document.createElement("p");
-    p.textContent = "还没有录音。插上录音笔，后台会自动转写并生成纪要，处理状态会显示在这里。";
+    p.textContent = "No recordings yet. Plug in the recorder and the agent will transcribe and generate notes automatically; progress shows up here.";
     e.appendChild(p);
     list.appendChild(e);
     return;
@@ -144,7 +144,7 @@ function renderJobs(jobs: Job[]) {
     const badge = document.createElement("span"); badge.className = `jbadge ${meta.tone}`;
     badge.textContent = j.status === "processing" && j.step ? `${meta.label} · ${j.step}` : meta.label;
     head.appendChild(badge);
-    if (openable) { const open = document.createElement("span"); open.className = "job-open"; open.textContent = "打开 ↗"; head.appendChild(open); }
+    if (openable) { const open = document.createElement("span"); open.className = "job-open"; open.textContent = "Open ↗"; head.appendChild(open); }
 
     const title = document.createElement("div"); title.className = "job-title";
     title.textContent = j.title || j.name;
@@ -178,12 +178,12 @@ async function refreshJobs(explicit = false) {
   // The try covers ONLY the engine round-trip: this catch feeds the state
   // machine's failure accounting, and a renderJobs/DOM bug recorded as an
   // engine failure would both corrupt that accounting (success then failure
-  // for one request) and misreport a frontend bug as “读取处理状态失败”.
+  // for one request) and misreport a frontend bug as an engine failure.
   let r: { items: Job[] };
   try {
     r = (await invoke("recent_jobs")) as { items: Job[] };
   } catch (e) {
-    if (jobsState.failure() === "error") renderError("notes-list", `读取处理状态失败：${e}`);
+    if (jobsState.failure() === "error") renderError("notes-list", `Failed to read processing status: ${e}`);
     else console.error("refreshJobs (background)", e); // poll/boot/post-save flow: keep last-good list
     return;
   }
@@ -200,9 +200,9 @@ async function refreshStatus(explicit = false) {
   } catch (e) {
     status = null;
     const pill = $("agent-pill");
-    pill.textContent = "状态读取失败";
+    pill.textContent = "Status check failed";
     pill.className = "agent-pill err";
-    renderError("status-rows", `读取状态失败：${e}`);
+    renderError("status-rows", `Failed to read status: ${e}`);
     // Still attempt the jobs refresh: an explicit refresh promised feedback,
     // and jobs may succeed (or surface its own error) even when doctor fails.
     void refreshJobs(explicit);
@@ -213,9 +213,9 @@ async function refreshStatus(explicit = false) {
   void refreshJobs(explicit);
 }
 
-// Manual "同步": re-detect the recorder (doctor) and, if present, kick off a
+// Manual "Sync": re-detect the recorder (doctor) and, if present, kick off a
 // processing run. Gives the explicit feedback the passive ↻ refresh doesn't —
-// device-not-found is the common "插入后识别不出、GUI 无反馈" case, so we say so
+// device-not-found is the common "plugged in but not recognized, no GUI feedback" case, so we say so
 // instead of silently doing nothing.
 async function syncNow() {
   const btn = $("sync-btn") as HTMLButtonElement;
@@ -225,20 +225,20 @@ async function syncNow() {
   // agent's real status until the next manual refresh.
   const st = $("sync-status");
   btn.disabled = true;
-  setStatus(st, "正在同步…", "wait");
+  setStatus(st, "Syncing…", "wait");
   try {
     // refreshStatus swallows doctor failures (sets status=null) instead of
     // throwing — so branch on `status`, don't rely on the catch below.
     await refreshStatus(true); // re-detect device (updates status rows) + refresh jobs
-    if (!status) { setStatus(st, "状态读取失败，请稍后重试", "err"); return; }
-    if (!status.recorder.exists) { setStatus(st, "未检测到录音笔 · 请重新插拔后再点同步", "err"); return; }
+    if (!status) { setStatus(st, "Failed to read status, retry later", "err"); return; }
+    if (!status.recorder.exists) { setStatus(st, "Recorder not detected · re-plug it and press Sync again", "err"); return; }
     await invoke("trigger_run"); // acks immediately; run proceeds in background
     // Neutral wording: a run may be deduped by acquireRunLock (a background
-    // tick already holds it), so don't promise "新录音会显示" — point at the
+    // tick already holds it), so don't promise "new recordings will appear" — point at the
     // list, which reflects whichever run is active.
-    setStatus(st, "已触发同步 · 处理进度见下方列表", "wait");
+    setStatus(st, "Sync triggered · progress shows in the list below", "wait");
   } catch (e) {
-    setStatus(st, `同步失败：${e}`, "err");
+    setStatus(st, `Sync failed: ${e}`, "err");
   } finally {
     btn.disabled = false;
   }
@@ -278,7 +278,7 @@ async function openSettings() { buildSettings(); showScreen("settings"); setStat
 let pendingUpdate: Update | null = null;
 
 async function showAppVersion() {
-  try { $("update-version").textContent = `当前版本 v${await getVersion()}`; } catch (e) { console.error("getVersion", e); }
+  try { $("update-version").textContent = `Current version v${await getVersion()}`; } catch (e) { console.error("getVersion", e); }
 }
 
 async function checkUpdate() {
@@ -286,7 +286,7 @@ async function checkUpdate() {
   const st = $("update-status");
   const installBtn = $("install-update-btn") as HTMLButtonElement;
   btn.disabled = true; installBtn.hidden = true; pendingUpdate = null;
-  setStatus(st, "正在检查…", "wait");
+  setStatus(st, "Checking…", "wait");
   try {
     // Route the update check (and the download, which reuses these options)
     // through the configured/system proxy — github.com is often unreachable
@@ -294,12 +294,12 @@ async function checkUpdate() {
     // it now rather than silently degrading to a direct connection.
     if (!status) await refreshStatus();
     const update = await check(status?.proxy.url ? { proxy: status.proxy.url } : undefined);
-    if (!update) { setStatus(st, "已是最新版本", "ok"); return; }
+    if (!update) { setStatus(st, "Already up to date", "ok"); return; }
     pendingUpdate = update;
-    setStatus(st, `发现新版本 v${update.version}`, "");
+    setStatus(st, `New version available: v${update.version}`, "");
     installBtn.hidden = false;
   } catch (e) {
-    setStatus(st, `检查更新失败：${e}`, "err");
+    setStatus(st, `Update check failed: ${e}`, "err");
   } finally {
     btn.disabled = false;
   }
@@ -318,15 +318,15 @@ async function installUpdate() {
     // quits the app to run the installer; on macOS we relaunch explicitly.
     await pendingUpdate.downloadAndInstall((e) => {
       switch (e.event) {
-        case "Started": total = e.data.contentLength ?? 0; setStatus(st, "开始下载…", "wait"); break;
-        case "Progress": got += e.data.chunkLength; setStatus(st, total ? `下载中 ${Math.round((got / total) * 100)}%` : `下载中 ${got} 字节`, "wait"); break;
-        case "Finished": setStatus(st, "下载完成，正在安装…", "wait"); break;
+        case "Started": total = e.data.contentLength ?? 0; setStatus(st, "Starting download…", "wait"); break;
+        case "Progress": got += e.data.chunkLength; setStatus(st, total ? `Downloading ${Math.round((got / total) * 100)}%` : `Downloading (${got} bytes)`, "wait"); break;
+        case "Finished": setStatus(st, "Downloaded, installing…", "wait"); break;
       }
     });
-    setStatus(st, "安装完成，正在重启…", "ok");
+    setStatus(st, "Installed, restarting…", "ok");
     await relaunch();
   } catch (e) {
-    setStatus(st, `更新失败：${e}`, "err");
+    setStatus(st, `Update failed: ${e}`, "err");
     installBtn.disabled = false; checkBtn.disabled = false;
   }
 }
@@ -345,7 +345,7 @@ async function loadConfig() {
   } catch (e) {
     settingsLoaded = false;
     ($("save-btn") as HTMLButtonElement).disabled = true;
-    setStatus($("settings-status"), `读取当前配置失败：${e} —— 为避免覆盖已有配置，保存已禁用；请返回后重新进入设置`, "err");
+    setStatus($("settings-status"), `Failed to read current config: ${e} — saving is disabled to avoid overwriting existing config; go back and reopen Settings`, "err");
     return;
   }
   settingsLoaded = true;
@@ -362,22 +362,22 @@ async function ensureAgent(force = false) { try { await invoke("ensure_agent", {
 
 async function saveSettings(e: Event) {
   e.preventDefault();
-  if (!settingsLoaded) { setStatus($("settings-status"), "配置尚未成功读取，保存被禁用（直接保存会清空已有配置）；请返回后重新进入设置", "err"); return; }
-  for (const f of ALL_FIELDS) { if (f.required && !(inputEl(f.key)?.value ?? "").trim()) { setStatus($("settings-status"), `请填写「${f.label}」`, "err"); return; } }
+  if (!settingsLoaded) { setStatus($("settings-status"), "Config was not loaded successfully; saving is disabled (it would wipe existing config). Go back and reopen Settings", "err"); return; }
+  for (const f of ALL_FIELDS) { if (f.required && !(inputEl(f.key)?.value ?? "").trim()) { setStatus($("settings-status"), `Please fill in "${f.label}"`, "err"); return; } }
   const env: Record<string, string | null> = {};
   for (const key of ENV_KEYS) { const v = (inputEl(key)?.value ?? "").trim(); env[key] = v === "" ? null : v; }
   const aliases = (inputEl("self_aliases")?.value ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   const self = { name: (inputEl("self_name")?.value ?? "").trim() || null, aliases };
   const btn = $("save-btn") as HTMLButtonElement;
   btn.disabled = true;
-  setStatus($("settings-status"), "保存中…", "wait");
+  setStatus($("settings-status"), "Saving…", "wait");
   try {
     await invoke("config_set", { payload: { env, self } });
     await ensureAgent(true);
     await refreshStatus();
     showScreen("dash");
   } catch (err) {
-    setStatus($("settings-status"), `保存失败：${err}`, "err");
+    setStatus($("settings-status"), `Save failed: ${err}`, "err");
   } finally {
     btn.disabled = false;
   }
@@ -400,22 +400,22 @@ function onLoginEvent(e: LoginEvent) {
   const st = $("login-status");
   switch (e.event) {
     case "auth_url":
-      setStatus(st, "已打开浏览器，授权后会自动完成…", "wait");
+      setStatus(st, "Browser opened; this completes automatically after you authorize…", "wait");
       ($("auth-link") as HTMLAnchorElement).dataset.url = e.url; $("auth-link-wrap").hidden = false; break;
     case "device_code":
-      setStatus(st, `请在 ${e.verificationUri} 输入：${e.userCode}`, "wait"); break;
+      setStatus(st, `Enter ${e.userCode} at ${e.verificationUri}`, "wait"); break;
     case "success":
-      loginSucceeded = true; setStatus(st, "✓ 登录成功", "ok"); $("auth-link-wrap").hidden = true; break;
+      loginSucceeded = true; setStatus(st, "✓ Signed in", "ok"); $("auth-link-wrap").hidden = true; break;
     case "error":
       // Terminal: end the login here so the follow-up `closed` hits the guard
-      // below and cannot overwrite this diagnostic with a generic “登录已退出”.
+      // below and cannot overwrite this diagnostic with a generic "login exited".
       loginRunning = false;
-      setStatus(st, `登录失败：${e.message}`, "err"); ($("login-btn") as HTMLButtonElement).disabled = false; break;
+      setStatus(st, `Sign-in failed: ${e.message}`, "err"); ($("login-btn") as HTMLButtonElement).disabled = false; break;
     case "closed":
       loginRunning = false; ($("login-btn") as HTMLButtonElement).disabled = false;
       if (loginSucceeded) ensureAgent(true).then(() => refreshStatus());
-      else if (e.reason === "engine-exited") setStatus(st, "后台引擎异常退出，登录已中止，请重试", "err");
-      else if (e.code !== 0) setStatus(st, `登录已退出（code=${e.code ?? "?"}）`, "err");
+      else if (e.reason === "engine-exited") setStatus(st, "Engine exited unexpectedly; sign-in aborted, please retry", "err");
+      else if (e.code !== 0) setStatus(st, `Sign-in exited (code=${e.code ?? "?"})`, "err");
       break;
   }
 }
@@ -424,8 +424,8 @@ function startLogin() {
   if (loginRunning) return;
   loginRunning = true; loginSucceeded = false;
   $("auth-link-wrap").hidden = true; ($("login-btn") as HTMLButtonElement).disabled = true;
-  setStatus($("login-status"), "正在启动登录…", "wait");
-  invoke("login_chatgpt").catch((err) => { loginRunning = false; setStatus($("login-status"), `无法启动：${err}`, "err"); ($("login-btn") as HTMLButtonElement).disabled = false; });
+  setStatus($("login-status"), "Starting sign-in…", "wait");
+  invoke("login_chatgpt").catch((err) => { loginRunning = false; setStatus($("login-status"), `Failed to start: ${err}`, "err"); ($("login-btn") as HTMLButtonElement).disabled = false; });
 }
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
@@ -444,7 +444,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   $("auth-link").addEventListener("click", (e) => { e.preventDefault(); const u = ($("auth-link") as HTMLAnchorElement).dataset.url; if (u) openUrl(u); });
 
   // The background agent retries/processes recordings on its own 60s tick;
-  // poll the jobs list so 失败→完成 transitions show up without a manual refresh.
+  // poll the jobs list so failed→done transitions show up without a manual refresh.
   // Chained (next tick scheduled only after the previous settles) so at most
   // one poll is in flight — a slow/wedged engine gets one pending request, not
   // a new one stacking every 10s. Deliberately NOT polled: the agent pill /
@@ -457,7 +457,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   pollJobs();
 
   buildSettings();
-  // Show the dashboard shell immediately (status rows read “检测中…”) so sidecar
+  // Show the dashboard shell immediately (status rows read “Checking…”) so sidecar
   // latency — bun cold start + `pi --version` — never leaves a blank window.
   showScreen("dash");
   renderStatus();

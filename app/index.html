@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="/src/styles.css" />
@@ -16,17 +16,17 @@
         <div class="brand">VoiceNote</div>
         <div class="topbar-right">
           <span id="agent-pill" class="agent-pill"></span>
-          <button id="sync-btn" class="icon-btn sync-btn" title="重新检测录音笔并立即处理">同步</button>
-          <button id="refresh-btn" class="icon-btn" title="刷新状态">↻</button>
-          <button id="settings-btn" class="icon-btn" title="设置">⚙</button>
+          <button id="sync-btn" class="icon-btn sync-btn" title="Re-detect the recorder and process now">Sync</button>
+          <button id="refresh-btn" class="icon-btn" title="Refresh status">↻</button>
+          <button id="settings-btn" class="icon-btn" title="Settings">⚙</button>
         </div>
       </header>
 
       <div class="dash">
         <main class="col col-notes">
           <div class="col-head">
-            <h2>处理状态</h2>
-            <a id="open-ws" href="#" class="text-link">打开纪要文件夹 ↗</a>
+            <h2>Processing</h2>
+            <a id="open-ws" href="#" class="text-link">Open notes folder ↗</a>
           </div>
           <p id="sync-status" class="status sync-status" role="status"></p>
           <div id="notes-list" class="notes"></div>
@@ -34,41 +34,41 @@
 
         <aside class="col col-side">
           <section class="panel">
-            <div class="panel-head"><h3>状态</h3></div>
+            <div class="panel-head"><h3>Status</h3></div>
             <div id="status-rows" class="status-rows"></div>
-            <button id="login-btn" class="btn btn-ghost btn-block" type="button">登录 ChatGPT</button>
+            <button id="login-btn" class="btn btn-ghost btn-block" type="button">Sign in to ChatGPT</button>
             <p id="login-status" class="status"></p>
             <p id="auth-link-wrap" class="muted sm" hidden>
-              浏览器没自动打开？<a id="auth-link" href="#" class="text-link">手动打开登录页</a>
+              Browser didn't open? <a id="auth-link" href="#" class="text-link">Open the sign-in page manually</a>
             </p>
           </section>
         </aside>
       </div>
     </section>
 
-    <!-- ─────────── Settings (独立页面) ─────────── -->
+    <!-- ─────────── Settings (standalone page) ─────────── -->
     <section id="settings" class="screen" hidden>
       <header class="topbar" data-tauri-drag-region>
-        <a id="settings-back" href="#" class="text-link back">‹ 返回</a>
-        <div class="brand-sm">设置</div>
+        <a id="settings-back" href="#" class="text-link back">‹ Back</a>
+        <div class="brand-sm">Settings</div>
         <span class="topbar-spacer"></span>
       </header>
       <form id="settings-form" class="settings-page" autocomplete="off">
         <div class="settings-inner">
           <div id="fields"></div>
           <section class="settings-group">
-            <div class="group-label">软件更新</div>
+            <div class="group-label">Software update</div>
             <div class="update-row">
               <span id="update-version" class="muted sm"></span>
-              <button type="button" id="check-update-btn" class="btn btn-ghost">检查更新</button>
+              <button type="button" id="check-update-btn" class="btn btn-ghost">Check for updates</button>
             </div>
             <p id="update-status" class="status"></p>
-            <button type="button" id="install-update-btn" class="btn btn-primary" hidden>下载并安装</button>
+            <button type="button" id="install-update-btn" class="btn btn-primary" hidden>Download &amp; install</button>
           </section>
         </div>
         <footer class="settings-foot">
           <p id="settings-status" class="status"></p>
-          <button type="submit" id="save-btn" class="btn btn-primary btn-wide">保存配置</button>
+          <button type="submit" id="save-btn" class="btn btn-primary btn-wide">Save</button>
         </footer>
       </form>
     </section>

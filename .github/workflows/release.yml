@@ -48,7 +48,7 @@ jobs:
         run: npm install -g npm@latest
 
       # Token-free: OIDC (id-token: write) + a Trusted Publisher configured on
-      # npmjs.com (repo kid7st/voicenote, workflow release.yml). Provenance is
+      # npmjs.com (repo fastagent-sh/voicenote, workflow release.yml). Provenance is
       # generated automatically. NOTE: npm has no pending-publisher, so the FIRST
       # version must be published manually once before this workflow can take over.
       - name: Publish
