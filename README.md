@@ -109,6 +109,7 @@ Optional settings:
 {
   "VOICENOTE_DEVICE_VOLUME": "VTR6500",
   "VOICENOTE_RECORD_DIR": "/Volumes/VTR6500/RECORD",
+  "VOICENOTE_MAX_AGE_HOURS": "48",
   "VOICENOTE_PI_BIN": "pi",
   "VOICENOTE_PI_PROVIDER": "openai-codex,openai",
   "VOICENOTE_PI_MODEL": "gpt-5.5",

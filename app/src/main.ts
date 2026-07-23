@@ -18,6 +18,7 @@ const GROUPS: Group[] = [
   { label: "Recording & output", fields: [
     { key: "VOICENOTE_RECORD_DIR", label: "Recording directory", placeholder: "Empty = auto (VTR6500 on macOS); on Windows use a drive path like E:\\RECORD" },
     { key: "VOICENOTE_WORKSPACE", label: "Notes output directory", default: "$HOME/Documents/meetings" },
+    { key: "VOICENOTE_MAX_AGE_HOURS", label: "Only process recordings from the last N hours (0 = no limit)", default: "48" },
   ]},
   { label: "Transcription (Volcano / Doubao)", fields: [
     { key: "VOLCANO_ASR_KEY", label: "ASR Key", secret: true, required: true },

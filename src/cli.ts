@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
 
-const VERSION = '0.17.6'
+const VERSION = '0.17.9'
 const LAUNCH_AGENT_LABEL = 'sh.fastagent.voicenote'
 const LAUNCH_AGENT_LABEL_LEGACY = 'com.kid7st.voicenote' // pre-fastagent installs; cleaned up on install
 const TASK_NAME = 'VoiceNote'   // Windows Task Scheduler name (mac uses LAUNCH_AGENT_LABEL)
@@ -89,6 +89,7 @@ type Config = {
   workspace: string
   minBytes: number
   minDurationSeconds: number
+  maxAgeHours: number
   speakers: SpeakersConfig
   volcano: VolcanoConfig | null
 }
@@ -111,6 +112,7 @@ const ENV_KEYS = [
   'VOICENOTE_WORKSPACE',
   'VOICENOTE_MIN_BYTES',
   'VOICENOTE_MIN_DURATION_SECONDS',
+  'VOICENOTE_MAX_AGE_HOURS',
   'VOLCANO_ASR_KEY',
   'VOLCANO_ASR_RESOURCE_ID',
   'VOLCANO_ASR_LANGUAGE',
@@ -286,6 +288,9 @@ function getConfig(): Config {
     workspace: expandHome(process.env.VOICENOTE_WORKSPACE || '~/Documents/meetings'),
     minBytes: Number(process.env.VOICENOTE_MIN_BYTES || 100000),
     minDurationSeconds: Number(process.env.VOICENOTE_MIN_DURATION_SECONDS || 60),
+    // Only recordings from the last N hours are picked up (0 = no limit), so a
+    // fresh install doesn't drain the recorder's entire history.
+    maxAgeHours: Number(process.env.VOICENOTE_MAX_AGE_HOURS || 48),
     volcano: getVolcanoConfigFromEnv(),
     speakers: loadSpeakers(),
   }
@@ -810,6 +815,8 @@ function shouldSkip(rec: Recording, state: Json, config: Config, force: boolean,
     if (mode === 'notes' && isSummaryFailedEntry(processed)) return [false, '']
     return [true, 'already_processed']
   }
+  const ageHours = (Date.now() - rec.recordedAt.getTime()) / 3600_000
+  if (config.maxAgeHours > 0 && ageHours > config.maxAgeHours) return [true, `too_old:${ageHours.toFixed(0)}h>${config.maxAgeHours}h`]
   if (rec.sizeBytes < config.minBytes) return [true, `too_small:${rec.sizeBytes}<${config.minBytes}`]
   if (rec.durationSeconds !== null && rec.durationSeconds < config.minDurationSeconds) return [true, `too_short:${rec.durationSeconds.toFixed(1)}<${config.minDurationSeconds}`]
   return [false, '']
@@ -2570,7 +2577,7 @@ async function jobsListData(limit: number): Promise<{ items: Json[] }> {
     const isError = rawReason.startsWith('error')
     // Filter reasons are machine diagnostics (`too_small:1234<100000`); show a
     // human label instead. Error strings stay raw — that's the diagnostic.
-    const reason = rawReason.startsWith('too_small') ? 'Recording too small, skipped' : rawReason.startsWith('too_short') ? 'Recording too short, skipped' : (e.reason ?? null)
+    const reason = rawReason.startsWith('too_small') ? 'Recording too small, skipped' : rawReason.startsWith('too_short') ? 'Recording too short, skipped' : rawReason.startsWith('too_old') ? 'Recording too old, skipped' : (e.reason ?? null)
     done.push({ status: isError ? 'failed' : 'skipped', name, title: null, at: e.seen_at ?? null, time: recTime(name, e.seen_at ?? null), reason, notes: null })
   }
   done.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')))
@@ -2585,6 +2592,7 @@ async function jobsListData(limit: number): Promise<{ items: Json[] }> {
   if (existsSync(config.recordDir)) {
     for await (const file of new Bun.Glob('**/*').scan({ cwd: config.recordDir, absolute: true, dot: true })) {
       if (!isCandidateFile(file) || knownPaths.has(file)) continue
+      if (config.maxAgeHours > 0 && Date.now() - parseRecordedAt(file).getTime() > config.maxAgeHours * 3600_000) continue
       const st = await stat(file).catch(() => null)
       if (!st?.isFile() || st.size < config.minBytes) continue
       const name = basename(file)
