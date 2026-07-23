@@ -17,6 +17,7 @@ set -euo pipefail
 #   bash scripts/install.sh
 
 PACKAGE="@fastagent-sh/voicenote"
+LEGACY_PACKAGES=("@kid7st/voicenote")  # pre-rebrand names; same `vn` bin → must be removed to avoid a stale symlink
 WORKSPACE="${VOICENOTE_WORKSPACE:-$HOME/Documents/meetings}"
 INSTALL_LAUNCH_AGENT="${VOICENOTE_INSTALL_LAUNCH_AGENT:-}"
 
@@ -170,7 +171,20 @@ install_deps() {
   fi
 }
 
+remove_legacy() {
+  # Pre-rebrand packages ship the same `vn` bin, so a leftover install can win the
+  # PATH lookup and mask the new one. Best-effort remove from both bun and npm.
+  for pkg in "${LEGACY_PACKAGES[@]}"; do
+    if bun pm ls -g 2>/dev/null | grep -q "$pkg" || npm ls -g "$pkg" >/dev/null 2>&1; then
+      log "Removing legacy package $pkg (superseded by $PACKAGE)"
+      bun remove -g "$pkg" 2>/dev/null || true
+      npm uninstall -g "$pkg" 2>/dev/null || true
+    fi
+  done
+}
+
 install_voicenote() {
+  remove_legacy
   log "Installing voicenote from npm package $PACKAGE"
   # `bun add -g` upgrades in place: verified no dependency loop on npm→npm re-add
   # nor on replacing an old git-ref install (git→npm). On failure it leaves the

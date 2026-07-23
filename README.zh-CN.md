@@ -53,18 +53,20 @@ bash <(curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/
 手动安装:
 
 ```bash
+bun remove -g @kid7st/voicenote 2>/dev/null || true   # 若装过改名前的旧包则清掉(没装则安全跳过)
 bun add -g @fastagent-sh/voicenote
 mkdir -p ~/.local/bin
 ln -sf ~/.bun/bin/vn ~/.local/bin/vn
 ```
 
-旧版(`git+…#main`)安装会被 `bun add -g @fastagent-sh/voicenote` 直接替换,无需先卸载。
+旧版(`git+…#main`)安装会被 `bun add -g @fastagent-sh/voicenote` 直接替换,无需先卸载。唯一例外是**改名前的 `@kid7st/voicenote`** 包:它带同一个 `vn` 命令,所以上面的 `bun remove -g` 会先清掉它(一键 `install.sh` 会自动处理)。
 
 ### Windows(CLI)
 
 CLI 已跨平台。前置:Bun、ffmpeg(提供 `ffprobe.exe`)、Node + pi。
 
 ```powershell
+bun remove -g @kid7st/voicenote 2>$null   # 若装过改名前的旧包则清掉(没装则安全跳过)
 bun add -g @fastagent-sh/voicenote
 # Windows 无 /Volumes 挂载点,录音盘按盘符设置
 setx VOICENOTE_RECORD_DIR "E:\RECORD"

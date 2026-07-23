@@ -53,18 +53,20 @@ The first install creates `~/.config/voicenote/config.json`. A legacy `speakers.
 Manual install:
 
 ```bash
+bun remove -g @kid7st/voicenote 2>/dev/null || true   # drop the pre-rebrand package if present (safe no-op otherwise)
 bun add -g @fastagent-sh/voicenote
 mkdir -p ~/.local/bin
 ln -sf ~/.bun/bin/vn ~/.local/bin/vn
 ```
 
-An older `git+…#main` install is replaced in place by `bun add -g @fastagent-sh/voicenote`; no uninstall needed.
+An older `git+…#main` install is replaced in place by `bun add -g @fastagent-sh/voicenote`. The one exception is the **pre-rebrand `@kid7st/voicenote`** package: it ships the same `vn` bin, so the `bun remove -g` line above clears it first (the one-line `install.sh` does this automatically).
 
 ### Windows (CLI)
 
 The CLI is cross-platform. Prerequisites: Bun, ffmpeg (provides `ffprobe.exe`), Node + pi.
 
 ```powershell
+bun remove -g @kid7st/voicenote 2>$null   # drop the pre-rebrand package if present (safe no-op otherwise)
 bun add -g @fastagent-sh/voicenote
 # Windows has no /Volumes mount points; set the recorder drive explicitly
 setx VOICENOTE_RECORD_DIR "E:\RECORD"
