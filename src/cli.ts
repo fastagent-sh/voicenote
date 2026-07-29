@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
 
-const VERSION = '0.18.0'
+const VERSION = '0.18.1'
 const LAUNCH_AGENT_LABEL = 'sh.fastagent.voicenote'
 const LAUNCH_AGENT_LABEL_LEGACY = 'com.kid7st.voicenote' // pre-fastagent installs; cleaned up on install
 const TASK_NAME = 'VoiceNote'   // Windows Task Scheduler name (mac uses LAUNCH_AGENT_LABEL)
@@ -2718,6 +2718,11 @@ async function collectDoctor() {
     // still route the updater.
     proxy: { url: process.env.https_proxy || process.env.HTTPS_PROXY || process.env.http_proxy || process.env.HTTP_PROXY || null },
     identity: { self: config.speakers.self.name || null, aliases: config.speakers.self.aliases, knownCount: config.speakers.known.length },
+    // The thresholds that silently decide what never gets processed. Without
+    // them here, confirming a change to VOICENOTE_MAX_AGE_HOURS meant planting
+    // a test recording and watching the scan — not a reasonable way to check
+    // a setting.
+    filters: { maxAgeHours: config.maxAgeHours, minBytes: config.minBytes, minDurationSeconds: config.minDurationSeconds },
     deps: { ffprobe: ff.code === 0 },
     agent: await agentStatus(),
   }
@@ -2763,6 +2768,7 @@ async function doctor(opts: { json?: boolean } = {}): Promise<void> {
   console.log(`node=${s.node}`)
   console.log(`recordDir=${s.recorder.dir} exists=${s.recorder.exists}`)
   console.log(`workspace=${s.workspace}`)
+  console.log(`filters=maxAge:${s.filters.maxAgeHours > 0 ? `${s.filters.maxAgeHours}h` : 'none'} minSize:${(s.filters.minBytes / 1000).toFixed(0)}KB minDuration:${s.filters.minDurationSeconds}s`)
   if (s.volcano.configured) {
     console.log(`volcano.auth=${s.volcano.auth}`)
     console.log(`volcano.resourceId=${s.volcano.resourceId}`)

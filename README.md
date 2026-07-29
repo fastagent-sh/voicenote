@@ -242,7 +242,7 @@ git push --follow-tags
 
 The workflow lives at `.github/workflows/release.yml`: CI explicitly runs typecheck/test/build + an artifact smoke test, then `npm publish --ignore-scripts` (deterministic publishing, no lifecycle dependence). Publishing uses **npm trusted publishing (OIDC)**: no long-lived token (`id-token: write` + a Trusted Publisher configured on npmjs.com), with provenance attached automatically. A bare local `npm publish` is still guarded by `prepublishOnly` (typecheck+test+build).
 
-> **First-release exception**: npm has no pending-publisher, so trusted publishing cannot publish a package's very first version. Publish once manually with `npm login` + `npm publish --ignore-scripts`, then add a Trusted Publisher on the package settings page at npmjs.com (repo `fastagent-sh/voicenote`, workflow `release.yml`); CI takes over afterwards (the npm account needs 2FA).
+> Both are already done for this package (Trusted Publisher configured, CI publishing since 0.18.0 with provenance), so a routine release needs nothing but the tag. Kept for forks: npm has no pending-publisher, so trusted publishing cannot publish a package's *very first* version — publish once manually with `npm login` + `npm publish --ignore-scripts`, then add a Trusted Publisher on the package settings page at npmjs.com (repo, workflow `release.yml`); CI takes over afterwards (the npm account needs 2FA).
 
 ## Desktop app (GUI, `app/`)
 
