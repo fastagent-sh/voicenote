@@ -229,14 +229,16 @@ bun run typecheck
 bun src/cli.ts doctor
 ```
 
-分发:vn 以**源码**分发,没有构建步骤 —— 它只在 bun 上运行(shebang + `bun:ffi` + `engines.bun`),而 bun 原生跑 TypeScript,所以 `bin` 直接指向 `src/cli.ts`,npm tarball 只带 `src/{cli,envConfig,runLock}.ts`。安装脚本 / `vn upgrade` 从已发布的 npm 包安装(`bun add -g @fastagent-sh/voicenote`);`git+https` 安装也能直接用(git 树自带源码,无需 build 或安装脚本)。
+分发:vn 以**源码**分发,没有构建步骤 —— 它只在 bun 上运行(shebang + `bun:ffi` + `engines.bun`),而 bun 原生跑 TypeScript,所以 `bin` 直接指向 `src/cli.ts`,npm tarball 只带 `src/{cli,envConfig,jobs,runLock}.ts`。安装脚本 / `vn upgrade` 从已发布的 npm 包安装(`bun add -g @fastagent-sh/voicenote`);`git+https` 安装也能直接用(git 树自带源码,无需 build 或安装脚本)。
 
 日常发布(打 tag 触发 CI):
 
 ```bash
-npm version patch
+npm version patch   # 然后把 src/cli.ts 里的 `VERSION` 同步成一样
 git push --follow-tags
 ```
+
+`src/cli.ts` 里硬编码了 `VERSION`(供 `vn --version` 用),而 `npm version` 不会改它 —— 请在同一个 commit 里一起更新,否则 CLI 会报一个它并不是的版本号。
 
 workflow 位于 `.github/workflows/release.yml`:CI 显式跑 typecheck/test/build + 产物冒烟,再 `npm publish --ignore-scripts`(确定发布,不依赖 lifecycle)。发布走 **npm trusted publishing(OIDC)**:免长期 token(`id-token: write` + npmjs.com 上配好 Trusted Publisher),自动带 provenance。本地裸 `npm publish` 则由 `prepublishOnly`(typecheck+test+build)兼底。
 

@@ -229,14 +229,16 @@ bun run typecheck
 bun src/cli.ts doctor
 ```
 
-Distribution: vn ships as **source** with no build step — it only runs on bun (shebang + `bun:ffi` + `engines.bun`), and bun runs TypeScript natively, so `bin` points straight at `src/cli.ts` and the npm tarball only contains `src/{cli,envConfig,runLock}.ts`. The install script / `vn upgrade` install from the published npm package (`bun add -g @fastagent-sh/voicenote`); a `git+https` install also works directly (the git tree carries the source; no build or install script needed).
+Distribution: vn ships as **source** with no build step — it only runs on bun (shebang + `bun:ffi` + `engines.bun`), and bun runs TypeScript natively, so `bin` points straight at `src/cli.ts` and the npm tarball only contains `src/{cli,envConfig,jobs,runLock}.ts`. The install script / `vn upgrade` install from the published npm package (`bun add -g @fastagent-sh/voicenote`); a `git+https` install also works directly (the git tree carries the source; no build or install script needed).
 
 Routine release (tag triggers CI):
 
 ```bash
-npm version patch
+npm version patch   # then sync `VERSION` in src/cli.ts to match
 git push --follow-tags
 ```
+
+`src/cli.ts` hardcodes `VERSION` for `vn --version`, and `npm version` does not touch it — update both in the same commit or the CLI will report a version it isn't.
 
 The workflow lives at `.github/workflows/release.yml`: CI explicitly runs typecheck/test/build + an artifact smoke test, then `npm publish --ignore-scripts` (deterministic publishing, no lifecycle dependence). Publishing uses **npm trusted publishing (OIDC)**: no long-lived token (`id-token: write` + a Trusted Publisher configured on npmjs.com), with provenance attached automatically. A bare local `npm publish` is still guarded by `prepublishOnly` (typecheck+test+build).
 
