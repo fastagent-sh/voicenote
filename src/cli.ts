@@ -2,6 +2,7 @@
 import { cac } from 'cac'
 import { deriveNoProxy, envKeysToEmbed, hydrateFromFileEnv, parseFileEnv } from './envConfig'
 import { parseLockOwner } from './runLock'
+import { applyOutcome, buildJobsView, classify, emptyState, localIso, MAX_ATTEMPTS, migrateLegacyState, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs'
 import { createHash, createHmac, randomUUID } from 'node:crypto'
 import { appendFile, chmod, mkdir, readFile, writeFile, copyFile, rename, unlink, stat, readdir, rm } from 'node:fs/promises'
 import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, appendFileSync, openSync, closeSync, statSync, readSync, unlinkSync, renameSync } from 'node:fs'
@@ -402,25 +403,26 @@ async function readJson<T>(path: string, fallback: T): Promise<T> {
   try { return JSON.parse(await readFile(path, 'utf8')) as T } catch (e) { warnSideEffect(`parse ${path}`, e); return fallback }
 }
 
-async function writeJson(path: string, data: any): Promise<void> {
+// Write via tmp+rename so readers only ever see a complete file. Anything whose
+// mere existence is later treated as a signal MUST go through this: a half
+// written file that still parses is worse than no file at all.
+async function writeFileAtomic(path: string, body: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   const tmp = `${path}.tmp`
-  await writeFile(tmp, JSON.stringify(data, null, 2), 'utf8')
+  await writeFile(tmp, body, 'utf8')
   await rename(tmp, path)
 }
+
+const writeJson = (path: string, data: any) => writeFileAtomic(path, JSON.stringify(data, null, 2))
 
 async function appendJsonl(path: string, data: any): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   await appendFile(path, JSON.stringify(data) + '\n', 'utf8')
 }
 
-const SUMMARY_FAILED_STATUS = 'summary_failed_transcript_saved'
 const RAW_TRANSCRIPT_MARKER = '## Raw transcript (no lossy cleanup)\n\n'
 const RAW_TRANSCRIPT_MARKER_LEGACY = '## 原始 transcript（不做 lossy 清洗）\n\n' // pre-0.18 files on disk
 
-function isSummaryFailedEntry(entry: any): boolean {
-  return entry?.status === SUMMARY_FAILED_STATUS
-}
 
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -480,6 +482,9 @@ function formatElapsed(ms: number): string {
 
 function progressStep(step: number, total: number, title: string, detail?: string): void {
   console.log(`▶ Step ${step}/${total}: ${title}${detail ? ` — ${detail}` : ''}`)
+  // Single hook for live progress: the dashboard shows the same string the log
+  // does, instead of regex-guessing the step from log text.
+  reportStep(title)
 }
 
 async function withHeartbeat<T>(label: string, work: () => Promise<T>, heartbeatSeconds = 60): Promise<T> {
@@ -785,42 +790,47 @@ function isCandidateFile(path: string): boolean {
   return true
 }
 
-async function scanRecordings(config: Config): Promise<Recording[]> {
-  if (!existsSync(config.recordDir)) return []
+/**
+ * `complete` is false when any part of the listing was lost — the glob threw, or
+ * a file we had just seen could not be read. It gates pruning: "not in the scan"
+ * only means "gone from the recorder" if the scan actually saw everything, and
+ * treating a half-read device as authoritative would delete live queue entries
+ * along with their retry counters.
+ */
+async function scanRecordings(config: Config): Promise<{ recordings: Recording[]; complete: boolean }> {
+  if (!existsSync(config.recordDir)) return { recordings: [], complete: false }
   const recordings: Recording[] = []
-  for await (const file of new Bun.Glob('**/*').scan({ cwd: config.recordDir, absolute: true, dot: true })) {
-    if (!isCandidateFile(file)) continue
-    const st = await stat(file).catch(() => null)
-    if (!st?.isFile()) continue
-    recordings.push({
-      sourcePath: file,
-      sizeBytes: st.size,
-      modifiedAt: st.mtime.toISOString(),
-      durationSeconds: await ffprobeDuration(file),
-      sourceId: await sourceIdFor(file),
-      recordedAt: parseRecordedAt(file),
-    })
+  let complete = true
+  try {
+    for await (const file of new Bun.Glob('**/*').scan({ cwd: config.recordDir, absolute: true, dot: true })) {
+      if (!isCandidateFile(file)) continue
+      const st = await stat(file).catch(() => null)
+      // Listed a moment ago but unreadable now: the device is going away, or
+      // this file is. Either way the listing is no longer trustworthy.
+      if (!st) { complete = false; continue }
+      if (!st.isFile()) continue
+      try {
+        recordings.push({
+          sourcePath: file,
+          sizeBytes: st.size,
+          modifiedAt: st.mtime.toISOString(),
+          durationSeconds: await ffprobeDuration(file),
+          sourceId: await sourceIdFor(file),
+          recordedAt: parseRecordedAt(file),
+        })
+      } catch (e) { complete = false; warnSideEffect(`read ${basename(file)} during scan`, e) }
+    }
+  } catch (e) {
+    complete = false
+    warnSideEffect('scan recorder', e)
   }
   // Oldest first: backlog is drained in chronological order, so every file is
   // guaranteed a turn before newer arrivals jump the queue.
-  return recordings.sort((a, b) => a.recordedAt.getTime() - b.recordedAt.getTime())
+  recordings.sort((a, b) => a.recordedAt.getTime() - b.recordedAt.getTime())
+  return { recordings, complete }
 }
 
-function shouldSkip(rec: Recording, state: Json, config: Config, force: boolean, mode: RunMode): [boolean, string] {
-  const processed = state.processed_source_ids?.[rec.sourceId]
-  if (processed && !force) {
-    // A summary failure is not a completed job: the expensive transcript was
-    // saved, so the next normal notes run should resume at summary instead of
-    // requiring `vn forget` and paying ASR again.
-    if (mode === 'notes' && isSummaryFailedEntry(processed)) return [false, '']
-    return [true, 'already_processed']
-  }
-  const ageHours = (Date.now() - rec.recordedAt.getTime()) / 3600_000
-  if (config.maxAgeHours > 0 && ageHours > config.maxAgeHours) return [true, `too_old:${ageHours.toFixed(0)}h>${config.maxAgeHours}h`]
-  if (rec.sizeBytes < config.minBytes) return [true, `too_small:${rec.sizeBytes}<${config.minBytes}`]
-  if (rec.durationSeconds !== null && rec.durationSeconds < config.minDurationSeconds) return [true, `too_short:${rec.durationSeconds.toFixed(1)}<${config.minDurationSeconds}`]
-  return [false, '']
-}
+const limitsOf = (config: Config) => ({ maxAgeHours: config.maxAgeHours, minBytes: config.minBytes, minDurationSeconds: config.minDurationSeconds })
 
 // ────────────────────────────────────────────────────────────────────────────
 // File path planning
@@ -836,9 +846,9 @@ function initialLocalFiles(config: Config, rec: Recording): LocalFiles {
   }
 }
 
-function localFilesFromState(config: Config, rec: Recording, entry: any): LocalFiles {
+function localFilesFromState(config: Config, rec: Recording, entry: JobRecord | undefined): LocalFiles {
   const fallback = initialLocalFiles(config, rec)
-  const paths = entry?.final_paths || entry?.local_paths || {}
+  const paths = entry?.paths || {}
   return {
     audio: typeof paths.audio === 'string' ? paths.audio : fallback.audio,
     transcript: typeof paths.transcript === 'string' ? paths.transcript : fallback.transcript,
@@ -847,11 +857,13 @@ function localFilesFromState(config: Config, rec: Recording, entry: any): LocalF
   }
 }
 
-function resumableTranscriptFiles(config: Config, rec: Recording, state: Json, mode: RunMode, force: boolean): LocalFiles | null {
+// Resume on the evidence, not on a state label: if the transcript is on disk,
+// re-running ASR is money spent for nothing. Keying this off `notes_failed`
+// instead meant `vn forget` (which drops the record) silently re-paid for ASR,
+// even though the transcript was still sitting there.
+function resumableTranscriptFiles(config: Config, rec: Recording, store: StateFile, mode: RunMode, force: boolean): LocalFiles | null {
   if (force || mode !== 'notes') return null
-  const entry = state.processed_source_ids?.[rec.sourceId]
-  if (!isSummaryFailedEntry(entry)) return null
-  const files = localFilesFromState(config, rec, entry)
+  const files = localFilesFromState(config, rec, store.jobs[rec.sourceId])
   return existsSync(files.transcript) ? files : null
 }
 
@@ -1762,7 +1774,11 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
     // if a later step (summary) blows up. We use the initial (untitled) path;
     // if summary succeeds we'll move it to the titled path below.
     await mkdir(dirname(files.transcript), { recursive: true })
-    await writeFile(files.transcript, transcriptMarkdown(config, rec, transcript, { mode }), 'utf8')
+    // Atomic: "transcript exists on disk" is what makes a later run skip ASR, so
+    // a run killed mid-write must not leave a truncated file behind. The raw
+    // marker sits near the top, so a partial write would still pass
+    // readSavedTranscript()'s checks and get summarised as if complete.
+    await writeFileAtomic(files.transcript, transcriptMarkdown(config, rec, transcript, { mode }))
     console.log(`✓ Transcript saved: ${files.transcript}`)
   }
 
@@ -1825,7 +1841,9 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
       console.log(`✓ PDF: ${pdf}`)
     }
   } else if (needsNotes && summaryError) {
-    const stubBody = `# Pending summary: ${basename(rec.sourcePath)}\n\n> ⚠ Transcription completed and saved, but the summary stage failed; retry needed.\n\n- Transcript file: \`${files.transcript}\`\n- Original audio: \`${rec.sourcePath}\`\n- Failure reason: ${meta.summary_error}\n- Retry command: \`vn run --latest\`\n`
+    // No unconditional "just re-run" promise: after MAX_ATTEMPTS the job is
+    // `gave_up` and further runs skip it, so the note has to name both ways out.
+    const stubBody = `# Pending summary: ${basename(rec.sourcePath)}\n\n> ⚠ Transcription completed and saved, but the summary stage failed; retry needed.\n\n- Transcript file: \`${files.transcript}\`\n- Original audio: \`${rec.sourcePath}\`\n- Failure reason: ${meta.summary_error}\n- Retry: the next \`vn run\` reuses the saved transcript automatically (no new transcription cost). After ${MAX_ATTEMPTS} failed attempts it stops retrying — run \`vn forget ${basename(rec.sourcePath)}\` to queue it again.\n`
     await writeFile(files.notes, stubBody, 'utf8')
     console.log(`⚠ Stub notes (summary failed): ${files.notes}`)
   } else if (opts.pdf) {
@@ -1857,6 +1875,132 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
   return meta
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Job state — `vn run` is the only writer; every view is a pure read of this.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Named for what it holds: every recording's job state, not just the processed
+// ones. (Pre-0.18 this was `processed.json` with two reason-keyed buckets.)
+const statePathFor = (config: Config) => join(config.workspace, '_state', 'jobs.json')
+
+const legacyStatePathFor = (config: Config) => join(config.workspace, '_state', 'processed.json')
+
+/**
+ * Read-only load. On an un-migrated workspace this converts in memory and does
+ * NOT write: `vn jobs` and the GUI's poll both come through here without the run
+ * lock, and a write from a view could race a live `vn run`. Persisting the
+ * conversion is migrateStateOnDisk()'s job, under the lock.
+ */
+// The legacy read is the one irreversible read in the codebase, so it gets the
+// same strictness as the new format — `readJson` swallows a parse failure and
+// returns `{}`, which here would mean "nothing was ever processed" and re-pay
+// for every recording's ASR.
+async function readLegacyState(config: Config): Promise<Json> {
+  const path = legacyStatePathFor(config)
+  return parseStrictJson(await readFile(path, 'utf8'), path) as Json
+}
+
+async function loadState(config: Config): Promise<StateFile> {
+  const path = statePathFor(config)
+  if (!existsSync(path) && existsSync(legacyStatePathFor(config))) {
+    return migrateLegacyState(await readLegacyState(config), nowIso())
+  }
+  const store = existsSync(path) ? parseStateFile(await readFile(path, 'utf8'), path) : emptyState()
+  lastSavedState.set(path, JSON.stringify(store))
+  return store
+}
+
+// Inline rather than a repo script: most installs are the GUI's compiled
+// sidecar, which has no checkout to run a script from — and starting from empty
+// is not an option, it would re-transcribe everything and pay for ASR twice.
+// Call only with the run lock held.
+async function migrateStateOnDisk(config: Config): Promise<void> {
+  const path = statePathFor(config)
+  const legacy = legacyStatePathFor(config)
+  if (existsSync(path) || !existsSync(legacy)) return
+  const store = migrateLegacyState(await readLegacyState(config), nowIso())
+  await writeJson(path, store)
+  lastSavedState.set(path, JSON.stringify(store))
+  await rename(legacy, `${legacy}.v1.bak`).catch(e => warnSideEffect('archive pre-0.18 state', e))
+  console.log(`Converted ${basename(legacy)} → ${basename(path)} (${Object.keys(store.jobs).length} records; old file kept as .v1.bak)`)
+}
+
+// The scheduler ticks every 60s and the workspace is often a synced folder
+// (iCloud/Dropbox). Rewriting an unchanged state file on every tick would be
+// pure sync noise, so writes are content-gated. Keyed by path, not a single
+// value: `vn serve` handles config.set (which can move the workspace) and runs
+// in one process, and a shared key could skip the first write to a new path.
+const lastSavedState = new Map<string, string>()
+async function saveState(config: Config, store: StateFile): Promise<void> {
+  const path = statePathFor(config)
+  const serialized = JSON.stringify(store)
+  if (serialized === lastSavedState.get(path)) return
+  await writeJson(path, store)
+  lastSavedState.set(path, serialized)
+}
+
+/** Upsert the scan-time facts; never touches lifecycle fields. */
+function recordFor(store: StateFile, rec: Recording): JobRecord {
+  const existing = store.jobs[rec.sourceId]
+  const next: JobRecord = existing ?? {
+    name: basename(rec.sourcePath), source_path: rec.sourcePath, recorded_at: localIso(rec.recordedAt),
+    size_bytes: rec.sizeBytes, duration_seconds: rec.durationSeconds,
+    state: 'queued', code: null, detail: null, attempts: 0, updated_at: nowIso(), title: null, paths: null,
+  }
+  next.source_path = rec.sourcePath
+  next.size_bytes = rec.sizeBytes
+  next.duration_seconds = rec.durationSeconds
+  store.jobs[rec.sourceId] = next
+  return next
+}
+
+function setJobState(store: StateFile, id: string, patch: Partial<JobRecord>): void {
+  const entry = store.jobs[id]
+  if (entry) patchJob(entry, patch, nowIso())
+}
+
+// The live job, declared by the run itself. Lives next to run.lock (machine
+// state, not workspace data) and carries the pid so a reader can tell a live
+// job from one whose process was killed.
+const CURRENT_PATH = join(STATE_DIR, 'current.json')
+
+function writeCurrent(sourceId: string, step: string, startedAt: string): void {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true })
+    // tmp+rename, same rule as writeFileAtomic: this file's existence and
+    // contents are the live-job signal, and progressStep rewrites it at every
+    // step. A truncated write would read back as null and show a running job
+    // as queued.
+    const tmp = `${CURRENT_PATH}.tmp`
+    writeFileSync(tmp, JSON.stringify({ pid: process.pid, source_id: sourceId, step, started_at: startedAt } satisfies CurrentJob))
+    renameSync(tmp, CURRENT_PATH)
+  } catch (e) { warnSideEffect('write current job', e) }
+}
+
+function clearCurrent(): void {
+  try { unlinkSync(CURRENT_PATH) } catch (e: any) { if (e?.code !== 'ENOENT') warnSideEffect('clear current job', e) }
+}
+
+// Step reporting from inside the pipeline: a job is only "the current job" for
+// as long as this run says so, so the step is written, never guessed from logs.
+let currentJobId: string | null = null
+let currentJobStartedAt = ''
+function reportStep(step: string): void {
+  if (currentJobId) writeCurrent(currentJobId, step, currentJobStartedAt)
+}
+
+function readCurrent(): CurrentJob | null {
+  try {
+    const c = JSON.parse(readFileSync(CURRENT_PATH, 'utf8'))
+    return Number.isFinite(c?.pid) && typeof c?.source_id === 'string' ? c : null
+  } catch { return null }
+}
+
+function pidAlive(pid: number): boolean {
+  if (!(pid > 0)) return false
+  try { process.kill(pid, 0); return true } catch (e: any) { return e?.code === 'EPERM' }
+}
+
 async function runPipeline(opts: any): Promise<void> {
   wireDailyLog()
   const config = getConfig()
@@ -1874,10 +2018,16 @@ async function runPipeline(opts: any): Promise<void> {
 
 async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   await ensureDirs(config)
-  const statePath = join(config.workspace, '_state', 'processed.json')
-  const state = await readJson<Json>(statePath, { processed_source_ids: {}, skipped_source_ids: {} })
-  state.processed_source_ids ||= {}
-  state.skipped_source_ids ||= {}
+  // --dry-run is a zero-side-effect diagnostic; the migration renames the legacy
+  // file and permanently drops its `error:*` entries. loadState converts in
+  // memory, so a dry run still sees the right picture.
+  if (!opts.dryRun) await migrateStateOnDisk(config)
+  const store = await loadState(config)
+  // We hold the run lock, so nothing else can own a `running` record: any that
+  // survive are debris from a killed run. Their attempt was already counted, so
+  // this is what makes the retry cap cover crashes as well as thrown errors.
+  const interrupted = reconcileInterrupted(store.jobs, nowIso())
+  if (interrupted.length) console.log(`Reclaimed ${interrupted.length} job(s) left running by an interrupted run: ${interrupted.slice(0, 3).map(j => j.name).join(', ')}`)
 
   if (!existsSync(config.recordDir)) {
     if (shouldLogIdleStatus(`missing:${config.recordDir}`)) {
@@ -1885,25 +2035,31 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
     }
     return
   }
-  const recordings = await scanRecordings(config)
+  const { recordings, complete: scanComplete } = await scanRecordings(config)
   const mode = normalizeRunMode(opts)
   const force = Boolean(opts.force)
   const eligible: Recording[] = []
   const skipCounts: Record<string, number> = {}
   const skipSamples: Record<string, string[]> = {}
   const verboseSkips = Boolean(opts.verbose || opts.dryRun)
+  const seen = new Set<string>()
+  const limits = limitsOf(config)
   for (const rec of recordings) {
-    const [skip, reason] = shouldSkip(rec, state, config, force, mode)
-    if (skip) {
-      const reasonKey = reason.split(':')[0] || reason
-      skipCounts[reasonKey] = (skipCounts[reasonKey] || 0) + 1
-      ;(skipSamples[reasonKey] ||= []).push(basename(rec.sourcePath))
-      if (!state.skipped_source_ids[rec.sourceId] && reason !== 'already_processed') {
-        state.skipped_source_ids[rec.sourceId] = { source_path: rec.sourcePath, reason, size_bytes: rec.sizeBytes, duration_seconds: rec.durationSeconds, seen_at: nowIso() }
-      }
-      if (verboseSkips) console.log(`  Skip: ${basename(rec.sourcePath)} (${reason})`)
-    } else eligible.push(rec)
+    seen.add(rec.sourceId)
+    const entry = recordFor(store, rec)
+    const verdict = classify(rec, store.jobs[rec.sourceId], limits, { force, notesMode: mode === 'notes', now: Date.now() })
+    if (verdict.run) { eligible.push(rec); continue }
+    skipCounts[verdict.code] = (skipCounts[verdict.code] || 0) + 1
+    ;(skipSamples[verdict.code] ||= []).push(entry.name)
+    if (verdict.persist) setJobState(store, rec.sourceId, { state: 'filtered', code: verdict.code, detail: verdict.detail })
+    if (verboseSkips) console.log(`  Skip: ${entry.name} (${verdict.code}${verdict.detail ? `: ${verdict.detail}` : ''})`)
   }
+  // Only prune against a listing we believe to be complete: if the recorder went
+  // away mid-glob the scan is partial, and pruning would wipe live queue entries
+  // (they'd return on the next scan, but their retry counters would not).
+  const dropped = pruneUnseen(store.jobs, seen, scanComplete && existsSync(config.recordDir))
+  // The only routine path that deletes state — never do it silently.
+  if (dropped.length) console.log(`Forgot ${dropped.length} record(s) whose source is no longer on the recorder: ${dropped.slice(0, 3).map(j => j.name).join(', ')}${dropped.length > 3 ? `…(+${dropped.length - 3})` : ''}`)
   const skipSummary = Object.entries(skipCounts).map(([reason, count]) => `${reason}=${count}`).join(', ') || 'none'
   const scanLine = `Scan summary: found=${recordings.length}; eligible=${eligible.length}; skipped=${recordings.length - eligible.length} (${skipSummary})`
   const samplesLine = !verboseSkips && Object.keys(skipSamples).length
@@ -1917,7 +2073,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   // --dry-run, which is a zero-side-effect diagnostic and should still print the
   // plan even on an unconfigured machine.
   if (targets.length && !opts.dryRun) {
-    const needsAsr = targets.some(rec => !resumableTranscriptFiles(config, rec, state, mode, force))
+    const needsAsr = targets.some(rec => !resumableTranscriptFiles(config, rec, store, mode, force))
     if (needsAsr && !config.volcano) {
       if (shouldLogIdleStatus(`asr-misconfig:${config.recordDir}`)) console.error('ASR not configured: Volcano needs VOLCANO_ASR_KEY / VOLCANO_TOS_*. Skipping; run `vn doctor`, fix config, then re-run.')
       return
@@ -1938,20 +2094,59 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
     if (samplesLine) console.log(samplesLine)
     console.log(`Queue: processing ${targets.length} recording(s)${latestOnly ? ' (--latest)' : ''}. Remaining after this run: ${Math.max(0, eligible.length - targets.length)}`)
   }
+  if (opts.dryRun) {
+    // Print the plan and touch nothing: no attempt counted, no state written.
+    for (const rec of targets) {
+      const plan = await processRecording(config, rec, { ...opts, resumeFromTranscriptFiles: resumableTranscriptFiles(config, rec, store, mode, force) })
+      console.log(JSON.stringify(plan, null, 2))
+    }
+    return
+  }
+  await saveState(config, store)
+
   for (const rec of targets) {
+    const entry = store.jobs[rec.sourceId]!
+    // --force means "start over", so it refunds the retry budget too. Without
+    // this it only skips one refusal: a spent record would be back at `gave_up`
+    // the moment this attempt failed.
+    if (force) patchJob(entry, { attempts: 0 }, nowIso())
+    currentJobId = rec.sourceId
+    currentJobStartedAt = nowIso()
+    startAttempt(entry, nowIso())
+    await saveState(config, store)
+    writeCurrent(rec.sourceId, 'starting', currentJobStartedAt)
     try {
-      const resumeFromTranscriptFiles = resumableTranscriptFiles(config, rec, state, mode, force)
+      const resumeFromTranscriptFiles = resumableTranscriptFiles(config, rec, store, mode, force)
       const result = await processRecording(config, rec, { ...opts, resumeFromTranscriptFiles })
-      if (!opts.dryRun) {
-        state.processed_source_ids[rec.sourceId] = { source_path: rec.sourcePath, processed_at: nowIso(), status: result.status, title: result.title, final_paths: result.final_paths }
-        delete state.skipped_source_ids[rec.sourceId]
-      }
+      applyOutcome(entry, result.status === SUMMARY_FAILED_STATUS
+        ? { kind: 'summary_failed', title: result.title ?? null, paths: result.final_paths ?? null, message: String(result.summary_error ?? 'summary failed; transcript saved') }
+        : { kind: 'done', title: result.title ?? null, paths: result.final_paths ?? null }, nowIso())
     } catch (e: any) {
-      console.error(`ERROR processing ${rec.sourcePath}: ${e?.message || e}`)
-      state.skipped_source_ids[rec.sourceId] = { source_path: rec.sourcePath, reason: `error:${e?.message || e}`, seen_at: nowIso() }
+      const message = String(e?.message || e)
+      console.error(`ERROR processing ${rec.sourcePath}: ${message}`)
+      // Source vanished mid-run (recorder unplugged, file deleted) AND nothing
+      // was produced: that's not a failed job, it's a job that no longer exists.
+      // Drop it so it can't linger as a permanent "failed" row. A record that
+      // already owns output is history — same rule pruneUnseen follows — and
+      // deleting it would re-pay for ASR when the recorder comes back.
+      if (!existsSync(rec.sourcePath) && !ownsOutput(entry)) {
+        console.log(`Forgot ${entry.name}: source left the recorder before it produced anything`)
+        delete store.jobs[rec.sourceId]
+      } else {
+        applyOutcome(entry, { kind: 'failed', message }, nowIso())
+      }
+    } finally {
+      currentJobId = null
+      clearCurrent()
+      await saveState(config, store)   // per job, not per batch: a kill -9 costs one job, not the batch
+    }
+    // Whole recorder went away — every remaining target would fail the same way
+    // and churn ASR-free but noisy retries. Stop and let the next run rescan.
+    if (!existsSync(config.recordDir)) {
+      console.error(`Recorder disappeared mid-run (${config.recordDir}); stopping. Remaining recordings stay queued.`)
+      break
     }
   }
-  if (!opts.dryRun) await writeJson(statePath, state)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -2316,20 +2511,24 @@ async function openTarget(arg?: string): Promise<void> {
 
 async function forgetRecording(needle: string): Promise<void> {
   const config = getConfig()
-  const statePath = join(config.workspace, '_state', 'processed.json')
-  const state = await readJson<Json>(statePath, { processed_source_ids: {}, skipped_source_ids: {} })
-  let removed = 0
-  for (const bucket of ['processed_source_ids', 'skipped_source_ids']) {
-    for (const id of Object.keys(state[bucket] || {})) {
-      const entry = state[bucket][id]
-      if (id === needle || entry?.source_path?.includes(needle)) {
-        delete state[bucket][id]
+  // Under the run lock: `vn run` holds the state file in memory for the length
+  // of a batch and re-saves after every job, so an unlocked delete here would be
+  // silently resurrected by the next save.
+  const lock = await acquireRunLock()
+  if (!lock) { console.error('A voicenote run is in progress, so the state file is busy. Re-run this once it finishes (`vn jobs` shows what it is working on).'); process.exitCode = 1; return }
+  try {
+    await migrateStateOnDisk(config)
+    const store = await loadState(config)
+    let removed = 0
+    for (const [id, entry] of Object.entries(store.jobs)) {
+      if (id === needle || entry.source_path.includes(needle) || entry.name.includes(needle)) {
+        delete store.jobs[id]
         removed++
       }
     }
-  }
-  await writeJson(statePath, state)
-  console.log(`forgot ${removed} record(s)`)
+    await saveState(config, store)
+    console.log(`forgot ${removed} record(s)`)
+  } finally { await lock.release() }
 }
 
 async function showLog(opts: { lines?: number; follow?: boolean; err?: boolean; date?: string }): Promise<void> {
@@ -2524,102 +2723,36 @@ async function collectDoctor() {
   }
 }
 
-// Recent processed notes (for the GUI dashboard). Reads the canonical jsonl index.
-// Parse the agent log tail for the recording being processed right now (if any),
-// and which pipeline step it's on. Heuristic but cheap.
-function currentJobFromLog(): { status: 'processing'; name: string; step: string } | null {
-  const tail = readLogTail(agentLogPath(), 8192).split('\n')
-  let name: string | null = null
-  let processing = false
-  let step = 'Preparing'
-  for (const line of tail) {
-    const m = line.match(/voicenote job:\s*(.+?)\s*===/)
-    if (m) { name = m[1]!; processing = true; step = 'Preparing'; continue }
-    if (/✓ Completed|Idle:|ERROR processing/i.test(line)) processing = false
-    if (processing) {
-      if (/Step 3|integrated semantic notes|generate/i.test(line)) step = 'Generating notes'
-      else if (/Step 2|Transcribe|Volcano|transcrib/i.test(line)) step = 'Transcribing'
-      else if (/Step 1|Copy audio/i.test(line)) step = 'Preparing'
-    }
-  }
-  return processing && name ? { status: 'processing', name, step } : null
-}
-
-// Unified processing status of recent recordings (for the GUI status board):
-// the live job (if any) + queued on the recorder (pending) + completed (done) +
-// transcript-saved-but-notes-failed (summary_failed) + errored (failed, will
-// auto-retry) + filtered (skipped: too_small/too_short).
-async function jobsListData(limit: number): Promise<{ items: Json[] }> {
+// The dashboard/CLI view of every recording's processing status. A pure read of
+// the state file `vn run` writes, grouped by jobs.ts. Nothing here rescans
+// the recorder or parses logs: the queue shown IS the queue that runs, and it
+// stays visible when the recorder is unplugged.
+async function jobsListData(limit: number): Promise<{ items: Json[]; total: number; queued_total: number; recorder_present: boolean }> {
   const config = getConfig()
-  const statePath = join(config.workspace, '_state', 'processed.json')
-  const state = await readJson<Json>(statePath, { processed_source_ids: {}, skipped_source_ids: {} })
-  // VTR6500 names recordings YYYYMMDDHHMMSS — show that as the recording time;
-  // fall back to the processed/seen timestamp.
-  const recTime = (name: string, at: string | null): string | null => {
-    const m = name.match(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})/)
-    if (m) return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}`
-    return at ? at.slice(0, 16).replace('T', ' ') : null
-  }
-  const items: Json[] = []
-  const live = currentJobFromLog()
-  if (live) items.push({ ...live, title: null, at: null, time: recTime(live.name, null), notes: null })
-  const done: Json[] = []
-  const knownPaths = new Set<string>()
-  for (const [id, e] of Object.entries<any>(state.processed_source_ids || {})) {
-    if (e.source_path) knownPaths.add(e.source_path)
-    const name = basename(e.source_path || id)
-    done.push({ status: isSummaryFailedEntry(e) ? 'summary_failed' : 'done', name, title: e.title ?? null, at: e.processed_at ?? null, time: recTime(name, e.processed_at ?? null), notes: e.final_paths?.notes ?? e.local_paths?.notes ?? null })
-  }
-  for (const [id, e] of Object.entries<any>(state.skipped_source_ids || {})) {
-    if (e.source_path) knownPaths.add(e.source_path)
-    const name = basename(e.source_path || id)
-    const rawReason = String(e.reason || '')
-    const isError = rawReason.startsWith('error')
-    // Filter reasons are machine diagnostics (`too_small:1234<100000`); show a
-    // human label instead. Error strings stay raw — that's the diagnostic.
-    const reason = rawReason.startsWith('too_small') ? 'Recording too small, skipped' : rawReason.startsWith('too_short') ? 'Recording too short, skipped' : rawReason.startsWith('too_old') ? 'Recording too old, skipped' : (e.reason ?? null)
-    done.push({ status: isError ? 'failed' : 'skipped', name, title: null, at: e.seen_at ?? null, time: recTime(name, e.seen_at ?? null), reason, notes: null })
-  }
-  done.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')))
-  // Pending: candidate files on the recorder with no state entry yet. Matched by
-  // source_path (not sourceId) so a status poll doesn't hash every file on the
-  // recorder. ponytail: path match misses a re-recorded same-path file, and the
-  // minDurationSeconds filter is absent (ffprobe per poll is too dear) — a
-  // too-short file shows "pending" until a run flips it to "skipped". Fine for a
-  // status view — the pipeline itself still dedupes by content hash and filters
-  // by duration.
-  const pending: Json[] = []
-  if (existsSync(config.recordDir)) {
-    for await (const file of new Bun.Glob('**/*').scan({ cwd: config.recordDir, absolute: true, dot: true })) {
-      if (!isCandidateFile(file) || knownPaths.has(file)) continue
-      if (config.maxAgeHours > 0 && Date.now() - parseRecordedAt(file).getTime() > config.maxAgeHours * 3600_000) continue
-      const st = await stat(file).catch(() => null)
-      if (!st?.isFile() || st.size < config.minBytes) continue
-      const name = basename(file)
-      pending.push({ status: 'pending', name, title: null, at: null, time: recTime(name, null), notes: null })
-    }
-    // Queue order: oldest first, same sort key as the pipeline (parseRecordedAt).
-    pending.sort((a, b) => parseRecordedAt(String(a.name)).getTime() - parseRecordedAt(String(b.name)).getTime())
-    // Cap the queue so a large backlog can't crowd done/failed out of the limit
-    // window; the overflow collapses into one aggregate row.
-    const PENDING_SHOWN = 10
-    if (pending.length > PENDING_SHOWN) {
-      const extra = pending.length - PENDING_SHOWN
-      pending.length = PENDING_SHOWN
-      pending.push({ status: 'pending', name: `…${extra} more queued`, title: null, at: null, time: null, notes: null })
-    }
-  }
-  // Don't double-list the live job if it's also in pending/done.
-  const liveName = live?.name
-  for (const j of [...pending, ...done]) { if (liveName && j.name === liveName) continue; items.push(j) }
-  return { items: items.slice(0, limit) }
+  const store = await loadState(config)
+  // One existsSync on the mount point — not the recursive glob the old pending
+  // section ran on every poll, and always current.
+  return buildJobsView(store, readCurrent(), { limit, alive: pidAlive, recorderPresent: existsSync(config.recordDir) })
 }
 
 async function jobsList(opts: { limit?: number; json?: boolean }): Promise<void> {
-  const data = await jobsListData(Number(opts.limit) || 30)
+  let limit: number
+  try { limit = parseJobsLimit(opts.limit, 30) } catch (e: any) { console.error(e.message); process.exitCode = 1; return }
+  const data = await jobsListData(limit)
   if (opts.json) { console.log(JSON.stringify(data, null, 2)); return }
-  if (!data.items.length) { console.log('No jobs yet.'); return }
-  for (const j of data.items) console.log(`[${j.status}] ${j.title || j.name}${j.step ? ' · ' + j.step : ''}${j.reason ? ' · ' + String(j.reason).slice(0, 120) : ''}`)
+  if (!data.items.length) {
+    console.log(data.recorder_present ? 'No jobs yet.' : 'No jobs yet. (recorder not connected)')
+    return
+  }
+  for (const j of data.items) {
+    const suffix = [j.step, j.detail].filter(Boolean).join(' \u00b7 ')
+    console.log(`[${j.status}] ${j.title || j.name}${suffix ? ' \u00b7 ' + suffix.slice(0, 140) : ''}`)
+  }
+  // Truncation used to be silent, which is how a 126-entry backlog read as 27.
+  if (data.total > data.items.length) console.log(`\u2026 ${data.total - data.items.length} more (vn jobs --limit 0 to show all)`)
+  if (!data.recorder_present) {
+    console.log(data.queued_total ? `Recorder not connected \u2014 ${data.queued_total} recording(s) waiting for it.` : 'Recorder not connected.')
+  }
 }
 
 async function doctor(opts: { json?: boolean } = {}): Promise<void> {
@@ -2691,7 +2824,7 @@ async function dispatchServe(req: any, send: (o: unknown) => void): Promise<void
       case 'config.get': result = configGetData(); break
       case 'config.set': result = await configSetData(params || {}); break
       case 'doctor': result = await collectDoctor(); break
-      case 'jobs': result = await jobsListData(Number(params?.limit) || 40); break
+      case 'jobs': result = await jobsListData(parseJobsLimit(params?.limit, 40)); break
       case 'ensure_agent': result = await ensureScheduler(!!params?.force); break
       case 'run': {
         // Long-running (minutes) like login: ack immediately so the GUI's 60s
@@ -2796,7 +2929,7 @@ cli.command('list', 'List notes in a month')
   .action(listMeetings)
 
 cli.command('last', 'Print summary of most recent processed recording').action(lastMeeting)
-cli.command('jobs', 'Show processing status of recordings (live + pending + done + summary_failed + failed + skipped)')
+cli.command('jobs', 'Show every recording\'s processing status (running, queued, done, failed, gave up, filtered)')
   .option('--limit <n>', 'How many to list', { default: 30 })
   .option('--json', 'Output as JSON (for the GUI)')
   .action((opts: { limit?: number; json?: boolean }) => jobsList(opts))
@@ -2804,7 +2937,7 @@ cli.command('jobs', 'Show processing status of recordings (live + pending + done
 
 cli.command('open [target]', 'Open notes dir, config dir (`config`), logs dir (`logs`), or a note matching the slug').action((target?: string) => openTarget(target))
 
-cli.command('forget <key>', 'Remove a recording from processed/skipped state so it can be reprocessed').action((key: string) => forgetRecording(key))
+cli.command('forget <key>', 'Drop a recording\'s job record so it is queued again (a saved transcript on disk is still reused)').action((key: string) => forgetRecording(key))
 
 cli.command('log', 'Print the daily log (today by default)')
   .option('--lines <n>', 'How many trailing lines to print', { default: 30 })

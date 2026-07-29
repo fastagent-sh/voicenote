@@ -177,7 +177,11 @@ vn uninstall-launch-agent
 4. 转写:火山豆包【大模型录音文件识别标准版 API】,本地音频先传到 TOS,提交任务后轮询结果,完成后默认删除 TOS 对象
 5. 转写完成后立刻落盘原始 transcript(不做 lossy 清洗),避免后面步骤失败导致 ASR 费用白付
 6. summary 模型(默认 pi codex 走 ChatGPT Plus)直接看原始 transcript,在纪要生成阶段内部完成必要清理、说话人还原、观点/争论/共识形成过程还原;如果 summary 失败,下一次 `vn run` / `vn run --latest` 会复用已保存 transcript,直接重试纪要生成,不需要 `vn forget`
-7. 写出 notes / metadata;系统不做任何归档决定,文件留在配置的 workspace 中
+7. 写出 notes / metadata；系统不做任何归档决定，文件留在配置的 workspace 中
+
+失败的录音会在后续运行中重试，但**最多 3 次**（转写失败、纪要失败、以及被中途 kill 的运行都算）。超过后标记为 `Gave up` 并不再自动重试，避免一个坏文件每个调度周期都烧一次 ASR/LLM 额度 —— `vn forget <name>` 会删掉该记录并重新入队。重新入队不等于重新转写：磁盘上已有 transcript 时会直接复用，所以 `vn forget` 不会让你再付一次 ASR。（`vn forget` 需要 run lock，因此在某次 run 进行中时会拒绝执行 —— 等该次 run 结束后重试即可。）
+
+源文件已不在录音笔上的记录，会在下一次扫描时被遗忘（并记入日志），**已经产出纪要或 transcript 的除外** —— 那部分历史会保留。所以换录音笔、或从设备上删文件，不再会留下永久的 “失败” 条目。
 
 ## 输出位置
 
@@ -187,7 +191,7 @@ installer 默认设置:`VOICENOTE_WORKSPACE=~/Documents/meetings`。
 - 原始音频:`${VOICENOTE_WORKSPACE}/_audio/YYYY-MM/`
 - 完整转写:`${VOICENOTE_WORKSPACE}/_transcripts/YYYY-MM/`
 - metadata:`${VOICENOTE_WORKSPACE}/_metadata/YYYY-MM/`
-- 状态:`${VOICENOTE_WORKSPACE}/_state/processed.json`
+- 状态：`${VOICENOTE_WORKSPACE}/_state/jobs.json` —— 每条录音一条记录，包含 `state`（生命周期位置：`queued`、`running`、`done`、`filtered`、`error`，以及重试耗尽后的 `gave_up`）、`code`（原因：`summary_failed`、`transcribe_failed`、`interrupted`、`too_small` 等）、重试次数和产物路径。`vn run` 是唯一的写入方，`vn jobs` 和 GUI 面板都只是它的纯读取 —— 你看到的队列就是会跑的队列。0.18 之前的 `processed.json` 会在首次运行时自动转换，旧文件保留为 `processed.json.v1.bak`。
 - 索引:`${VOICENOTE_WORKSPACE}/_index/notes.jsonl`
 
 ## 自动化
