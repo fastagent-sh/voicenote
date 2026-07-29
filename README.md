@@ -179,6 +179,10 @@ Changes take effect on the next `vn run`. A legacy `~/.config/voicenote/speakers
 6. The summary model (default: pi codex via ChatGPT Plus) reads the raw transcript directly, performing necessary cleanup, speaker restoration, and reconstruction of views/debates/consensus inside the notes-generation stage; if the summary fails, the next `vn run` / `vn run --latest` reuses the saved transcript and retries only the notes generation — no `vn forget` needed
 7. Write notes / metadata; the system makes no archiving decisions — files stay in the configured workspace
 
+A failing recording is retried on later runs, but at most **3 times** (whether it fails in transcription or in summarisation, and a run killed mid-job counts too). After that it is marked `Gave up` and left alone, so one broken file can't burn ASR/LLM budget on every scheduler tick — `vn forget <name>` drops the record and re-queues it. Re-queuing is not the same as re-transcribing: if the transcript is already on disk it is reused, so `vn forget` never re-pays for ASR. (`vn forget` takes the run lock, so it refuses while a run is in progress — wait for that run to finish and repeat.)
+
+Records whose source file is no longer on the recorder are forgotten on the next scan (and the removal is logged), *unless* they already produced notes or a transcript — that history is kept. This is why swapping recorders, or deleting files from the device, no longer leaves permanent "failed" rows behind.
+
 ## Output locations
 
 The installer defaults to `VOICENOTE_WORKSPACE=~/Documents/meetings`.
@@ -187,7 +191,7 @@ The installer defaults to `VOICENOTE_WORKSPACE=~/Documents/meetings`.
 - Original audio: `${VOICENOTE_WORKSPACE}/_audio/YYYY-MM/`
 - Full transcripts: `${VOICENOTE_WORKSPACE}/_transcripts/YYYY-MM/`
 - Metadata: `${VOICENOTE_WORKSPACE}/_metadata/YYYY-MM/`
-- State: `${VOICENOTE_WORKSPACE}/_state/processed.json`
+- State: `${VOICENOTE_WORKSPACE}/_state/jobs.json` — one record per recording, holding its `state` — where it is in its lifecycle (`queued`, `running`, `done`, `filtered`, `error`, or `gave_up` once retries are spent) — plus a `code` saying why (`summary_failed`, `transcribe_failed`, `interrupted`, `too_small`, …), its attempt count and its output paths. `vn run` is the only writer; `vn jobs` and the GUI dashboard are pure reads of it, so what you see is what will run. A pre-0.18 `processed.json` is converted automatically on the first run and kept as `processed.json.v1.bak`.
 - Index: `${VOICENOTE_WORKSPACE}/_index/notes.jsonl`
 
 ## Automation

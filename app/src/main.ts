@@ -51,12 +51,12 @@ type Status = {
   agent: { installed: boolean; logTail: string[] };
 };
 type Job = {
-  status: "processing" | "pending" | "done" | "summary_failed" | "failed" | "skipped";
+  status: "running" | "queued" | "done" | "notes_failed" | "error" | "gave_up" | "filtered";
   name: string;
   title: string | null;
-  step?: string;
+  step?: string | null;
   time?: string | null;
-  reason?: string | null;
+  detail?: string | null;
   notes: string | null;
 };
 
@@ -111,15 +111,17 @@ function renderStatus() {
 
 // ── Jobs (processing status of each recording) ───────────────────────────────
 const JOB_META: Record<Job["status"], { label: string; tone: string }> = {
-  processing: { label: "Processing", tone: "wait" },
-  pending: { label: "Queued", tone: "" },
+  running: { label: "Processing", tone: "wait" },
+  queued: { label: "Queued", tone: "" },
   done: { label: "Done", tone: "ok" },
-  summary_failed: { label: "Notes retry pending", tone: "err" },
-  failed: { label: "Failed", tone: "err" },
-  skipped: { label: "Skipped", tone: "" },
+  notes_failed: { label: "Notes retry pending", tone: "err" },
+  error: { label: "Failed — will retry", tone: "err" },
+  // Retries are spent; `detail` carries the count and the `vn forget` way out.
+  gave_up: { label: "Gave up", tone: "err" },
+  filtered: { label: "Filtered out", tone: "" },
 };
 
-function renderJobs(jobs: Job[]) {
+function renderJobs(jobs: Job[], total = jobs.length, recorderPresent = true, queuedTotal = 0) {
   const list = $("notes-list");
   list.innerHTML = "";
   if (!jobs.length) {
@@ -134,16 +136,16 @@ function renderJobs(jobs: Job[]) {
   }
   for (const j of jobs) {
     const meta = JOB_META[j.status] ?? { label: j.status, tone: "" };
-    // summary_failed's stub note links the saved transcript + retry command —
+    // notes_failed's stub note links the saved transcript + retry command —
     // openable so the user can actually reach them.
-    const openable = (j.status === "done" || j.status === "summary_failed") && !!j.notes;
+    const openable = (j.status === "done" || j.status === "notes_failed" || j.status === "gave_up") && !!j.notes;
     const card = document.createElement("button");
     card.className = "job-card";
     card.disabled = !openable;
 
     const head = document.createElement("div"); head.className = "job-head";
     const badge = document.createElement("span"); badge.className = `jbadge ${meta.tone}`;
-    badge.textContent = j.status === "processing" && j.step ? `${meta.label} · ${j.step}` : meta.label;
+    badge.textContent = j.status === "running" && j.step ? `${meta.label} · ${j.step}` : meta.label;
     head.appendChild(badge);
     if (openable) { const open = document.createElement("span"); open.className = "job-open"; open.textContent = "Open ↗"; head.appendChild(open); }
 
@@ -152,11 +154,28 @@ function renderJobs(jobs: Job[]) {
     card.append(head, title);
 
     if (j.time) { const tm = document.createElement("div"); tm.className = "job-time"; tm.textContent = j.time; card.appendChild(tm); }
-    if (j.reason) {
-      const r = document.createElement("div"); r.className = "job-reason"; r.textContent = j.reason; card.appendChild(r);
+    if (j.detail) {
+      const r = document.createElement("div"); r.className = "job-reason"; r.textContent = j.detail; card.appendChild(r);
     }
     if (openable) card.addEventListener("click", () => openPath(j.notes!));
     list.appendChild(card);
+  }
+  // The list is capped; say so rather than letting a long backlog look short.
+  if (total > jobs.length) {
+    const more = document.createElement("div");
+    more.className = "job-time";
+    more.textContent = `… ${total - jobs.length} more`;
+    list.appendChild(more);
+  }
+  // A queue that can't drain because the recorder is unplugged looks identical
+  // to a queue that's about to run. Say which one it is.
+  if (!recorderPresent) {
+    const note = document.createElement("div");
+    note.className = "job-time";
+    note.textContent = queuedTotal
+      ? `Recorder not connected — ${queuedTotal} recording(s) waiting for it.`
+      : "Recorder not connected.";
+    list.appendChild(note);
   }
 }
 
@@ -180,16 +199,19 @@ async function refreshJobs(explicit = false) {
   // machine's failure accounting, and a renderJobs/DOM bug recorded as an
   // engine failure would both corrupt that accounting (success then failure
   // for one request) and misreport a frontend bug as an engine failure.
-  let r: { items: Job[] };
+  let r: { items: Job[]; total?: number; queued_total?: number; recorder_present?: boolean };
   try {
-    r = (await invoke("recent_jobs")) as { items: Job[] };
+    r = (await invoke("recent_jobs")) as { items: Job[]; total?: number; queued_total?: number; recorder_present?: boolean };
   } catch (e) {
     if (jobsState.failure() === "error") renderError("notes-list", `Failed to read processing status: ${e}`);
     else console.error("refreshJobs (background)", e); // poll/boot/post-save flow: keep last-good list
     return;
   }
   const items = r.items ?? [];
-  if (jobsState.success(seq, JSON.stringify(items)) === "render") renderJobs(items);
+  const total = r.total ?? items.length;
+  const present = r.recorder_present ?? true;
+  const queuedTotal = r.queued_total ?? 0;
+  if (jobsState.success(seq, JSON.stringify({ items, total, present, queuedTotal })) === "render") renderJobs(items, total, present, queuedTotal);
 }
 
 // `explicit` = the user pressed the refresh button (needs failure feedback);
