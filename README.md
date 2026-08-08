@@ -121,6 +121,15 @@ Optional settings:
 }
 ```
 
+`VOICENOTE_PI_PROVIDER` is a fallback chain, tried left to right. Credentials are
+resolved by `pi auth check` (covering OAuth, keys stored by `pi` → `/login`, and
+each provider's own API-key env var). A provider that deterministically cannot
+work — no credentials, or not a provider pi knows — is dropped from the chain,
+because its inevitable "No API key found" would replace the real error from the
+provider that actually failed. If that empties the chain, `vn run --mode notes`
+skips instead of paying for a transcript whose summary cannot happen.
+`vn doctor` prints the effective chain and the status of anything not ready.
+
 ## Usage
 
 ```bash

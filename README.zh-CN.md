@@ -121,6 +121,13 @@ brew install ffmpeg
 }
 ```
 
+`VOICENOTE_PI_PROVIDER` 是从左到右尝试的回退链。凭证由 `pi auth check` 判定(覆盖
+OAuth、`pi` → `/login` 存下的 key、以及各 provider 自己的 API key 环境变量)。
+确定不可能工作的 provider(没凭证, 或 pi 根本不认识这个名字)会被剔除 —— 否则
+它必然抛出的 "No API key found" 会覆盖掉真正失败的那个 provider 的错误。若链因此
+变空, `vn run --mode notes` 会直接跳过, 而不是花钱转写一个注定无法生成纪要的录音。
+实际生效的链和非 ready 项的状态由 `vn doctor` 打印。
+
 ## 用法
 
 ```bash
