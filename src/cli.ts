@@ -2,6 +2,7 @@
 import { cac } from 'cac'
 import { deriveNoProxy, envKeysToEmbed, hydrateFromFileEnv, parseFileEnv } from './envConfig'
 import { parseLockOwner } from './runLock'
+import { parsePiAuthStatus, parseProviderChain, usableChain, type PiAuthStatus } from './piProvider'
 import { applyOutcome, buildJobsView, classify, emptyState, localIso, MAX_ATTEMPTS, migrateLegacyState, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs'
 import { createHash, createHmac, randomUUID } from 'node:crypto'
 import { appendFile, chmod, mkdir, readFile, writeFile, copyFile, rename, unlink, stat, readdir, rm } from 'node:fs/promises'
@@ -12,7 +13,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
 
-const VERSION = '0.18.1'
+const VERSION = '0.18.2'
 const LAUNCH_AGENT_LABEL = 'sh.fastagent.voicenote'
 const LAUNCH_AGENT_LABEL_LEGACY = 'com.kid7st.voicenote' // pre-fastagent installs; cleaned up on install
 const TASK_NAME = 'VoiceNote'   // Windows Task Scheduler name (mac uses LAUNCH_AGENT_LABEL)
@@ -1292,10 +1293,19 @@ function piInvocation(args: string[]): { bin: string; args: string[] } {
   return cli ? { bin, args: [cli, ...args] } : { bin, args }
 }
 
-// Heuristic for "pi is logged in": the OAuth credential file exists. Used to skip
-// the pipeline before spending ASR on notes whose pi-codex summary would fail.
-function piAuthAvailable(): boolean {
-  return existsSync(PI_AUTH_PATH)
+// Gate before ASR is spent. "May work", not "will": only a chain pruned to
+// nothing (every provider deterministically unusable) stops a run — see
+// usableChain for why an unanswerable probe does not.
+function summaryMayWork(): boolean {
+  return piProviderCandidates().length > 0
+}
+
+// The one diagnostic for an empty chain, shared by the pre-ASR gate and the
+// summary call itself. Both must name the same cause: a generic "exhausted" here
+// would overwrite the truth exactly the way "No API key found for openai" did.
+function noUsableProviderMessage(): string {
+  const statuses = piConfiguredProviders().map(p => `${p}:${piProviderAuthStatus(p)}`).join(' ')
+  return `no usable summary provider (${statuses}) — each has no credentials, or is not a provider pi knows. Sign in (\`vn login\` for openai-codex, else \`pi\` → \`/login <provider>\` or its API key), or fix VOICENOTE_PI_PROVIDER.`
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -1467,15 +1477,50 @@ async function configSet(): Promise<void> {
   }
 }
 
+// A healthy probe takes ~0.5s and the chain is re-read many times per run, so
+// cache it — but briefly: `vn serve` is long-lived, and the answer changes out of
+// band when the user runs `pi` → `/login` elsewhere, or an OAuth token expires.
+const PI_AUTH_TTL_MS = 60_000
+// Refresh is deliberately left on (no --no-refresh) so an expired OAuth that
+// cannot be renewed reads as broken rather than ready — which means the probe
+// touches the network and can hang. Probes are serial, so a hung pi blocks a
+// scheduler tick for this × the chain length. Kept impatient (a healthy probe is
+// ~0.5s) because a timeout yields 'unknown', which is neutral: the run proceeds
+// and pi reports the real error, so cutting it short costs nothing.
+const PI_AUTH_PROBE_MS = 2000
+const piAuthStatusCache = new Map<string, { status: PiAuthStatus; at: number }>()
+function piProviderAuthStatus(provider: string): PiAuthStatus {
+  const cached = piAuthStatusCache.get(provider)
+  if (cached && Date.now() - cached.at < PI_AUTH_TTL_MS) return cached.status
+  const inv = piInvocation(['auth', 'check', '--provider', provider, '--json'])
+  const out = spawnSync(inv.bin, inv.args, { encoding: 'utf8', timeout: PI_AUTH_PROBE_MS, windowsHide: true })
+  // No pi binary is deterministic evidence in its own right — next run gets the
+  // same answer — so it belongs with 'unusable', not with a probe that timed out.
+  const status = (out.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
+    ? 'unusable'
+    : parsePiAuthStatus(out.stdout || '')
+  // 'unknown' is neutral by design, so nothing downstream reports it. Say it here
+  // — throttled, not once-per-process: `vn serve` re-probes every TTL and a probe
+  // that never answers would otherwise go silent after its first tick.
+  if (status !== 'ready' && shouldLogIdleStatus(`pi-auth-probe:${provider}:${status}`)) {
+    console.error(`pi auth check ${provider} → ${status}: ${String(out.error?.message || out.stderr || out.stdout || 'no output').slice(0, 200)}`)
+  }
+  piAuthStatusCache.set(provider, { status, at: Date.now() })
+  return status
+}
+
+function piConfiguredProviders(): string[] {
+  return parseProviderChain(process.env.VOICENOTE_PI_PROVIDER)
+}
+
 function piProviderCandidates(): string[] {
-  const configured = process.env.VOICENOTE_PI_PROVIDER?.trim()
-  const raw = configured || 'openai-codex,openai'
-  const providers = raw.split(',').map(s => s.trim()).filter(Boolean)
-  return providers.length ? Array.from(new Set(providers)) : ['openai-codex', 'openai']
+  return usableChain(piConfiguredProviders(), piProviderAuthStatus)
 }
 
 function piProviderFor(): string {
-  return piProviderCandidates()[0] || 'openai-codex'
+  // Label for logs and metadata.llm_backend. Empty chain is a real state now, and
+  // naming a provider we already know is unusable would put a lie in the record.
+  return piProviderCandidates()[0] || 'none-usable'
 }
 
 function piCodexModelFor(): string {
@@ -1563,15 +1608,20 @@ function isTransientPiError(e: any): boolean {
   return /socket connection was closed|socket hang up|econnreset|etimedout|esockettimedout|enetunreach|econnrefused|eai_again|fetch failed|network error|timed ?out|temporarily|overloaded|\b(429|500|502|503|504)\b/.test(msg)
 }
 
-async function chatCompleteViaPiCodex(opts: Omit<Parameters<typeof chatCompleteViaPiProvider>[0], 'provider'>): Promise<string> {
+// Returns the provider that actually answered, not the one we started with: the
+// chain falls back, and metadata recording the head would misname the run.
+async function chatCompleteViaPiCodex(opts: Omit<Parameters<typeof chatCompleteViaPiProvider>[0], 'provider'>): Promise<{ text: string; provider: string }> {
   const providers = piProviderCandidates()
+  // Reachable past the pre-ASR gate: credentials can lapse mid-run, or the caller
+  // may not go through it at all.
+  if (!providers.length) throw new Error(noUsableProviderMessage())
   const maxAttempts = Math.max(1, Number(process.env.VOICENOTE_PI_RETRIES || 3))
   let lastError: any = null
   for (const [idx, provider] of providers.entries()) {
     if (idx > 0) console.error(`pi provider fallback: trying ${provider} after ${providers[idx - 1]} failed: ${lastError?.message || lastError}`)
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        return await chatCompleteViaPiProvider({ ...opts, provider })
+        return { text: await chatCompleteViaPiProvider({ ...opts, provider }), provider }
       } catch (e: any) {
         lastError = e
         if (attempt < maxAttempts && isTransientPiError(e)) {
@@ -1615,7 +1665,7 @@ function piSummaryToolsHint(contextDir: string): string {
 // base, so read/grep/find operate there directly. If a configured context dir is
 // missing, say so loudly and run without tools rather than searching the wrong
 // tree (tools, the cwd hint, and the spawn cwd move together).
-async function chatComplete(opts: { systemPrompt: string; userPrompt: string; config: Config }): Promise<string> {
+async function chatComplete(opts: { systemPrompt: string; userPrompt: string; config: Config }): Promise<{ text: string; provider: string }> {
   const wantTools = !!piSummaryTools()
   const ctx = wantTools ? summaryContextDir(opts.config) : undefined
   const ctxExists = ctx ? existsSync(ctx) : false
@@ -1633,14 +1683,14 @@ async function chatComplete(opts: { systemPrompt: string; userPrompt: string; co
   })
 }
 
-async function summarizeTranscript(config: Config, transcript: string, rec: Recording, localAudioPath: string): Promise<Json> {
+async function summarizeTranscript(config: Config, transcript: string, rec: Recording, localAudioPath: string): Promise<{ meta: Json; provider: string }> {
   const messages = summaryMessages(config, transcript, rec, localAudioPath)
   const systemPrompt = String(messages[0]!.content)
   const userPrompt = String(messages[1]!.content)
-  const text = await chatComplete({ systemPrompt, userPrompt, config })
+  const { text, provider } = await chatComplete({ systemPrompt, userPrompt, config })
   const jsonText = extractFirstJsonObject(text)
   try {
-    return JSON.parse(jsonText || '{}')
+    return { meta: JSON.parse(jsonText || '{}') as Json, provider }
   } catch (e: any) {
     throw new Error(`summary returned non-JSON output (${e?.message || e}). First 400 chars: ${text.slice(0, 400)}`)
   }
@@ -1731,14 +1781,16 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
   const needsNotes = mode === 'notes'
   const resumeSummary = needsNotes && Boolean(opts.resumeFromTranscriptFiles)
   const transcribeBackendLabel = `volcano:${config.volcano?.resourceId || 'volc.seedasr.auc'}`
-  const llmBackendLabel = `pi:${piProviderFor()}`
+  // Lazy: resolving it probes pi (network, and `auth check` refreshes tokens on
+  // disk). Transcript mode never calls pi, and --dry-run promises no side effects.
+  const llmBackendLabel = needsNotes && !opts.dryRun ? `pi:${piProviderFor()}` : null
   const plan = resumeSummary
     ? 'reuse saved transcript → integrated semantic notes → write metadata/index (no auto move)'
     : `copy audio → transcribe → write transcript${needsNotes ? ' → integrated semantic notes' : ''} → write metadata/index (no auto move)`
 
   console.log(`\n=== voicenote job: ${basename(rec.sourcePath)} ===`)
   console.log(`Source: ${rec.sourcePath}`)
-  console.log(`Audio: duration=${rec.durationSeconds == null ? 'unknown' : formatSeconds(rec.durationSeconds)}, size=${formatBytes(rec.sizeBytes)}, mode=${mode}, asr=${transcribeBackendLabel}, llm=${llmBackendLabel}`)
+  console.log(`Audio: duration=${rec.durationSeconds == null ? 'unknown' : formatSeconds(rec.durationSeconds)}, size=${formatBytes(rec.sizeBytes)}, mode=${mode}, asr=${transcribeBackendLabel}${llmBackendLabel ? `, llm=${llmBackendLabel}` : ''}`)
   console.log(`Plan: ${plan}`)
   if (opts.dryRun) return { source_path: rec.sourcePath, source_id: rec.sourceId, would_copy_to: files.audio, resume_from_transcript: resumeSummary ? files.transcript : null, size_bytes: rec.sizeBytes, duration_seconds: rec.durationSeconds, mode }
 
@@ -1783,10 +1835,13 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
   }
 
   let summaryError: any = null
+  let summaryProvider: string | null = null
   if (needsNotes) {
     progressStep(nextStep(), totalSteps, 'Generate integrated semantic notes', `model=${piCodexModelFor()} via ${llmBackendLabel}`)
     try {
-      meta = await withHeartbeat('generate integrated semantic notes', () => summarizeTranscript(config, transcript, rec, files.audio), 60)
+      const summary = await withHeartbeat('generate integrated semantic notes', () => summarizeTranscript(config, transcript, rec, files.audio), 60)
+      meta = summary.meta
+      summaryProvider = summary.provider
     } catch (e: any) {
       summaryError = e
       console.error(`Summary step failed; transcript is preserved. Error: ${e?.message || e}`)
@@ -1804,7 +1859,9 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
   meta.asr_provider = 'volcano'
   meta.transcribe_model = config.volcano?.resourceId || 'volc.seedasr.auc'
   meta.summary_model = needsNotes && !summaryError ? piCodexModelFor() : null
-  meta.llm_backend = needsNotes ? llmBackendLabel : null
+  // The provider that actually answered, not the head of the chain it may have
+  // fallen back from. Null when no summary ran — summary_error says why.
+  meta.llm_backend = summaryProvider ? `pi:${summaryProvider}` : null
   meta.processed_at = nowIso()
   if (summaryError) meta.summary_error = String(summaryError?.message || summaryError)
 
@@ -2078,8 +2135,8 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
       if (shouldLogIdleStatus(`asr-misconfig:${config.recordDir}`)) console.error('ASR not configured: Volcano needs VOLCANO_ASR_KEY / VOLCANO_TOS_*. Skipping; run `vn doctor`, fix config, then re-run.')
       return
     }
-    if (mode === 'notes' && !piAuthAvailable()) {
-      if (shouldLogIdleStatus(`pi-noauth:${config.recordDir}`)) console.error('pi is not logged in (~/.pi/agent/auth.json missing). Skipping to avoid spending ASR on notes whose summary would fail. Run `pi` to log in, then re-run.')
+    if (mode === 'notes' && !summaryMayWork()) {
+      if (shouldLogIdleStatus(`pi-noauth:${config.recordDir}`)) console.error(`Skipping to avoid spending ASR on notes whose summary would fail: ${noUsableProviderMessage()}`)
       return
     }
   }
@@ -2696,6 +2753,12 @@ async function collectDoctor() {
   const ff = await runCommand(ffprobeBin(), ['-version'], 5000)
   const v = config.volcano
   const tools = piSummaryTools()
+  // Configured vs effective, plus per-provider status: "why did my chain shrink"
+  // and "why is my misspelled provider still listed" are the same question.
+  const configuredProviders = piConfiguredProviders()
+  const effectiveProviders = piProviderCandidates()
+  const providerStatus = Object.fromEntries(configuredProviders.map(p => [p, piProviderAuthStatus(p)]))
+  const summaryReady = effectiveProviders.length > 0
   return {
     version: VERSION,
     bun: process.versions.bun || null,
@@ -2711,8 +2774,8 @@ async function collectDoctor() {
           language: v.language ?? null,
         }
       : { configured: false as const },
-    summary: { backend: `pi:${piProviderCandidates().join('→')}`, providers: piProviderCandidates(), model: piCodexModelFor(), thinking: piThinkingLevel(), tools: tools || null, contextDir: tools ? summaryContextDir(config) : null },
-    pi: { bin: piCodexBin(), version: piCheck.code === 0 ? (piCheck.stdout.trim() || piCheck.stderr.trim() || null) : null, available: piCheck.code === 0, auth: piAuthAvailable() },
+    summary: { backend: `pi:${effectiveProviders.join('→') || 'none-usable'}`, ready: summaryReady, configuredProviders, effectiveProviders, providerStatus, model: piCodexModelFor(), thinking: piThinkingLevel(), tools: tools || null, contextDir: tools ? summaryContextDir(config) : null },
+    pi: { bin: piCodexBin(), version: piCheck.code === 0 ? (piCheck.stdout.trim() || piCheck.stderr.trim() || null) : null, available: piCheck.code === 0, auth: existsSync(PI_AUTH_PATH) },
     // Outbound proxy for HTTPS endpoints (updater/GitHub): honor the standard
     // env chain, not just lowercase http_proxy — an https_proxy-only setup must
     // still route the updater.
@@ -2779,12 +2842,17 @@ async function doctor(opts: { json?: boolean } = {}): Promise<void> {
     console.log(`volcano=not configured`)
   }
   console.log(`summaryBackend=${s.summary.backend}`)
-  console.log(`pi.bin=${s.pi.bin} providers=${s.summary.providers.join(',')} model.summary=${s.summary.model}`)
+  console.log(`pi.bin=${s.pi.bin} providers=${s.summary.effectiveProviders.join(',') || '<none usable>'} model.summary=${s.summary.model}`)
+  const notReady = Object.entries(s.summary.providerStatus).filter(([, st]) => st !== 'ready')
+  if (notReady.length) console.log(`pi.providerStatus=${notReady.map(([p, st]) => `${p}:${st}`).join(' ')} (unusable=pi not installed, no credentials, or no such provider — dropped from the chain; unknown=pi ran but gave no usable answer, kept anyway)`)
+  if (!s.summary.ready) console.log('summary.ready=NO — every configured provider is unusable; `vn run --mode notes` will skip rather than spend ASR')
   console.log(`pi.thinking=${s.summary.thinking}`)
   console.log(`pi.summaryTools=${s.summary.tools || '<disabled>'}`)
   if (s.summary.contextDir) console.log(`pi.contextDir=${s.summary.contextDir} (summary agent cwd + read/grep cross-reference root)`)
   console.log(`pi.version=${s.pi.version || 'missing'}`)
-  console.log(`pi.auth=${s.pi.auth ? 'logged-in' : 'NOT logged-in — run `vn login` to sign in, else the summary step will fail'}`)
+  // Neutral fact, not an instruction: an API-key user has no auth.json and needs
+  // nothing fixed. summary.ready above is what says whether anything is wrong.
+  console.log(`pi.auth=${s.pi.auth ? 'logged-in (auth.json present)' : 'no ~/.pi/agent/auth.json (fine if a provider API key is set)'}`)
   console.log(`defaultMode=notes`)
   console.log(`proxy=${s.proxy.url || '<unset>'}`)
   console.log(`speakers.self=${s.identity.self || '<unset>'}`)
