@@ -150,7 +150,7 @@ vn open <slug>                  # open a note by filename fragment
 vn forget <id|filename>         # let a recording be processed again
 vn log                          # print today's log tail (--lines N / -f follow / --err include launchd.err / --date YYYY-MM-DD)
 vn errors                       # print recent ERROR logs
-vn login                        # sign in to ChatGPT (Codex device-code flow, for the notes backend; no pi TUI needed)
+vn login                        # sign in to ChatGPT for the notes backend (browser callback; `--device-code` for headless machines). No pi TUI needed
 vn upgrade                      # reinstall latest npm package
 vn install-launch-agent
 vn status

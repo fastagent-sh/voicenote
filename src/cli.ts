@@ -13,7 +13,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
 
-const VERSION = '0.18.2'
+const VERSION = '0.18.3'
 const LAUNCH_AGENT_LABEL = 'sh.fastagent.voicenote'
 const LAUNCH_AGENT_LABEL_LEGACY = 'com.kid7st.voicenote' // pre-fastagent installs; cleaned up on install
 const TASK_NAME = 'VoiceNote'   // Windows Task Scheduler name (mac uses LAUNCH_AGENT_LABEL)
