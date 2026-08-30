@@ -323,6 +323,8 @@ irm https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/instal
 
 **Upgrades**: since 0.1.9 the app has a built-in updater — open the app → "Settings → Software update" → "Check for updates"; when a new version appears, click "Download & install"; the app restarts automatically with config/notes preserved. For first installs, or upgrades from 0.1.8 and earlier (which had no updater), re-run the one-line install script above.
 
+> **Windows, from 0.1.11 or earlier**: those builds point their updater at the pre-rebrand repo, which still exists and stops at 0.1.11 — "Check for updates" therefore always reports "up to date". The bundle identifier changed in the same rebrand, so re-running the installer does *not* replace them; both copies stay installed under the same name. Uninstall the old VoiceNote (Settings → Apps) first, then run the one-line install. Config and notes are untouched by the uninstall.
+
 ### Maintainers: packaging + release
 
 **Automatic (recommended)**: push an `app-v*` tag to trigger `.github/workflows/release-app.yml`:
