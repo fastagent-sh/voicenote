@@ -16,17 +16,17 @@
         <div class="brand">VoiceNote</div>
         <div class="topbar-right">
           <span id="agent-pill" class="agent-pill"></span>
-          <button id="sync-btn" class="icon-btn sync-btn" title="Re-detect the recorder and process now">Sync</button>
-          <button id="refresh-btn" class="icon-btn" title="Refresh status">↻</button>
-          <button id="settings-btn" class="icon-btn" title="Settings">⚙</button>
+          <button id="sync-btn" class="icon-btn sync-btn" title="Re-detect the recorder and process now" data-i18n data-i18n-title>Sync</button>
+          <button id="refresh-btn" class="icon-btn" title="Refresh status" data-i18n-title>↻</button>
+          <button id="settings-btn" class="icon-btn" title="Settings" data-i18n-title>⚙</button>
         </div>
       </header>
 
       <div class="dash">
         <main class="col col-notes">
           <div class="col-head">
-            <h2>Processing</h2>
-            <a id="open-ws" href="#" class="text-link">Open notes folder ↗</a>
+            <h2 data-i18n>Processing</h2>
+            <a id="open-ws" href="#" class="text-link" data-i18n>Open notes folder ↗</a>
           </div>
           <p id="sync-status" class="status sync-status" role="status"></p>
           <div id="notes-list" class="notes"></div>
@@ -34,12 +34,12 @@
 
         <aside class="col col-side">
           <section class="panel">
-            <div class="panel-head"><h3>Status</h3></div>
+            <div class="panel-head"><h3 data-i18n>Status</h3></div>
             <div id="status-rows" class="status-rows"></div>
-            <button id="login-btn" class="btn btn-ghost btn-block" type="button">Sign in to ChatGPT</button>
+            <button id="login-btn" class="btn btn-ghost btn-block" type="button" data-i18n>Sign in to ChatGPT</button>
             <p id="login-status" class="status"></p>
             <p id="auth-link-wrap" class="muted sm" hidden>
-              Browser didn't open? <a id="auth-link" href="#" class="text-link">Open the sign-in page manually</a>
+              <span data-i18n>Browser didn't open?</span> <a id="auth-link" href="#" class="text-link" data-i18n>Open the sign-in page manually</a>
             </p>
           </section>
         </aside>
@@ -49,26 +49,37 @@
     <!-- ─────────── Settings (standalone page) ─────────── -->
     <section id="settings" class="screen" hidden>
       <header class="topbar" data-tauri-drag-region>
-        <a id="settings-back" href="#" class="text-link back">‹ Back</a>
-        <div class="brand-sm">Settings</div>
+        <a id="settings-back" href="#" class="text-link back" data-i18n>‹ Back</a>
+        <div class="brand-sm" data-i18n>Settings</div>
         <span class="topbar-spacer"></span>
       </header>
       <form id="settings-form" class="settings-page" autocomplete="off">
         <div class="settings-inner">
           <div id="fields"></div>
           <section class="settings-group">
-            <div class="group-label">Software update</div>
+            <div class="group-label" data-i18n>Language</div>
+            <label class="field">
+              <span data-i18n>Interface language</span>
+              <select id="lang-select">
+                <option value="" data-i18n>Follow system</option>
+                <option value="zh">中文</option>
+                <option value="en">English</option>
+              </select>
+            </label>
+          </section>
+          <section class="settings-group">
+            <div class="group-label" data-i18n>Software update</div>
             <div class="update-row">
               <span id="update-version" class="muted sm"></span>
-              <button type="button" id="check-update-btn" class="btn btn-ghost">Check for updates</button>
+              <button type="button" id="check-update-btn" class="btn btn-ghost" data-i18n>Check for updates</button>
             </div>
             <p id="update-status" class="status"></p>
-            <button type="button" id="install-update-btn" class="btn btn-primary" hidden>Download &amp; install</button>
+            <button type="button" id="install-update-btn" class="btn btn-primary" hidden data-i18n>Download &amp; install</button>
           </section>
         </div>
         <footer class="settings-foot">
           <p id="settings-status" class="status"></p>
-          <button type="submit" id="save-btn" class="btn btn-primary btn-wide">Save</button>
+          <button type="submit" id="save-btn" class="btn btn-primary btn-wide" data-i18n>Save</button>
         </footer>
       </form>
     </section>

@@ -5,6 +5,7 @@ import { openUrl, openPath } from "@tauri-apps/plugin-opener";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { JobsRefreshState } from "./jobsState";
+import { t, applyStaticI18n, savedLang, setLang } from "./i18n";
 
 // ── Settings schema (flat, grouped; lives inline in the dashboard) ───────────
 type Field = { key: string; label: string; placeholder?: string; default?: string; secret?: boolean; required?: boolean };
@@ -73,14 +74,14 @@ function showScreen(which: "dash" | "settings") { $("dash").hidden = which !== "
 // ── Agent pill ───────────────────────────────────────────────────────────────
 function renderAgentPill(a: Status["agent"]) {
   const pill = $("agent-pill");
-  let text = "Agent running", tone = "ok";
+  let text = t("Agent running"), tone = "ok";
   const last = (a.logTail ?? []).slice(-1)[0] ?? "";
-  if (!a.installed) { text = "Agent not enabled"; tone = "err"; }
-  else if (/ERROR|failed|失败/i.test(last)) { text = "Agent error · check logs"; tone = "err"; }
-  else if (/Idle|no new recordings/i.test(last)) { text = "Idle · plug in the recorder to process"; tone = "ok"; }
-  else if (/transcrib|Volcano|Step 2|转写/i.test(last)) { text = "Transcribing…"; tone = "wait"; }
-  else if (/generate|notes|Step 3|纪要/i.test(last)) { text = "Generating notes…"; tone = "wait"; }
-  else if (/Completed|✓|Queue|processing/i.test(last)) { text = "Processing…"; tone = "wait"; }
+  if (!a.installed) { text = t("Agent not enabled"); tone = "err"; }
+  else if (/ERROR|failed|失败/i.test(last)) { text = t("Agent error · check logs"); tone = "err"; }
+  else if (/Idle|no new recordings/i.test(last)) { text = t("Idle · plug in the recorder to process"); tone = "ok"; }
+  else if (/transcrib|Volcano|Step 2|转写/i.test(last)) { text = t("Transcribing…"); tone = "wait"; }
+  else if (/generate|notes|Step 3|纪要/i.test(last)) { text = t("Generating notes…"); tone = "wait"; }
+  else if (/Completed|✓|Queue|processing/i.test(last)) { text = t("Processing…"); tone = "wait"; }
   pill.textContent = text; pill.className = `agent-pill ${tone}`;
 }
 
@@ -98,20 +99,20 @@ function statusRow(label: string, value: string, tone: "ok" | "warn" | "err" | "
 function renderStatus() {
   const box = $("status-rows");
   box.innerHTML = "";
-  if (!status) { box.appendChild(statusRow("Status", "Checking…", "muted")); return; }
+  if (!status) { box.appendChild(statusRow(t("Status"), t("Checking…"), "muted")); return; }
   const s = status;
-  box.appendChild(statusRow("ChatGPT", s.pi.auth ? "Connected" : "Not signed in", s.pi.auth ? "ok" : "err"));
-  box.appendChild(statusRow("Transcription", s.volcano.configured ? `Configured · ${s.volcano.tos.bucket}` : "Not configured", s.volcano.configured ? "ok" : "err"));
-  box.appendChild(statusRow("Proxy", s.proxy.url ?? "Not set", s.proxy.url ? "ok" : "warn"));
-  box.appendChild(statusRow("Recorder", s.recorder.exists ? "Connected" : "Not detected", s.recorder.exists ? "ok" : "muted"));
-  box.appendChild(statusRow("Audio tools", s.deps.ffprobe ? "Ready" : "Missing", s.deps.ffprobe ? "ok" : "err"));
+  box.appendChild(statusRow("ChatGPT", s.pi.auth ? t("Connected") : t("Not signed in"), s.pi.auth ? "ok" : "err"));
+  box.appendChild(statusRow(t("Transcription"), s.volcano.configured ? t("Configured · {0}", s.volcano.tos.bucket) : t("Not configured"), s.volcano.configured ? "ok" : "err"));
+  box.appendChild(statusRow(t("Proxy"), s.proxy.url ?? t("Not set"), s.proxy.url ? "ok" : "warn"));
+  box.appendChild(statusRow(t("Recorder"), s.recorder.exists ? t("Connected") : t("Not detected"), s.recorder.exists ? "ok" : "muted"));
+  box.appendChild(statusRow(t("Audio tools"), s.deps.ffprobe ? t("Ready") : t("Missing"), s.deps.ffprobe ? "ok" : "err"));
   const btn = $("login-btn") as HTMLButtonElement;
-  btn.textContent = s.pi.auth ? "Re-sign in to ChatGPT" : "Sign in to ChatGPT";
+  btn.textContent = s.pi.auth ? t("Re-sign in to ChatGPT") : t("Sign in to ChatGPT");
 }
 
 // ── Jobs (processing status of each recording) ───────────────────────────────
 const JOB_META: Record<Job["status"], { label: string; tone: string }> = {
-  running: { label: "Processing", tone: "wait" },
+  running: { label: "Running", tone: "wait" },
   queued: { label: "Queued", tone: "" },
   done: { label: "Done", tone: "ok" },
   notes_failed: { label: "Notes retry pending", tone: "err" },
@@ -129,13 +130,13 @@ function renderJobs(jobs: Job[], total = jobs.length, recorderPresent = true, qu
     e.className = "empty";
     e.innerHTML = `<div class="e-icon">🎙️</div>`;
     const p = document.createElement("p");
-    p.textContent = "No recordings yet. Plug in the recorder and the agent will transcribe and generate notes automatically; progress shows up here.";
+    p.textContent = t("No recordings yet. Plug in the recorder and the agent will transcribe and generate notes automatically; progress shows up here.");
     e.appendChild(p);
     list.appendChild(e);
     return;
   }
   for (const j of jobs) {
-    const meta = JOB_META[j.status] ?? { label: j.status, tone: "" };
+    const meta = JOB_META[j.status] ? { label: t(JOB_META[j.status].label), tone: JOB_META[j.status].tone } : { label: j.status, tone: "" };
     // notes_failed's stub note links the saved transcript + retry command —
     // openable so the user can actually reach them.
     const openable = (j.status === "done" || j.status === "notes_failed" || j.status === "gave_up") && !!j.notes;
@@ -147,7 +148,7 @@ function renderJobs(jobs: Job[], total = jobs.length, recorderPresent = true, qu
     const badge = document.createElement("span"); badge.className = `jbadge ${meta.tone}`;
     badge.textContent = j.status === "running" && j.step ? `${meta.label} · ${j.step}` : meta.label;
     head.appendChild(badge);
-    if (openable) { const open = document.createElement("span"); open.className = "job-open"; open.textContent = "Open ↗"; head.appendChild(open); }
+    if (openable) { const open = document.createElement("span"); open.className = "job-open"; open.textContent = t("Open ↗"); head.appendChild(open); }
 
     const title = document.createElement("div"); title.className = "job-title";
     title.textContent = j.title || j.name;
@@ -164,7 +165,7 @@ function renderJobs(jobs: Job[], total = jobs.length, recorderPresent = true, qu
   if (total > jobs.length) {
     const more = document.createElement("div");
     more.className = "job-time";
-    more.textContent = `… ${total - jobs.length} more`;
+    more.textContent = t("… {0} more", total - jobs.length);
     list.appendChild(more);
   }
   // A queue that can't drain because the recorder is unplugged looks identical
@@ -173,8 +174,8 @@ function renderJobs(jobs: Job[], total = jobs.length, recorderPresent = true, qu
     const note = document.createElement("div");
     note.className = "job-time";
     note.textContent = queuedTotal
-      ? `Recorder not connected — ${queuedTotal} recording(s) waiting for it.`
-      : "Recorder not connected.";
+      ? t("Recorder not connected — {0} recording(s) waiting for it.", queuedTotal)
+      : t("Recorder not connected.");
     list.appendChild(note);
   }
 }
@@ -203,7 +204,7 @@ async function refreshJobs(explicit = false) {
   try {
     r = (await invoke("recent_jobs")) as { items: Job[]; total?: number; queued_total?: number; recorder_present?: boolean };
   } catch (e) {
-    if (jobsState.failure() === "error") renderError("notes-list", `Failed to read processing status: ${e}`);
+    if (jobsState.failure() === "error") renderError("notes-list", t("Failed to read processing status: {0}", String(e)));
     else console.error("refreshJobs (background)", e); // poll/boot/post-save flow: keep last-good list
     return;
   }
@@ -223,9 +224,9 @@ async function refreshStatus(explicit = false) {
   } catch (e) {
     status = null;
     const pill = $("agent-pill");
-    pill.textContent = "Status check failed";
+    pill.textContent = t("Status check failed");
     pill.className = "agent-pill err";
-    renderError("status-rows", `Failed to read status: ${e}`);
+    renderError("status-rows", t("Failed to read status: {0}", String(e)));
     // Still attempt the jobs refresh: an explicit refresh promised feedback,
     // and jobs may succeed (or surface its own error) even when doctor fails.
     void refreshJobs(explicit);
@@ -248,20 +249,20 @@ async function syncNow() {
   // agent's real status until the next manual refresh.
   const st = $("sync-status");
   btn.disabled = true;
-  setStatus(st, "Syncing…", "wait");
+  setStatus(st, t("Syncing…"), "wait");
   try {
     // refreshStatus swallows doctor failures (sets status=null) instead of
     // throwing — so branch on `status`, don't rely on the catch below.
     await refreshStatus(true); // re-detect device (updates status rows) + refresh jobs
-    if (!status) { setStatus(st, "Failed to read status, retry later", "err"); return; }
-    if (!status.recorder.exists) { setStatus(st, "Recorder not detected · re-plug it and press Sync again", "err"); return; }
+    if (!status) { setStatus(st, t("Failed to read status, retry later"), "err"); return; }
+    if (!status.recorder.exists) { setStatus(st, t("Recorder not detected · re-plug it and press Sync again"), "err"); return; }
     await invoke("trigger_run"); // acks immediately; run proceeds in background
     // Neutral wording: a run may be deduped by acquireRunLock (a background
     // tick already holds it), so don't promise "new recordings will appear" — point at the
     // list, which reflects whichever run is active.
-    setStatus(st, "Sync triggered · progress shows in the list below", "wait");
+    setStatus(st, t("Sync triggered · progress shows in the list below"), "wait");
   } catch (e) {
-    setStatus(st, `Sync failed: ${e}`, "err");
+    setStatus(st, t("Sync failed: {0}", String(e)), "err");
   } finally {
     btn.disabled = false;
   }
@@ -270,10 +271,10 @@ async function syncNow() {
 // ── Settings (inline, built once; values loaded from config) ─────────────────
 function makeInput(f: Field): HTMLElement {
   const wrap = document.createElement("label"); wrap.className = "field";
-  const span = document.createElement("span"); span.textContent = f.label;
+  const span = document.createElement("span"); span.textContent = t(f.label);
   if (f.required) { const s = document.createElement("em"); s.textContent = " *"; s.className = "req"; span.appendChild(s); }
   const el = document.createElement("input"); el.id = `f_${f.key}`; el.type = f.secret ? "password" : "text";
-  if (f.placeholder) el.placeholder = f.placeholder;
+  if (f.placeholder) el.placeholder = t(f.placeholder);
   wrap.append(span, el);
   return wrap;
 }
@@ -284,7 +285,7 @@ function buildSettings() {
   for (const g of GROUPS) {
     const sec = document.createElement("section");
     sec.className = "settings-group";
-    const lbl = document.createElement("div"); lbl.className = "group-label"; lbl.textContent = g.label;
+    const lbl = document.createElement("div"); lbl.className = "group-label"; lbl.textContent = t(g.label);
     sec.appendChild(lbl);
     for (const f of g.fields) sec.appendChild(makeInput(f));
     root.appendChild(sec);
@@ -301,7 +302,7 @@ async function openSettings() { buildSettings(); showScreen("settings"); setStat
 let pendingUpdate: Update | null = null;
 
 async function showAppVersion() {
-  try { $("update-version").textContent = `Current version v${await getVersion()}`; } catch (e) { console.error("getVersion", e); }
+  try { $("update-version").textContent = t("Current version v{0}", await getVersion()); } catch (e) { console.error("getVersion", e); }
 }
 
 async function checkUpdate() {
@@ -309,7 +310,7 @@ async function checkUpdate() {
   const st = $("update-status");
   const installBtn = $("install-update-btn") as HTMLButtonElement;
   btn.disabled = true; installBtn.hidden = true; pendingUpdate = null;
-  setStatus(st, "Checking…", "wait");
+  setStatus(st, t("Checking…"), "wait");
   try {
     // Route the update check (and the download, which reuses these options)
     // through the configured/system proxy — github.com is often unreachable
@@ -317,12 +318,12 @@ async function checkUpdate() {
     // it now rather than silently degrading to a direct connection.
     if (!status) await refreshStatus();
     const update = await check(status?.proxy.url ? { proxy: status.proxy.url } : undefined);
-    if (!update) { setStatus(st, "Already up to date", "ok"); return; }
+    if (!update) { setStatus(st, t("Already up to date"), "ok"); return; }
     pendingUpdate = update;
-    setStatus(st, `New version available: v${update.version}`, "");
+    setStatus(st, t("New version available: v{0}", update.version), "");
     installBtn.hidden = false;
   } catch (e) {
-    setStatus(st, `Update check failed: ${e}`, "err");
+    setStatus(st, t("Update check failed: {0}", String(e)), "err");
   } finally {
     btn.disabled = false;
   }
@@ -341,15 +342,15 @@ async function installUpdate() {
     // quits the app to run the installer; on macOS we relaunch explicitly.
     await pendingUpdate.downloadAndInstall((e) => {
       switch (e.event) {
-        case "Started": total = e.data.contentLength ?? 0; setStatus(st, "Starting download…", "wait"); break;
-        case "Progress": got += e.data.chunkLength; setStatus(st, total ? `Downloading ${Math.round((got / total) * 100)}%` : `Downloading (${got} bytes)`, "wait"); break;
-        case "Finished": setStatus(st, "Downloaded, installing…", "wait"); break;
+        case "Started": total = e.data.contentLength ?? 0; setStatus(st, t("Starting download…"), "wait"); break;
+        case "Progress": got += e.data.chunkLength; setStatus(st, total ? t("Downloading {0}%", Math.round((got / total) * 100)) : t("Downloading ({0} bytes)", got), "wait"); break;
+        case "Finished": setStatus(st, t("Downloaded, installing…"), "wait"); break;
       }
     });
-    setStatus(st, "Installed, restarting…", "ok");
+    setStatus(st, t("Installed, restarting…"), "ok");
     await relaunch();
   } catch (e) {
-    setStatus(st, `Update failed: ${e}`, "err");
+    setStatus(st, t("Update failed: {0}", String(e)), "err");
     installBtn.disabled = false; checkBtn.disabled = false;
   }
 }
@@ -368,7 +369,7 @@ async function loadConfig() {
   } catch (e) {
     settingsLoaded = false;
     ($("save-btn") as HTMLButtonElement).disabled = true;
-    setStatus($("settings-status"), `Failed to read current config: ${e} — saving is disabled to avoid overwriting existing config; go back and reopen Settings`, "err");
+    setStatus($("settings-status"), t("Failed to read current config: {0} — saving is disabled to avoid overwriting existing config; go back and reopen Settings", String(e)), "err");
     return;
   }
   settingsLoaded = true;
@@ -385,22 +386,22 @@ async function ensureAgent(force = false) { try { await invoke("ensure_agent", {
 
 async function saveSettings(e: Event) {
   e.preventDefault();
-  if (!settingsLoaded) { setStatus($("settings-status"), "Config was not loaded successfully; saving is disabled (it would wipe existing config). Go back and reopen Settings", "err"); return; }
-  for (const f of ALL_FIELDS) { if (f.required && !(inputEl(f.key)?.value ?? "").trim()) { setStatus($("settings-status"), `Please fill in "${f.label}"`, "err"); return; } }
+  if (!settingsLoaded) { setStatus($("settings-status"), t("Config was not loaded successfully; saving is disabled (it would wipe existing config). Go back and reopen Settings"), "err"); return; }
+  for (const f of ALL_FIELDS) { if (f.required && !(inputEl(f.key)?.value ?? "").trim()) { setStatus($("settings-status"), t('Please fill in "{0}"', t(f.label)), "err"); return; } }
   const env: Record<string, string | null> = {};
   for (const key of ENV_KEYS) { const v = (inputEl(key)?.value ?? "").trim(); env[key] = v === "" ? null : v; }
   const aliases = (inputEl("self_aliases")?.value ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   const self = { name: (inputEl("self_name")?.value ?? "").trim() || null, aliases };
   const btn = $("save-btn") as HTMLButtonElement;
   btn.disabled = true;
-  setStatus($("settings-status"), "Saving…", "wait");
+  setStatus($("settings-status"), t("Saving…"), "wait");
   try {
     await invoke("config_set", { payload: { env, self } });
     await ensureAgent(true);
     await refreshStatus();
     showScreen("dash");
   } catch (err) {
-    setStatus($("settings-status"), `Save failed: ${err}`, "err");
+    setStatus($("settings-status"), t("Save failed: {0}", String(err)), "err");
   } finally {
     btn.disabled = false;
   }
@@ -423,22 +424,22 @@ function onLoginEvent(e: LoginEvent) {
   const st = $("login-status");
   switch (e.event) {
     case "auth_url":
-      setStatus(st, "Browser opened; this completes automatically after you authorize…", "wait");
+      setStatus(st, t("Browser opened; this completes automatically after you authorize…"), "wait");
       ($("auth-link") as HTMLAnchorElement).dataset.url = e.url; $("auth-link-wrap").hidden = false; break;
     case "device_code":
-      setStatus(st, `Enter ${e.userCode} at ${e.verificationUri}`, "wait"); break;
+      setStatus(st, t("Enter {0} at {1}", e.userCode, e.verificationUri), "wait"); break;
     case "success":
-      loginSucceeded = true; setStatus(st, "✓ Signed in", "ok"); $("auth-link-wrap").hidden = true; break;
+      loginSucceeded = true; setStatus(st, t("✓ Signed in"), "ok"); $("auth-link-wrap").hidden = true; break;
     case "error":
       // Terminal: end the login here so the follow-up `closed` hits the guard
       // below and cannot overwrite this diagnostic with a generic "login exited".
       loginRunning = false;
-      setStatus(st, `Sign-in failed: ${e.message}`, "err"); ($("login-btn") as HTMLButtonElement).disabled = false; break;
+      setStatus(st, t("Sign-in failed: {0}", e.message), "err"); ($("login-btn") as HTMLButtonElement).disabled = false; break;
     case "closed":
       loginRunning = false; ($("login-btn") as HTMLButtonElement).disabled = false;
       if (loginSucceeded) ensureAgent(true).then(() => refreshStatus());
-      else if (e.reason === "engine-exited") setStatus(st, "Engine exited unexpectedly; sign-in aborted, please retry", "err");
-      else if (e.code !== 0) setStatus(st, `Sign-in exited (code=${e.code ?? "?"})`, "err");
+      else if (e.reason === "engine-exited") setStatus(st, t("Engine exited unexpectedly; sign-in aborted, please retry"), "err");
+      else if (e.code !== 0) setStatus(st, t("Sign-in exited (code={0})", e.code ?? "?"), "err");
       break;
   }
 }
@@ -447,12 +448,13 @@ function startLogin() {
   if (loginRunning) return;
   loginRunning = true; loginSucceeded = false;
   $("auth-link-wrap").hidden = true; ($("login-btn") as HTMLButtonElement).disabled = true;
-  setStatus($("login-status"), "Starting sign-in…", "wait");
-  invoke("login_chatgpt").catch((err) => { loginRunning = false; setStatus($("login-status"), `Failed to start: ${err}`, "err"); ($("login-btn") as HTMLButtonElement).disabled = false; });
+  setStatus($("login-status"), t("Starting sign-in…"), "wait");
+  invoke("login_chatgpt").catch((err) => { loginRunning = false; setStatus($("login-status"), t("Failed to start: {0}", String(err)), "err"); ($("login-btn") as HTMLButtonElement).disabled = false; });
 }
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
 window.addEventListener("DOMContentLoaded", async () => {
+  applyStaticI18n();
   listen<LoginEvent>("login-event", (e) => onLoginEvent(e.payload));
 
   $("refresh-btn").addEventListener("click", () => void refreshStatus(true));
@@ -464,6 +466,9 @@ window.addEventListener("DOMContentLoaded", async () => {
   $("open-ws").addEventListener("click", (e) => { e.preventDefault(); if (status?.workspace) openPath(status.workspace); });
   $("settings-form").addEventListener("submit", saveSettings);
   $("login-btn").addEventListener("click", startLogin);
+  const langSel = $("lang-select") as HTMLSelectElement;
+  langSel.value = savedLang;
+  langSel.addEventListener("change", () => setLang(langSel.value));
   $("auth-link").addEventListener("click", (e) => { e.preventDefault(); const u = ($("auth-link") as HTMLAnchorElement).dataset.url; if (u) openUrl(u); });
 
   // The background agent retries/processes recordings on its own 60s tick;
