@@ -1,8 +1,9 @@
 // Pure logic behind cli.ts's env-config provenance. Extracted (no fs, no
 // process.env) so its invariants are testable — see envConfig.test.ts:
 //
-// 1. File precedence: config.json (GUI) wins over ~/.zshrc (legacy CLI);
-//    $HOME tokens are expanded in both.
+// 1. File precedence: config.json (GUI) wins over ~/.zshrc (legacy CLI).
+//    Simple $VAR/${VAR} references resolve from these values without running
+//    shell code; runtime hydration may also use inherited environment values.
 // 2. Hydration: only keys the real environment does NOT set are filled from
 //    files — an explicit empty string in the environment (e.g.
 //    VOICENOTE_PI_SUMMARY_TOOLS="") counts as set and is never overridden.
@@ -17,28 +18,46 @@
 //    warn: it may equally be a stale shell session shadowing a fresh config
 //    edit, and it will keep overriding until the scheduler is reinstalled.
 
-/** File-provided values for `keys`: config.json over zshrc, $HOME expanded. */
+/** Omit `environment` when checking which values files can reproduce on their own. */
 export function parseFileEnv(
   keys: readonly string[],
   configData: Record<string, unknown>,
   zshrcContent: string | null,
   home: string,
+  environment: Record<string, string | undefined> = {},
 ): Record<string, string> {
-  const out: Record<string, string> = {}
-  const expand = (v: string) => v.replace(/\$\{?HOME\}?/g, home)
+  const raw = new Map<string, string>()
+  const literal = new Set<string>()
   for (const key of keys) {
     const v = configData[key]
-    if (typeof v === 'string') out[key] = expand(v)
+    if (typeof v === 'string') { raw.set(key, v); continue }
+    const pattern = new RegExp(`(?:^|\\n)\\s*export\\s+${key}=(?:"([^"]*)"|'([^']*)'|([^\\s"'#]+))`)
+    const match = zshrcContent?.match(pattern)
+    const value = match?.slice(1).find(v => v !== undefined)
+    if (value !== undefined) raw.set(key, value)
+    if (match?.[2] !== undefined) literal.add(key)
   }
-  if (zshrcContent !== null) {
-    for (const key of keys) {
-      if (out[key] !== undefined) continue // config.json wins
-      const pattern = new RegExp(`(?:^|\\n)\\s*export\\s+${key}=(?:"([^"]*)"|'([^']*)'|([^\\s"'#]+))`)
-      const value = zshrcContent.match(pattern)?.slice(1).find(v => v !== undefined)
-      if (value !== undefined) out[key] = expand(value)
-    }
+  const resolved = new Map<string, string>()
+  const visiting = new Set<string>()
+  const resolve = (key: string): string => {
+    const cached = resolved.get(key)
+    if (cached !== undefined) return cached
+    if (visiting.has(key)) throw new Error(`Circular config variable reference: ${key}`)
+    visiting.add(key)
+    const value = raw.get(key)!
+    const expanded = literal.has(key) ? value : value.replace(/\\(\$)|\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g, (token, escaped, braced, bare) => {
+      if (escaped) return escaped
+      const ref = braced || bare
+      if (ref === 'HOME') return home
+      // Unknown references stay literal, so they cannot look recoverable from files.
+      if (Object.hasOwn(environment, ref) && environment[ref] !== undefined) return environment[ref]!
+      return raw.has(ref) ? resolve(ref) : token
+    })
+    visiting.delete(key)
+    resolved.set(key, expanded)
+    return expanded
   }
-  return out
+  return Object.fromEntries(Array.from(raw.keys(), key => [key, resolve(key)]))
 }
 
 /** Which keys to copy from fileEnv into an environment (invariant 2). */

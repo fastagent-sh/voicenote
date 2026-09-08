@@ -25,6 +25,52 @@ describe("parseFileEnv", () => {
     const out = parseFileEnv(KEYS, { A_KEY: 42, NOT_A_KEY: "x", speakers: {} } as any, null, "/h");
     expect(out).toEqual({});
   });
+
+  test("proxy aliases resolve from files and do not become scheduler overrides", () => {
+    const keys = ["http_proxy", "https_proxy", "all_proxy", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "LOCAL_PROXY_HOST", "LOCAL_PROXY_PORT", "LOCAL_NO_PROXY"];
+    const config = { LOCAL_PROXY_HOST: "127.0.0.1", LOCAL_PROXY_PORT: "7890" };
+    const shell = [
+      'export LOCAL_PROXY_HOST="old-host"',
+      'export LOCAL_PROXY_PORT="8080"',
+      'export LOCAL_NO_PROXY="localhost,127.0.0.1"',
+      'export http_proxy="http://${LOCAL_PROXY_HOST}:${LOCAL_PROXY_PORT}"',
+      'export https_proxy="$http_proxy"',
+      'export all_proxy="$http_proxy"',
+      'export no_proxy="$LOCAL_NO_PROXY"',
+      'export HTTP_PROXY="$http_proxy"',
+      'export HTTPS_PROXY="$https_proxy"',
+      'export ALL_PROXY="$all_proxy"',
+      'export NO_PROXY="$no_proxy"',
+    ].join("\n");
+    const files = parseFileEnv(keys, config, shell, "/h");
+    const environment = Object.fromEntries(keys.slice(0, 8).map(k => [k, k.toLowerCase() === "no_proxy" ? "localhost,127.0.0.1" : "http://127.0.0.1:7890"]));
+    expect(files).toEqual({ ...config, LOCAL_NO_PROXY: "localhost,127.0.0.1", ...environment });
+    expect(envKeysToEmbed(keys, environment, new Set(), files)).toEqual({ embed: {}, frozenOverrides: [] });
+    expect(hydrateFromFileEnv(keys, {}, files)).toEqual(files);
+
+    const changed = parseFileEnv(keys, { ...config, LOCAL_PROXY_PORT: "7891" }, shell, "/h");
+    expect(changed.HTTPS_PROXY).toBe("http://127.0.0.1:7891");
+    expect(envKeysToEmbed(keys, environment, new Set(), changed).frozenOverrides).toEqual(["http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]);
+  });
+
+  test("runtime references honor environment overrides without changing the file-only comparison", () => {
+    const config = { A_KEY: "$B_KEY", B_KEY: "file" };
+    expect(parseFileEnv(KEYS, config, null, "/h", { B_KEY: "environment" }).A_KEY).toBe("environment");
+    expect(parseFileEnv(KEYS, config, null, "/h").A_KEY).toBe("file");
+    expect(parseFileEnv(KEYS, config, null, "/h", { B_KEY: "" }).A_KEY).toBe("");
+  });
+
+  test("single-quoted shell values stay literal; unknown references and commands are never evaluated", () => {
+    const shell = "export A_KEY='$HOME/$B_KEY'\nexport B_KEY=\"$(printf unsafe)-$MISSING\"\nexport C_KEY=\"\\$HOME\"";
+    const files = parseFileEnv(KEYS, {}, shell, "/h");
+    expect(files).toEqual({ A_KEY: "$HOME/$B_KEY", B_KEY: "$(printf unsafe)-$MISSING", C_KEY: "$HOME" });
+    expect(envKeysToEmbed(KEYS, { B_KEY: "unsafe-resolved" }, new Set(), files)).toEqual({ embed: { B_KEY: "unsafe-resolved" }, frozenOverrides: ["B_KEY"] });
+    expect(parseFileEnv(KEYS, { A_KEY: "$HOME_SUFFIX/${HOME}/$toString" }, null, "/h").A_KEY).toBe("$HOME_SUFFIX//h/$toString");
+  });
+
+  test("cyclic references fail with variable names, never secret values", () => {
+    expect(() => parseFileEnv(KEYS, { A_KEY: "secret-$B_KEY", B_KEY: "$A_KEY" }, null, "/h")).toThrow("Circular config variable reference: A_KEY");
+  });
 });
 
 describe("hydrateFromFileEnv", () => {

@@ -13,7 +13,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
 
-const VERSION = '0.18.4'
+const VERSION = '0.18.5'
 const LAUNCH_AGENT_LABEL = 'sh.fastagent.voicenote'
 const LAUNCH_AGENT_LABEL_LEGACY = 'com.kid7st.voicenote' // pre-fastagent installs; cleaned up on install
 const TASK_NAME = 'VoiceNote'   // Windows Task Scheduler name (mac uses LAUNCH_AGENT_LABEL)
@@ -209,20 +209,21 @@ function applyDerivedProxy(): void {
   }
 }
 
-// What the config files would provide for each ENV_KEY, independent of this
-// process's environment. Primary source is ~/.config/voicenote/config.json
+// File values for each ENV_KEY. Hydration passes the current environment for
+// variable references; scheduler comparison uses files alone. Primary source is
+// ~/.config/voicenote/config.json
 // (ENV-style runtime keys at the top level; identity under `speakers`); the
 // legacy fallback is `export KEY=...` lines in ~/.zshrc, for CLI installs
 // that predate config.json. Precedence/expansion logic lives in envConfig.ts
 // (pure + tested). Two consumers: loadEnvConfig() hydrates these into
 // process.env for keys the real environment doesn't set, and launchAgentEnv()
 // uses them to decide which values are recoverable at run time.
-function fileProvidedEnv(): Record<string, string> {
+function fileProvidedEnv(environment: Record<string, string | undefined> = {}): Record<string, string> {
   const data = loadJsonSync<Record<string, unknown>>(CONFIG_ENV_PATH, {})
   let zshrc: string | null = null
   const zshrcPath = join(os.homedir(), '.zshrc')
   if (existsSync(zshrcPath)) { try { zshrc = readFileSync(zshrcPath, 'utf8') } catch { zshrc = null } }
-  return parseFileEnv(ENV_KEYS, data, zshrc, os.homedir())
+  return parseFileEnv(ENV_KEYS, data, zshrc, os.homedir(), environment)
 }
 
 let envConfigLoaded = false
@@ -231,7 +232,7 @@ function loadEnvConfig(): void {
   envConfigLoaded = true
   // Precedence: process.env > config.json (GUI) > ~/.zshrc (legacy); an
   // explicit empty string in the environment is never overridden.
-  const toApply = hydrateFromFileEnv(ENV_KEYS, process.env, fileProvidedEnv())
+  const toApply = hydrateFromFileEnv(ENV_KEYS, process.env, fileProvidedEnv(process.env))
   for (const [key, v] of Object.entries(toApply)) { process.env[key] = v; hydratedEnvKeys.add(key) }
   // Derive http_proxy etc. from LOCAL_PROXY_HOST/PORT regardless of source, and
   // always keep Volcano hosts on NO_PROXY. (Runs even with no config files.)
@@ -2250,12 +2251,6 @@ async function launchAgentEnv(): Promise<Record<string, string>> {
   // about: it may equally be a stale shell session, and it will keep
   // overriding config edits until the scheduler is reinstalled.
   //
-  // Known blind spot: the matrix compares each key against its OWN file value,
-  // so it can't see cross-key derivations. A real-env http_proxy is embedded
-  // as-is and will shadow a GUI edit to LOCAL_PROXY_HOST (different key name)
-  // until reinstall. Only no_proxy is special-cased (originals below) because
-  // WE synthesize it; http_proxy from a user's shell is left as a real value.
-  //
   // no_proxy/NO_PROXY carry a volcano-hosts merge we added; substitute the
   // pre-merge real-env original (or drop it entirely if we synthesized the
   // whole value) so the scheduler never freezes our merge over config edits.
@@ -2265,7 +2260,7 @@ async function launchAgentEnv(): Promise<Record<string, string>> {
   const { embed, frozenOverrides } = envKeysToEmbed(ENV_KEYS, embedEnv, hydratedEnvKeys, fileEnv)
   Object.assign(env, embed)
   for (const k of frozenOverrides) {
-    console.error(`Warning: environment ${k} differs from the config file value; the environment value is snapshotted into the scheduler and will override config edits until you re-run \`vn install-launch-agent\`.`)
+    console.error(`Warning: environment ${k} overrides the config file. Update or unset it, then re-run \`vn install-launch-agent --load\` to apply the intended value.`)
   }
   // Embed pi's ABSOLUTE path so launchd resolves it regardless of the fixed plist
   // PATH (npm global bin can live outside it under nvm / custom prefixes). Resolve

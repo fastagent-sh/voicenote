@@ -194,7 +194,9 @@ The install script writes an editable template:
 }
 ```
 
-Changes take effect on the next `vn run`. A legacy `~/.config/voicenote/speakers.json` is still read as a compatibility fallback.
+Changes take effect on the next `vn run`. Config values and unquoted/double-quoted `.zshrc` exports support simple `$VAR` / `${VAR}` references to other settings and `$HOME`. Single-quoted shell values stay literal. Shell commands are never executed. Runtime references honor inherited environment values; scheduler comparisons resolve from files alone.
+
+A legacy `~/.config/voicenote/speakers.json` is still read as a compatibility fallback.
 
 ## Workflow
 
@@ -237,7 +239,7 @@ The LaunchAgent invokes `vn run` every 60 seconds. It skips safely when no recor
 
 > Config changes (`config.json` or `~/.zshrc`) are picked up automatically by the background agent on its next run — no reinstall needed. The plist only snapshots real environment variables and pi's absolute path: **after changing `VOICENOTE_PI_BIN`, re-run `vn install-launch-agent` and reload** (`vn upgrade` regenerates the plist automatically). If pi is not signed in or ASR is not configured, the agent skips processing instead of burning ASR spend.
 >
-> Exception: if you `export http_proxy=...` directly in your shell (instead of using `LOCAL_PROXY_HOST`) and then run `vn install-launch-agent`, that real env value is snapshotted into the plist and keeps overriding later `LOCAL_PROXY_HOST` changes; re-run `vn install-launch-agent` to clear it. Prefer `LOCAL_PROXY_HOST`/`LOCAL_PROXY_PORT` for proxy configuration.
+> Proxy values that match the file configuration, including expanded variable references, are not embedded and produce no override warning. Values supplied only by the shell, or differing from the files, are embedded as explicit overrides. To clear an unwanted override, update or unset the shell variable, then run `vn install-launch-agent --load`. Prefer `LOCAL_PROXY_HOST`/`LOCAL_PROXY_PORT` in `config.json` for proxy configuration.
 
 Logs:
 
