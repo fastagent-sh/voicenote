@@ -8,12 +8,12 @@ import { createHash, createHmac, randomUUID } from 'node:crypto'
 import { appendFile, chmod, mkdir, readFile, writeFile, copyFile, rename, unlink, stat, readdir, rm } from 'node:fs/promises'
 import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, appendFileSync, openSync, closeSync, statSync, readSync, unlinkSync, renameSync } from 'node:fs'
 import { dlopen, FFIType, suffix } from 'bun:ffi'
-import { basename, dirname, extname, join } from 'node:path'
+import { basename, dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
 
-const VERSION = '0.18.5'
+const VERSION = '0.18.6'
 const LAUNCH_AGENT_LABEL = 'sh.fastagent.voicenote'
 const LAUNCH_AGENT_LABEL_LEGACY = 'com.kid7st.voicenote' // pre-fastagent installs; cleaned up on install
 const TASK_NAME = 'VoiceNote'   // Windows Task Scheduler name (mac uses LAUNCH_AGENT_LABEL)
@@ -800,6 +800,18 @@ function isCandidateFile(path: string): boolean {
  * treating a half-read device as authoritative would delete live queue entries
  * along with their retry counters.
  */
+async function toRecording(file: string): Promise<Recording> {
+  const st = await stat(file)
+  return {
+    sourcePath: file,
+    sizeBytes: st.size,
+    modifiedAt: st.mtime.toISOString(),
+    durationSeconds: await ffprobeDuration(file),
+    sourceId: await sourceIdFor(file),
+    recordedAt: parseRecordedAt(file),
+  }
+}
+
 async function scanRecordings(config: Config): Promise<{ recordings: Recording[]; complete: boolean }> {
   if (!existsSync(config.recordDir)) return { recordings: [], complete: false }
   const recordings: Recording[] = []
@@ -813,14 +825,7 @@ async function scanRecordings(config: Config): Promise<{ recordings: Recording[]
       if (!st) { complete = false; continue }
       if (!st.isFile()) continue
       try {
-        recordings.push({
-          sourcePath: file,
-          sizeBytes: st.size,
-          modifiedAt: st.mtime.toISOString(),
-          durationSeconds: await ffprobeDuration(file),
-          sourceId: await sourceIdFor(file),
-          recordedAt: parseRecordedAt(file),
-        })
+        recordings.push(await toRecording(file))
       } catch (e) { complete = false; warnSideEffect(`read ${basename(file)} during scan`, e) }
     }
   } catch (e) {
@@ -2061,9 +2066,10 @@ function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true } catch (e: any) { return e?.code === 'EPERM' }
 }
 
-async function runPipeline(opts: any): Promise<void> {
+async function runPipeline(file: string | undefined, opts: any): Promise<void> {
   wireDailyLog()
   const config = getConfig()
+  opts = { ...opts, file }
   const lock = await acquireRunLock()
   if (!lock) {
     console.log('voicenote pipeline already running; skip')
@@ -2089,21 +2095,30 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   const interrupted = reconcileInterrupted(store.jobs, nowIso())
   if (interrupted.length) console.log(`Reclaimed ${interrupted.length} job(s) left running by an interrupted run: ${interrupted.slice(0, 3).map(j => j.name).join(', ')}`)
 
-  if (!existsSync(config.recordDir)) {
+  // Explicit file: process exactly that path, wherever it lives. Nothing is
+  // scanned, so the listing is never "complete" (no pruning), and the recorder
+  // filters (age/size/duration) don't apply — the user named the file.
+  const single = opts.file ? resolve(String(opts.file)) : null
+  if (single && !statSync(single, { throwIfNoEntry: false })?.isFile()) throw new Error(`Not a file: ${single}`)
+  if (!single && !existsSync(config.recordDir)) {
     if (shouldLogIdleStatus(`missing:${config.recordDir}`)) {
       console.log(`Idle: recorder not mounted or record dir missing: ${config.recordDir} (repeated idle logs suppressed for 30m)`)
     }
     return
   }
-  const { recordings, complete: scanComplete } = await scanRecordings(config)
+  const { recordings, complete: scanComplete } = single
+    ? { recordings: [await toRecording(single)], complete: false }
+    : await scanRecordings(config)
   const mode = normalizeRunMode(opts)
   const force = Boolean(opts.force)
   const eligible: Recording[] = []
   const skipCounts: Record<string, number> = {}
   const skipSamples: Record<string, string[]> = {}
-  const verboseSkips = Boolean(opts.verbose || opts.dryRun)
+  // An explicitly named file that gets skipped must say why, not fall into the
+  // idle-suppressed silence meant for the 60s scheduler tick.
+  const verboseSkips = Boolean(opts.verbose || opts.dryRun || single)
   const seen = new Set<string>()
-  const limits = limitsOf(config)
+  const limits = single ? { maxAgeHours: 0, minBytes: 0, minDurationSeconds: 0 } : limitsOf(config)
   for (const rec of recordings) {
     seen.add(rec.sourceId)
     const entry = recordFor(store, rec)
@@ -2117,7 +2132,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   // Only prune against a listing we believe to be complete: if the recorder went
   // away mid-glob the scan is partial, and pruning would wipe live queue entries
   // (they'd return on the next scan, but their retry counters would not).
-  const dropped = pruneUnseen(store.jobs, seen, scanComplete && existsSync(config.recordDir))
+  const dropped = pruneUnseen(store.jobs, seen, !single && scanComplete && existsSync(config.recordDir))
   // The only routine path that deletes state — never do it silently.
   if (dropped.length) console.log(`Forgot ${dropped.length} record(s) whose source is no longer on the recorder: ${dropped.slice(0, 3).map(j => j.name).join(', ')}${dropped.length > 3 ? `…(+${dropped.length - 3})` : ''}`)
   const skipSummary = Object.entries(skipCounts).map(([reason, count]) => `${reason}=${count}`).join(', ') || 'none'
@@ -2202,7 +2217,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
     }
     // Whole recorder went away — every remaining target would fail the same way
     // and churn ASR-free but noisy retries. Stop and let the next run rescan.
-    if (!existsSync(config.recordDir)) {
+    if (!single && !existsSync(config.recordDir)) {
       console.error(`Recorder disappeared mid-run (${config.recordDir}); stopping. Remaining recordings stay queued.`)
       break
     }
@@ -2902,7 +2917,7 @@ async function dispatchServe(req: any, send: (o: unknown) => void): Promise<void
         // request timeout can't misread it as a wedged engine. Progress shows
         // via the jobs poll; acquireRunLock inside runPipeline dedupes against
         // the scheduler tick and a double-click.
-        void runPipeline({}).catch(e => console.error('manual run failed:', e?.message || e))
+        void runPipeline(undefined, {}).catch(e => console.error('manual run failed:', e?.message || e))
         result = { started: true }
         break
       }
@@ -2986,7 +3001,7 @@ async function serve(): Promise<void> {
 
 const cli = cac('vn')
 
-cli.command('run', 'Scan recorder and process recordings (Volcano ASR + pi notes)')
+cli.command('run [file]', 'Scan recorder and process recordings, or process one audio file by path (Volcano ASR + pi notes)')
   .option('--mode <mode>', 'Output mode: notes (default) | transcript', { default: 'notes' })
   .option('--latest', 'Only process newest eligible recording')
   .option('--force', 'Reprocess already processed recordings')

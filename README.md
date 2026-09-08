@@ -158,6 +158,7 @@ vn run --latest                 # process only the latest valid recording
 vn run --latest --force         # re-run the latest one
 vn run --pdf                    # additionally render a PDF after notes
 vn run --dry-run                # print the plan only
+vn run /path/to/audio.m4a       # process one file by path (skips the scan, ignores age/size/duration filters)
 vn list                         # list this month's notes
 vn list --month 2026-05         # specific month
 vn last                         # print the latest processing summary

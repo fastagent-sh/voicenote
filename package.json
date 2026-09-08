@@ -1,6 +1,6 @@
 {
   "name": "@fastagent-sh/voicenote",
-  "version": "0.18.5",
+  "version": "0.18.6",
   "description": "Voice recordings → diarized transcripts → integrated semantic Markdown notes. Currently optimized for the PHILIPS VTR6500 recorder, but the workflow is generic.",
   "type": "module",
   "license": "MIT",

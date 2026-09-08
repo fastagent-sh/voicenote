@@ -138,6 +138,7 @@ vn run --latest                 # 只处理最新有效录音
 vn run --latest --force         # 重跑最新条
 vn run --pdf                    # 生成纪要后额外渲染 PDF
 vn run --dry-run                # 仅列出计划
+vn run /path/to/audio.m4a       # 直接处理单个文件(不扫描目录, 不套用时长/大小/时效过滤)
 vn list                         # 列出本月笔记
 vn list --month 2026-05         # 指定月份
 vn last                         # 打印最新处理摘要
