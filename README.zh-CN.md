@@ -113,7 +113,7 @@ brew install ffmpeg
   "VOICENOTE_RECORD_DIR": "/Volumes/VTR6500/RECORD",
   "VOICENOTE_MAX_AGE_HOURS": "48",
   "VOICENOTE_PI_BIN": "pi",
-  "VOICENOTE_PI_PROVIDER": "openai-codex,openai",
+  "VOICENOTE_PI_PROVIDER": "openai-codex",
   "VOICENOTE_PI_MODEL": "gpt-5.5",
   "VOICENOTE_PI_THINKING": "high",
   "VOICENOTE_PI_SUMMARY_TOOLS": "read,grep",
@@ -121,11 +121,13 @@ brew install ffmpeg
 }
 ```
 
-`VOICENOTE_PI_PROVIDER` 是从左到右尝试的回退链。凭证由 `pi auth check` 判定(覆盖
+`VOICENOTE_PI_PROVIDER` 是从左到右尝试的回退链, 默认只有 `openai-codex`。如果你确实配了
+ OpenAI API key, 可以显式写成 `openai-codex,openai`。凭证由 `pi auth check` 判定(覆盖
 OAuth、`pi` → `/login` 存下的 key、以及各 provider 自己的 API key 环境变量)。
 确定不可能工作的 provider(没凭证, 或 pi 根本不认识这个名字)会被剔除 —— 否则
-它必然抛出的 "No API key found" 会覆盖掉真正失败的那个 provider 的错误。若链因此
-变空, `vn run --mode notes` 会直接跳过, 而不是花钱转写一个注定无法生成纪要的录音。
+它必然抛出的 "No API key found" 会覆盖掉真正失败的那个 provider 的错误。整条链都失败时,
+报错会列出每个 provider 的失败原因, 回退项缺 key 不会再掩盖第一个 provider 的真正错误。
+若剪枝后链变空, `vn run --mode notes` 会直接跳过, 而不是花钱转写一个注定无法生成纪要的录音。
 实际生效的链和非 ready 项的状态由 `vn doctor` 打印。
 
 ## 用法

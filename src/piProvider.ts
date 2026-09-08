@@ -1,7 +1,12 @@
 // Which pi providers the summary chain tries. Credential *detection* lives in
 // cli.ts (it shells out to `pi auth check`); only the pure logic is here.
 
-export const DEFAULT_PI_PROVIDERS = ['openai-codex', 'openai']
+// Only the free ChatGPT OAuth path by default. The paid OpenAI API fallback is
+// opt-in (VOICENOTE_PI_PROVIDER='openai-codex,openai', or the GUI dropdown):
+// shipping it in the default chain meant every codex failure was retried against
+// a provider almost nobody has a key for, and that second failure was the one the
+// user saw.
+export const DEFAULT_PI_PROVIDERS = ['openai-codex']
 
 export function defaultPiModel(provider: string): string {
   return provider === 'deepseek' ? 'deepseek-v4-flash' : 'gpt-5.5'

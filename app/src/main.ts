@@ -30,7 +30,7 @@ const GROUPS: Group[] = [
   ]},
   { label: "Notes generation", fields: [
     { key: "VOICENOTE_PI_PROVIDER", label: "Provider", default: DEFAULT_PI_PROVIDERS.join(","), options: [
-      { value: DEFAULT_PI_PROVIDERS.join(","), label: "ChatGPT with OpenAI API fallback" },
+      { value: "openai-codex,openai", label: "ChatGPT with OpenAI API fallback" },
       { value: "openai-codex", label: "ChatGPT" },
       { value: "openai", label: "OpenAI API" },
       { value: "deepseek", label: "DeepSeek API" },

@@ -13,7 +13,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
 
-const VERSION = '0.18.6'
+const VERSION = '0.18.7'
 const LAUNCH_AGENT_LABEL = 'sh.fastagent.voicenote'
 const LAUNCH_AGENT_LABEL_LEGACY = 'com.kid7st.voicenote' // pre-fastagent installs; cleaned up on install
 const TASK_NAME = 'VoiceNote'   // Windows Task Scheduler name (mac uses LAUNCH_AGENT_LABEL)
@@ -1625,6 +1625,7 @@ async function chatCompleteViaPiCodex(opts: Omit<Parameters<typeof chatCompleteV
   if (!providers.length) throw new Error(noUsableProviderMessage())
   const maxAttempts = Math.max(1, Number(process.env.VOICENOTE_PI_RETRIES || 3))
   let lastError: any = null
+  const failures: string[] = []
   for (const [idx, provider] of providers.entries()) {
     if (idx > 0) console.error(`pi provider fallback: trying ${provider} after ${providers[idx - 1]} failed: ${lastError?.message || lastError}`)
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -1641,7 +1642,14 @@ async function chatCompleteViaPiCodex(opts: Omit<Parameters<typeof chatCompleteV
         break // non-transient, or retries exhausted → fall back to next provider
       }
     }
+    failures.push(`${provider}: ${String(lastError?.message || lastError).slice(0, 400)}`)
   }
+  // Report EVERY provider's error, not just the chain's last one. The last link is
+  // usually the fallback nobody signed into, so its "No API key found for openai"
+  // buried the actual reason openai-codex failed (usage limit, expired token, 5xx)
+  // in the notes stub and in the GUI — which then disagreed with a dashboard that
+  // correctly showed ChatGPT as connected.
+  if (failures.length > 1) throw new Error(`pi summary failed on every provider — ${failures.join(' | ')}`)
   throw lastError || new Error('pi provider fallback exhausted')
 }
 

@@ -113,7 +113,7 @@ Optional settings:
   "VOICENOTE_RECORD_DIR": "/Volumes/VTR6500/RECORD",
   "VOICENOTE_MAX_AGE_HOURS": "48",
   "VOICENOTE_PI_BIN": "pi",
-  "VOICENOTE_PI_PROVIDER": "openai-codex,openai",
+  "VOICENOTE_PI_PROVIDER": "openai-codex",
   "VOICENOTE_PI_MODEL": "gpt-5.5",
   "VOICENOTE_PI_THINKING": "high",
   "VOICENOTE_PI_SUMMARY_TOOLS": "read,grep",
@@ -121,12 +121,16 @@ Optional settings:
 }
 ```
 
-`VOICENOTE_PI_PROVIDER` is a fallback chain, tried left to right. Credentials are
+`VOICENOTE_PI_PROVIDER` is a fallback chain, tried left to right; it defaults to
+`openai-codex` alone. Add the paid API path explicitly (`openai-codex,openai`) if
+you keep an OpenAI key around. Credentials are
 resolved by `pi auth check` (covering OAuth, keys stored by `pi` → `/login`, and
 each provider's own API-key env var). A provider that deterministically cannot
 work — no credentials, or not a provider pi knows — is dropped from the chain,
 because its inevitable "No API key found" would replace the real error from the
-provider that actually failed. If that empties the chain, `vn run --mode notes`
+provider that actually failed. When a chain still fails everywhere, the reported
+error lists every provider's failure, so a fallback's missing key never hides why
+the first provider broke. If pruning empties the chain, `vn run --mode notes`
 skips instead of paying for a transcript whose summary cannot happen.
 `vn doctor` prints the effective chain and the status of anything not ready.
 
