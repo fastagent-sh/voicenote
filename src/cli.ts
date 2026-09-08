@@ -2,7 +2,7 @@
 import { cac } from 'cac'
 import { deriveNoProxy, envKeysToEmbed, hydrateFromFileEnv, parseFileEnv } from './envConfig'
 import { parseLockOwner } from './runLock'
-import { parsePiAuthStatus, parseProviderChain, usableChain, type PiAuthStatus } from './piProvider'
+import { defaultPiModel, parsePiAuthStatus, parseProviderChain, usableChain, type PiAuthStatus } from './piProvider'
 import { applyOutcome, buildJobsView, classify, emptyState, localIso, MAX_ATTEMPTS, migrateLegacyState, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs'
 import { createHash, createHmac, randomUUID } from 'node:crypto'
 import { appendFile, chmod, mkdir, readFile, writeFile, copyFile, rename, unlink, stat, readdir, rm } from 'node:fs/promises'
@@ -13,7 +13,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
 
-const VERSION = '0.18.3'
+const VERSION = '0.18.4'
 const LAUNCH_AGENT_LABEL = 'sh.fastagent.voicenote'
 const LAUNCH_AGENT_LABEL_LEGACY = 'com.kid7st.voicenote' // pre-fastagent installs; cleaned up on install
 const TASK_NAME = 'VoiceNote'   // Windows Task Scheduler name (mac uses LAUNCH_AGENT_LABEL)
@@ -137,6 +137,7 @@ const ENV_KEYS = [
   'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
   'LOCAL_PROXY_HOST', 'LOCAL_PROXY_PORT', 'LOCAL_NO_PROXY',
   'OPENAI_API_KEY',
+  'DEEPSEEK_API_KEY',
 ]
 
 // Volcano endpoints (TOS object storage + openspeech ASR) should NEVER go through
@@ -1493,7 +1494,8 @@ function piProviderAuthStatus(provider: string): PiAuthStatus {
   const cached = piAuthStatusCache.get(provider)
   if (cached && Date.now() - cached.at < PI_AUTH_TTL_MS) return cached.status
   const inv = piInvocation(['auth', 'check', '--provider', provider, '--json'])
-  const out = spawnSync(inv.bin, inv.args, { encoding: 'utf8', timeout: PI_AUTH_PROBE_MS, windowsHide: true })
+  // Bun's spawnSync needs an explicit env to inherit keys loaded from config.json.
+  const out = spawnSync(inv.bin, inv.args, { encoding: 'utf8', timeout: PI_AUTH_PROBE_MS, windowsHide: true, env: process.env })
   // No pi binary is deterministic evidence in its own right — next run gets the
   // same answer — so it belongs with 'unusable', not with a probe that timed out.
   const status = (out.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
@@ -1524,7 +1526,7 @@ function piProviderFor(): string {
 }
 
 function piCodexModelFor(): string {
-  return process.env.VOICENOTE_PI_MODEL_SUMMARY || process.env.VOICENOTE_PI_MODEL || 'gpt-5.5'
+  return process.env.VOICENOTE_PI_MODEL_SUMMARY || process.env.VOICENOTE_PI_MODEL || defaultPiModel(piConfiguredProviders()[0]!)
 }
 
 function stripJsonFences(text: string): string {
@@ -1661,7 +1663,7 @@ function piSummaryToolsHint(contextDir: string): string {
   return `Before writing the notes you have two read-only tools: read and grep. Your current working directory (cwd) is \`${contextDir}\` (the configured notes/reference directory); use relative paths for grep/read.\n\nGoal: use existing context to align names, speakers, client/project names, product names, and domain terms in this note; do not maintain or assume a separate glossary.\n\nSuggested flow:\n- First extract the most likely client/project/product keywords from the title, filename, and transcript.\n- If a clear topic matches, prefer grep/read on related index pages, project docs, status records, or the 3-5 most recent related notes in the same directory; use them to identify Speaker B/C/F etc., common aliases, product names, and term spellings.\n- If no clear topic matches, grep the current directory with keywords and read only the few most relevant files.\n- Before output, do one names/terms lint pass: eliminate leftover Speaker A/B/C, obviously misheard names, product-name variants, and outdated names; when context is insufficient, keep the uncertainty — never guess.\n\nConstraints:\n- At most 10 tool calls total; if the transcript alone is sufficient, make none.\n- Read only within \`${contextDir}\`; skip directories that clearly involve personal privacy/credentials/finance (e.g. identity / credentials / finance).\n- Found information is only for consistency and background calibration; never write content absent from this transcript into the notes as new meeting facts.\n- Do not attempt to write files or call bash (those tools are not enabled).`
 }
 
-// Summary runs on the pi-codex backend. The agent's working dir IS the knowledge
+// Summary runs through pi with the configured provider. The agent's working dir IS the knowledge
 // base, so read/grep/find operate there directly. If a configured context dir is
 // missing, say so loudly and run without tools rather than searching the wrong
 // tree (tools, the cwd hint, and the spawn cwd move together).
@@ -2753,8 +2755,8 @@ async function collectDoctor() {
   const ff = await runCommand(ffprobeBin(), ['-version'], 5000)
   const v = config.volcano
   const tools = piSummaryTools()
-  // Configured vs effective, plus per-provider status: "why did my chain shrink"
-  // and "why is my misspelled provider still listed" are the same question.
+  // An explicit status refresh must see newly saved keys and OAuth logins.
+  piAuthStatusCache.clear()
   const configuredProviders = piConfiguredProviders()
   const effectiveProviders = piProviderCandidates()
   const providerStatus = Object.fromEntries(configuredProviders.map(p => [p, piProviderAuthStatus(p)]))
@@ -2989,7 +2991,7 @@ async function serve(): Promise<void> {
 
 const cli = cac('vn')
 
-cli.command('run', 'Scan recorder and process recordings (Volcano ASR + pi-codex notes)')
+cli.command('run', 'Scan recorder and process recordings (Volcano ASR + pi notes)')
   .option('--mode <mode>', 'Output mode: notes (default) | transcript', { default: 'notes' })
   .option('--latest', 'Only process newest eligible recording')
   .option('--force', 'Reprocess already processed recordings')

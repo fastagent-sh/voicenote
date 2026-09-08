@@ -6,9 +6,10 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { JobsRefreshState } from "./jobsState";
 import { t, applyStaticI18n, savedLang, setLang } from "./i18n";
+import { DEFAULT_PI_PROVIDERS, defaultPiModel, parseProviderChain, type PiAuthStatus } from "../../src/piProvider";
 
 // ── Settings schema (flat, grouped; lives inline in the dashboard) ───────────
-type Field = { key: string; label: string; placeholder?: string; default?: string; secret?: boolean; required?: boolean };
+type Field = { key: string; label: string; placeholder?: string; default?: string; secret?: boolean; required?: boolean; options?: { value: string; label: string }[] };
 type Group = { label: string; fields: Field[] };
 
 const GROUPS: Group[] = [
@@ -27,7 +28,18 @@ const GROUPS: Group[] = [
     { key: "VOLCANO_TOS_ACCESS_KEY", label: "TOS Access Key", secret: true, required: true },
     { key: "VOLCANO_TOS_SECRET_KEY", label: "TOS Secret Key", secret: true, required: true },
   ]},
-  { label: "Network proxy (for reaching ChatGPT; empty = system proxy)", fields: [
+  { label: "Notes generation", fields: [
+    { key: "VOICENOTE_PI_PROVIDER", label: "Provider", default: DEFAULT_PI_PROVIDERS.join(","), options: [
+      { value: DEFAULT_PI_PROVIDERS.join(","), label: "ChatGPT with OpenAI API fallback" },
+      { value: "openai-codex", label: "ChatGPT" },
+      { value: "openai", label: "OpenAI API" },
+      { value: "deepseek", label: "DeepSeek API" },
+    ] },
+    { key: "VOICENOTE_PI_MODEL_SUMMARY", label: "Model", required: true },
+    { key: "DEEPSEEK_API_KEY", label: "DeepSeek API Key", secret: true, placeholder: "Leave empty to use credentials from pi or the environment" },
+    { key: "OPENAI_API_KEY", label: "OpenAI API Key", secret: true, placeholder: "Leave empty to use credentials from pi or the environment" },
+  ]},
+  { label: "Network proxy (empty = system proxy)", fields: [
     { key: "LOCAL_PROXY_HOST", label: "Proxy host (optional)", placeholder: "Empty = follow system proxy" },
     { key: "LOCAL_PROXY_PORT", label: "Proxy port (optional)", placeholder: "Empty = follow system proxy" },
   ]},
@@ -45,7 +57,7 @@ type Status = {
   workspace: string;
   recorder: { dir: string; exists: boolean };
   volcano: { configured: true; tos: { bucket: string } } | { configured: false };
-  pi: { auth: boolean };
+  summary: { ready: boolean; configuredProviders: string[]; providerStatus: Record<string, PiAuthStatus>; model: string };
   proxy: { url: string | null };
   identity: { self: string | null };
   deps: { ffprobe: boolean };
@@ -67,7 +79,7 @@ let loginSucceeded = false;
 let settingsBuilt = false;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
-function inputEl(key: string) { return document.getElementById(`f_${key}`) as HTMLInputElement | null; }
+function inputEl(key: string) { return document.getElementById(`f_${key}`) as HTMLInputElement | HTMLSelectElement | null; }
 function setStatus(el: HTMLElement, text: string, kind: "" | "ok" | "err" | "wait" = "") { el.textContent = text; el.className = `status ${kind}`; }
 function showScreen(which: "dash" | "settings") { $("dash").hidden = which !== "dash"; $("settings").hidden = which !== "settings"; }
 
@@ -101,13 +113,19 @@ function renderStatus() {
   box.innerHTML = "";
   if (!status) { box.appendChild(statusRow(t("Status"), t("Checking…"), "muted")); return; }
   const s = status;
-  box.appendChild(statusRow("ChatGPT", s.pi.auth ? t("Connected") : t("Not signed in"), s.pi.auth ? "ok" : "err"));
+  for (const provider of s.summary.configuredProviders) {
+    const auth = s.summary.providerStatus[provider];
+    const label = provider === "openai-codex" ? "ChatGPT" : provider === "deepseek" ? "DeepSeek" : provider === "openai" ? "OpenAI API" : provider;
+    box.appendChild(statusRow(label, auth === "ready" ? t("Credentials configured") : auth === "unusable" ? t("Credentials unavailable") : t("Could not check credentials"), auth === "ready" ? "ok" : auth === "unusable" ? "err" : "warn"));
+  }
+  box.appendChild(statusRow(t("Summary model"), s.summary.model, "muted"));
   box.appendChild(statusRow(t("Transcription"), s.volcano.configured ? t("Configured · {0}", s.volcano.tos.bucket) : t("Not configured"), s.volcano.configured ? "ok" : "err"));
   box.appendChild(statusRow(t("Proxy"), s.proxy.url ?? t("Not set"), s.proxy.url ? "ok" : "warn"));
   box.appendChild(statusRow(t("Recorder"), s.recorder.exists ? t("Connected") : t("Not detected"), s.recorder.exists ? "ok" : "muted"));
   box.appendChild(statusRow(t("Audio tools"), s.deps.ffprobe ? t("Ready") : t("Missing"), s.deps.ffprobe ? "ok" : "err"));
+  $("chatgpt-login").hidden = !s.summary.configuredProviders.includes("openai-codex");
   const btn = $("login-btn") as HTMLButtonElement;
-  btn.textContent = s.pi.auth ? t("Re-sign in to ChatGPT") : t("Sign in to ChatGPT");
+  btn.textContent = s.summary.providerStatus["openai-codex"] === "ready" ? t("Re-sign in to ChatGPT") : t("Sign in to ChatGPT");
 }
 
 // ── Jobs (processing status of each recording) ───────────────────────────────
@@ -273,10 +291,25 @@ function makeInput(f: Field): HTMLElement {
   const wrap = document.createElement("label"); wrap.className = "field";
   const span = document.createElement("span"); span.textContent = t(f.label);
   if (f.required) { const s = document.createElement("em"); s.textContent = " *"; s.className = "req"; span.appendChild(s); }
-  const el = document.createElement("input"); el.id = `f_${f.key}`; el.type = f.secret ? "password" : "text";
-  if (f.placeholder) el.placeholder = t(f.placeholder);
+  const el = f.options ? document.createElement("select") : document.createElement("input");
+  el.id = `f_${f.key}`;
+  if (el instanceof HTMLSelectElement) {
+    for (const option of f.options!) el.add(new Option(t(option.label), option.value));
+  } else {
+    el.type = f.secret ? "password" : "text";
+    if (f.placeholder) el.placeholder = t(f.placeholder);
+  }
+  el.required = !!f.required;
   wrap.append(span, el);
   return wrap;
+}
+
+function updateSummaryFields(resetModel = false) {
+  const providers = parseProviderChain(inputEl("VOICENOTE_PI_PROVIDER")!.value);
+  for (const [provider, key] of [["deepseek", "DEEPSEEK_API_KEY"], ["openai", "OPENAI_API_KEY"]]) {
+    inputEl(key)!.closest<HTMLElement>(".field")!.hidden = !providers.includes(provider);
+  }
+  if (resetModel) inputEl("VOICENOTE_PI_MODEL_SUMMARY")!.value = defaultPiModel(providers[0]);
 }
 
 function buildSettings() {
@@ -290,6 +323,7 @@ function buildSettings() {
     for (const f of g.fields) sec.appendChild(makeInput(f));
     root.appendChild(sec);
   }
+  inputEl("VOICENOTE_PI_PROVIDER")!.addEventListener("change", () => updateSummaryFields(true));
   settingsBuilt = true;
 }
 
@@ -376,8 +410,15 @@ async function loadConfig() {
   ($("save-btn") as HTMLButtonElement).disabled = false;
   for (const f of ALL_FIELDS) {
     if (f.key.startsWith("self_")) continue;
-    const el = inputEl(f.key); if (el) el.value = cfg.env?.[f.key] ?? f.default ?? "";
+    const el = inputEl(f.key);
+    if (el) {
+      const value = cfg.env?.[f.key] ?? f.default ?? "";
+      if (el instanceof HTMLSelectElement && !Array.from(el.options).some(o => o.value === value)) el.add(new Option(value, value));
+      el.value = value;
+    }
   }
+  inputEl("VOICENOTE_PI_MODEL_SUMMARY")!.value = cfg.env?.VOICENOTE_PI_MODEL_SUMMARY || cfg.env?.VOICENOTE_PI_MODEL || defaultPiModel(parseProviderChain(inputEl("VOICENOTE_PI_PROVIDER")!.value)[0]);
+  updateSummaryFields();
   const name = inputEl("self_name"); if (name) name.value = cfg.self?.name ?? "";
   const al = inputEl("self_aliases"); if (al) al.value = (cfg.self?.aliases ?? []).join(", ");
 }
@@ -493,5 +534,5 @@ window.addEventListener("DOMContentLoaded", async () => {
   // First run (transcription not configured) lands on the settings page; otherwise
   // stay on the dashboard.
   if (status && !status.volcano.configured) await openSettings();
-  else if (status?.pi.auth) ensureAgent(false).then(() => refreshStatus());
+  else if (status?.summary.ready) ensureAgent(false).then(() => refreshStatus());
 });

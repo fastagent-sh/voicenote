@@ -36,11 +36,13 @@
           <section class="panel">
             <div class="panel-head"><h3 data-i18n>Status</h3></div>
             <div id="status-rows" class="status-rows"></div>
-            <button id="login-btn" class="btn btn-ghost btn-block" type="button" data-i18n>Sign in to ChatGPT</button>
-            <p id="login-status" class="status"></p>
-            <p id="auth-link-wrap" class="muted sm" hidden>
-              <span data-i18n>Browser didn't open?</span> <a id="auth-link" href="#" class="text-link" data-i18n>Open the sign-in page manually</a>
-            </p>
+            <div id="chatgpt-login" hidden>
+              <button id="login-btn" class="btn btn-ghost btn-block" type="button" data-i18n>Sign in to ChatGPT</button>
+              <p id="login-status" class="status"></p>
+              <p id="auth-link-wrap" class="muted sm" hidden>
+                <span data-i18n>Browser didn't open?</span> <a id="auth-link" href="#" class="text-link" data-i18n>Open the sign-in page manually</a>
+              </p>
+            </div>
           </section>
         </aside>
       </div>

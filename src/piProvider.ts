@@ -3,6 +3,10 @@
 
 export const DEFAULT_PI_PROVIDERS = ['openai-codex', 'openai']
 
+export function defaultPiModel(provider: string): string {
+  return provider === 'deepseek' ? 'deepseek-v4-flash' : 'gpt-5.5'
+}
+
 export function parseProviderChain(raw: string | undefined): string[] {
   const parsed = Array.from(new Set((raw ?? '').split(',').map(s => s.trim()).filter(Boolean)))
   return parsed.length ? parsed : [...DEFAULT_PI_PROVIDERS]

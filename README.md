@@ -6,7 +6,7 @@ CLI command: `vn`
 
 [中文文档 / Chinese documentation](README.zh-CN.md)
 
-Currently tuned for the PHILIPS VTR6500 voice recorder, but the workflow is generic: scan recordings under a mount point → transcribe with speaker diarization → GPT performs the necessary cleanup and process reconstruction inside the notes-generation stage → produce smart notes.
+Currently tuned for the PHILIPS VTR6500 voice recorder, but the workflow is generic: scan recordings under a mount point → transcribe with speaker diarization → the selected summary model performs cleanup and process reconstruction → produce smart notes.
 
 **Two ways to use it:**
 
@@ -129,6 +129,24 @@ because its inevitable "No API key found" would replace the real error from the
 provider that actually failed. If that empties the chain, `vn run --mode notes`
 skips instead of paying for a transcript whose summary cannot happen.
 `vn doctor` prints the effective chain and the status of anything not ready.
+
+### DeepSeek notes
+
+In the desktop app, open **Settings → Notes generation**, select **DeepSeek API**, enter your API key, and save. The model defaults to `deepseek-v4-flash`; enter `deepseek-v4-pro` to use Pro. ChatGPT sign-in is only shown for configurations that use ChatGPT. Audio transcription continues to use Volcano.
+
+For the CLI, merge these values into `~/.config/voicenote/config.json`:
+
+```json
+{
+  "VOICENOTE_PI_PROVIDER": "deepseek",
+  "VOICENOTE_PI_MODEL_SUMMARY": "deepseek-v4-flash",
+  "DEEPSEEK_API_KEY": "..."
+}
+```
+
+The notes-specific model setting takes precedence over `VOICENOTE_PI_MODEL`. When switching providers in the GUI, the model resets to that provider's default. API keys can also come from pi's authentication file or the environment; pi's authentication file takes priority over API-key environment variables.
+
+Save changes, then check `vn doctor` or the app's Status panel. Credential checks confirm configuration, not API connectivity or account balance. Each provider in a fallback chain receives the same model ID, so configure DeepSeek on its own rather than mixing it with OpenAI.
 
 ## Usage
 
@@ -259,7 +277,7 @@ A self-contained macOS `.app` (Tauri v2) for **non-terminal users**: the target 
 
 **Positioning**: the GUI is only a "status dashboard + quick access to output" — it does **not** drive processing. The full pipeline runs autonomously every 60s via the background LaunchAgent using the bundled engine (it keeps running with the GUI closed).
 
-- First run: setup wizard (identity / Volcano keys / proxy) → ChatGPT sign-in (no terminal on the device; uses `vn login`'s browser-callback flow)
+- First run: settings (identity / Volcano keys / notes provider / proxy). Choose DeepSeek with an API key, or ChatGPT with browser sign-in (`vn login`'s browser-callback flow).
 - After that: the main view shows agent activity + recent notes (open note / open folder)
 
 ### What's bundled
@@ -271,7 +289,7 @@ A self-contained macOS `.app` (Tauri v2) for **non-terminal users**: the target 
 | `vn` (compiled) | externalBin | pipeline + ChatGPT sign-in |
 | `bun` | externalBin | runs pi |
 | `ffprobe` (native arm64 static) | externalBin | audio duration (pi only needs ffprobe, not all of ffmpeg) |
-| `pi` + node_modules | resource | notes backend (ChatGPT Codex agent) |
+| `pi` + node_modules | resource | notes backend (ChatGPT, OpenAI API, or DeepSeek) |
 
 At runtime, Rust generates a wrapper (`exec <bundled bun> <bundled pi/cli.js> "$@"`) and injects `VOICENOTE_PI_BIN` / `VOICENOTE_FFPROBE_BIN` into `vn`. Release builds are **universal** (x86_64 + arm64; vn/bun/ffprobe each merged with `lipo`; pi is JS and needs none).
 
@@ -317,7 +335,7 @@ irm https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/instal
 
 `install-app.sh` downloads the packaged `.app` from GitHub Releases → installs to `/Applications` → **removes the quarantine flag for the user** (Gatekeeper bypass for un-notarized builds) → opens it. The target machine needs no bun/pi/ffprobe/global vn (all bundled).
 
-**First launch**: the app lands on Settings → fill in identity + your own Volcano ASR/TOS keys + proxy (BYOK) → save → click "Sign in to ChatGPT" in the Status panel (one-time browser authorization). The GUI then installs and loads the background LaunchAgent (pointing at the bundled engine); plug in the recorder and transcription + notes happen automatically.
+**First launch**: the app lands on Settings. Fill in identity, your Volcano ASR/TOS keys, notes provider/model, and proxy as needed. For DeepSeek or OpenAI API, enter the corresponding API key; for ChatGPT, save and click "Sign in to ChatGPT" in the Status panel. Saving installs and loads the background LaunchAgent using the bundled engine. Once credentials are configured, plug in the recorder for automatic transcription and notes.
 
 > The background agent label is `sh.fastagent.voicenote` (same as the CLI version; only one exists per machine). If the `.app` is moved, open it once to recalibrate the plist.
 

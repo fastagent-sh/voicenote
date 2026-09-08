@@ -1,5 +1,10 @@
 import { expect, test } from 'bun:test'
-import { DEFAULT_PI_PROVIDERS, parsePiAuthStatus, parseProviderChain, usableChain, type PiAuthStatus } from './piProvider'
+import { DEFAULT_PI_PROVIDERS, defaultPiModel, parsePiAuthStatus, parseProviderChain, usableChain, type PiAuthStatus } from './piProvider'
+
+test('defaultPiModel: DeepSeek and OpenAI use their own models', () => {
+  expect(defaultPiModel('deepseek')).toBe('deepseek-v4-flash')
+  for (const provider of DEFAULT_PI_PROVIDERS) expect(defaultPiModel(provider)).toBe('gpt-5.5')
+})
 
 test('parseProviderChain: unset, empty and garbage all fall back to the one default', () => {
   for (const raw of [undefined, '', '   ', ',', ' , , ']) {
