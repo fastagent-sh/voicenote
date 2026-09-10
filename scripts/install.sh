@@ -78,7 +78,6 @@ configure_shell_env() {
 write_config_json() {
   log "Preparing ~/.config/voicenote/config.json"
   VOICENOTE_WORKSPACE="$WORKSPACE" \
-  VOICENOTE_PI_MODEL="${VOICENOTE_PI_MODEL:-gpt-5.5}" \
   VOLCANO_ASR_KEY="${VOLCANO_ASR_KEY:-}" \
   VOLCANO_ASR_RESOURCE_ID="${VOLCANO_ASR_RESOURCE_ID:-volc.seedasr.auc}" \
   VOLCANO_TOS_REGION="${VOLCANO_TOS_REGION:-cn-guangzhou}" \
@@ -93,10 +92,9 @@ const { join } = require('node:path')
 const configDir = join(process.env.HOME, '.config/voicenote')
 const path = join(configDir, 'config.json')
 const legacySpeakersPath = join(configDir, 'speakers.json')
-const keys = ['VOICENOTE_WORKSPACE','VOICENOTE_PI_MODEL','VOLCANO_ASR_KEY','VOLCANO_ASR_RESOURCE_ID','VOLCANO_TOS_REGION','VOLCANO_TOS_ENDPOINT','VOLCANO_TOS_BUCKET','VOLCANO_TOS_ACCESS_KEY','VOLCANO_TOS_SECRET_KEY','VOLCANO_TOS_KEEP']
+const keys = ['VOICENOTE_WORKSPACE','VOLCANO_ASR_KEY','VOLCANO_ASR_RESOURCE_ID','VOLCANO_TOS_REGION','VOLCANO_TOS_ENDPOINT','VOLCANO_TOS_BUCKET','VOLCANO_TOS_ACCESS_KEY','VOLCANO_TOS_SECRET_KEY','VOLCANO_TOS_KEEP']
 const defaults = {
   VOICENOTE_WORKSPACE: process.env.VOICENOTE_WORKSPACE,
-  VOICENOTE_PI_MODEL: process.env.VOICENOTE_PI_MODEL,
   VOLCANO_ASR_KEY: '',
   VOLCANO_ASR_RESOURCE_ID: process.env.VOLCANO_ASR_RESOURCE_ID,
   VOLCANO_TOS_REGION: process.env.VOLCANO_TOS_REGION,

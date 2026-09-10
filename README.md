@@ -78,7 +78,7 @@ setx VOICENOTE_RECORD_DIR "E:\RECORD"
 ## Dependencies
 
 - **Bun >= 1.3 (required at runtime)** — the code uses `Bun.Glob` / `Bun.file`; plain Node cannot run it
-- Node / npm — only used to install the pi CLI (pi-codex backend)
+- Node / npm — only used to install the pi CLI (the notes backend)
 - ffmpeg / ffprobe (audio duration detection):
 
 ```bash
@@ -113,50 +113,33 @@ Optional settings:
   "VOICENOTE_RECORD_DIR": "/Volumes/VTR6500/RECORD",
   "VOICENOTE_MAX_AGE_HOURS": "48",
   "VOICENOTE_PI_BIN": "pi",
-  "VOICENOTE_PI_PROVIDER": "openai-codex",
-  "VOICENOTE_PI_MODEL": "gpt-5.5",
   "VOICENOTE_PI_THINKING": "high",
   "VOICENOTE_PI_SUMMARY_TOOLS": "read,grep",
   "VOICENOTE_CONTEXT_DIR": "/Users/you/vault"
 }
 ```
 
-`VOICENOTE_PI_PROVIDER` is a fallback chain, tried left to right; it defaults to
-`openai-codex` alone. Add the paid API path explicitly (`openai-codex,openai`) if
-you keep an OpenAI key around. Credentials are
-resolved by `pi auth check` (covering OAuth, keys stored by `pi` → `/login`, and
-each provider's own API-key env var). A provider that deterministically cannot
-work — no credentials, or not a provider pi knows — is dropped from the chain,
-because its inevitable "No API key found" would replace the real error from the
-provider that actually failed. When a chain still fails everywhere, the reported
-error lists every provider's failure, so a fallback's missing key never hides why
-the first provider broke. If pruning empties the chain, `vn run --mode notes`
-skips instead of paying for a transcript whose summary cannot happen.
-`vn doctor` prints the effective chain and the status of anything not ready.
+### Which model writes the notes
 
-### DeepSeek notes
+voicenote does not choose one. It runs `pi -p` with no `--provider`/`--model`, so
+the provider, model and credentials are whatever pi itself is configured to use
+(`pi` → `/login <provider>`, pi's settings, or a provider API key in the
+environment). Change the model in pi, not here. There is no fallback to a second
+provider: if pi fails, the transcript is kept and the summary can be retried with
+`vn run --latest`.
 
-In the desktop app, open **Settings → Notes generation**, select **DeepSeek API**, enter your API key, and save. The model defaults to `deepseek-v4-flash`; enter `deepseek-v4-pro` to use Pro. ChatGPT sign-in is only shown for configurations that use ChatGPT. Audio transcription continues to use Volcano.
+`DEEPSEEK_API_KEY` and `OPENAI_API_KEY` in the config are only forwarded to pi's
+environment for providers that read them.
 
-For the CLI, merge these values into `~/.config/voicenote/config.json`:
-
-```json
-{
-  "VOICENOTE_PI_PROVIDER": "deepseek",
-  "VOICENOTE_PI_MODEL_SUMMARY": "deepseek-v4-flash",
-  "DEEPSEEK_API_KEY": "..."
-}
-```
-
-The notes-specific model setting takes precedence over `VOICENOTE_PI_MODEL`. When switching providers in the GUI, the model resets to that provider's default. API keys can also come from pi's authentication file or the environment; pi's authentication file takes priority over API-key environment variables.
-
-Save changes, then check `vn doctor` or the app's Status panel. Credential checks confirm configuration, not API connectivity or account balance. Each provider in a fallback chain receives the same model ID, so configure DeepSeek on its own rather than mixing it with OpenAI.
+Transient failures (dropped socket, 5xx, 429) are retried on the same provider up
+to `VOICENOTE_PI_RETRIES` times (default 3). Quota and auth errors are not
+retried.
 
 ## Usage
 
 ```bash
 vn doctor                       # check environment and config
-vn run                          # default: Volcano ASR + pi-codex notes
+vn run                          # default: Volcano ASR + pi notes
 vn run --mode transcript        # transcript only, skip semantic notes
 vn run --latest                 # process only the latest valid recording
 vn run --latest --force         # re-run the latest one
@@ -284,7 +267,7 @@ A self-contained macOS `.app` (Tauri v2) for **non-terminal users**: the target 
 
 **Positioning**: the GUI is only a "status dashboard + quick access to output" — it does **not** drive processing. The full pipeline runs autonomously every 60s via the background LaunchAgent using the bundled engine (it keeps running with the GUI closed).
 
-- First run: settings (identity / Volcano keys / notes provider / proxy). Choose DeepSeek with an API key, or ChatGPT with browser sign-in (`vn login`'s browser-callback flow).
+- First run: settings (identity / Volcano keys / proxy). The notes model comes from pi; ChatGPT users can sign in from the Status panel (`vn login`'s browser-callback flow).
 - After that: the main view shows agent activity + recent notes (open note / open folder)
 
 ### What's bundled
@@ -342,7 +325,7 @@ irm https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/instal
 
 `install-app.sh` downloads the packaged `.app` from GitHub Releases → installs to `/Applications` → **removes the quarantine flag for the user** (Gatekeeper bypass for un-notarized builds) → opens it. The target machine needs no bun/pi/ffprobe/global vn (all bundled).
 
-**First launch**: the app lands on Settings. Fill in identity, your Volcano ASR/TOS keys, notes provider/model, and proxy as needed. For DeepSeek or OpenAI API, enter the corresponding API key; for ChatGPT, save and click "Sign in to ChatGPT" in the Status panel. Saving installs and loads the background LaunchAgent using the bundled engine. Once credentials are configured, plug in the recorder for automatic transcription and notes.
+**First launch**: the app lands on Settings. Fill in identity, your Volcano ASR/TOS keys, and proxy as needed. Notes are written by pi with pi's own provider and model; for ChatGPT, click "Sign in to ChatGPT" in the Status panel. Saving installs and loads the background LaunchAgent using the bundled engine. Once credentials are configured, plug in the recorder for automatic transcription and notes.
 
 > The background agent label is `sh.fastagent.voicenote` (same as the CLI version; only one exists per machine). If the `.app` is moved, open it once to recalibrate the plist.
 

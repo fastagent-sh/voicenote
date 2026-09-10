@@ -10,14 +10,8 @@ test('GUI config persists DeepSeek credentials and refreshes the running engine'
   const configDir = join(home, process.platform === 'win32' ? 'voicenote' : '.config/voicenote')
   const fakePi = join(home, 'pi.ts')
   await mkdir(configDir, { recursive: true })
-  await writeFile(fakePi, `
-    if (process.argv.includes('--version')) console.log('test-pi')
-    else console.log(JSON.stringify(process.env.DEEPSEEK_API_KEY === 'test-key'
-      ? { status: 'ready', provider: 'deepseek' }
-      : { status: 'not_ready', reason: 'credentials_not_configured' }))
-  `)
+  await writeFile(fakePi, `console.log('test-pi')`)
   await writeFile(join(configDir, 'config.json'), JSON.stringify({
-    VOICENOTE_PI_PROVIDER: 'deepseek',
     VOICENOTE_PI_BIN: process.execPath,
     VOICENOTE_PI_CLI: fakePi,
     VOICENOTE_FFPROBE_BIN: process.execPath,
@@ -42,18 +36,15 @@ test('GUI config persists DeepSeek credentials and refreshes the running engine'
     return response.result
   }
   try {
-    expect((await request('doctor')).summary).toMatchObject({ ready: false, model: 'deepseek-v4-flash' })
-    expect(await request('config.set', { env: { DEEPSEEK_API_KEY: 'test-key', VOICENOTE_PI_MODEL_SUMMARY: 'deepseek-v4-pro' } })).toEqual({ ok: true, path: join(configDir, 'config.json') })
+    expect(await request('config.set', { env: { DEEPSEEK_API_KEY: 'test-key' } })).toEqual({ ok: true, path: join(configDir, 'config.json') })
     expect((await request('config.get')).env.DEEPSEEK_API_KEY).toBe('test-key')
     const doctor = await request('doctor')
-    expect(doctor.summary).toMatchObject({ ready: true, model: 'deepseek-v4-pro', effectiveProviders: ['deepseek'], providerStatus: { deepseek: 'ready' } })
+    expect(doctor.summary).toMatchObject({ backend: 'pi' })
+    expect(doctor.pi).toMatchObject({ available: true })
     expect(JSON.stringify(doctor)).not.toContain('test-key')
     expect(JSON.parse(await readFile(join(configDir, 'config.json'), 'utf8')).DEEPSEEK_API_KEY).toBe('test-key')
-    await request('config.set', { env: { DEEPSEEK_API_KEY: null, VOICENOTE_PI_MODEL_SUMMARY: null } })
+    await request('config.set', { env: { DEEPSEEK_API_KEY: null } })
     expect((await request('config.get')).env.DEEPSEEK_API_KEY).toBeUndefined()
-    expect((await request('doctor')).summary).toMatchObject({ ready: false, model: 'deepseek-v4-flash', effectiveProviders: [] })
-    await request('config.set', { env: { VOICENOTE_PI_PROVIDER: 'openai-codex' } })
-    expect((await request('doctor')).summary.model).toBe('gpt-5.5')
   } finally {
     child.kill()
     await exited

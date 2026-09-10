@@ -1,12 +1,13 @@
 import { expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
+import { Glob } from 'bun'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-// The chain used to throw only its LAST error, so a fallback nobody signed into
-// ("No API key found for openai") buried why the first provider really failed.
-test('a failed summary reports every provider error, not just the chain\'s last', async () => {
+// Notes are written by pi under pi's own provider/model configuration: voicenote
+// must never pass --provider/--model, and must never retry on another provider.
+test('the summary invokes pi with no provider/model override', async () => {
   const home = await mkdtemp(join(tmpdir(), 'voicenote-summary-'))
   const configDir = join(home, process.platform === 'win32' ? 'voicenote' : '.config/voicenote')
   const workspace = join(home, 'ws')
@@ -16,18 +17,15 @@ test('a failed summary reports every provider error, not just the chain\'s last'
     await mkdir(join(workspace, '_transcripts', '2026-09'), { recursive: true })
     await writeFile(fakePi, `
       const a = process.argv
-      const p = a[a.indexOf('--provider') + 1]
       if (a.includes('--version')) console.log('fake-pi')
-      else if (a.includes('auth')) console.log(JSON.stringify({ status: 'ready', provider: p }))
-      else { console.error(p === 'openai' ? 'No API key found for openai.' : 'Codex usage limit reached'); process.exit(1) }
+      else if (a.includes('--provider') || a.includes('--model')) { console.error('voicenote must not override pi model config'); process.exit(1) }
+      else console.log(JSON.stringify({ title: 'Fake note', summary: 'ok' }))
     `)
     await writeFile(join(configDir, 'config.json'), JSON.stringify({
-      VOICENOTE_PI_PROVIDER: 'openai-codex,openai',
       VOICENOTE_PI_BIN: process.execPath,
       VOICENOTE_PI_CLI: fakePi,
       VOICENOTE_FFPROBE_BIN: process.execPath,
       VOICENOTE_WORKSPACE: workspace,
-      VOICENOTE_PI_RETRIES: '1',
     }))
     // A transcript already on disk is what lets `run` reach the summary stage
     // without spending ASR — same path a retry after a failed summary takes.
@@ -42,9 +40,11 @@ test('a failed summary reports every provider error, not just the chain\'s last'
       timeout: 30_000,
     })
     expect(run.status).toBe(0)
-    const stub = await readFile(join(workspace, '2026-09', '2026-09-08-10-38-note.md'), 'utf8')
-    expect(stub).toContain('Codex usage limit reached')
-    expect(stub).toContain('No API key found for openai.')
+    expect(run.stdout).not.toContain('Stub notes')
+    const metaFile = (await Array.fromAsync(new Glob('_metadata/**/*.json').scan({ cwd: workspace })))[0]
+    const meta = JSON.parse(await readFile(join(workspace, metaFile!), 'utf8'))
+    expect(meta.title).toBe('Fake note')
+    expect(meta.llm_backend).toBe('pi')
   } finally {
     await rm(home, { recursive: true, force: true })
   }

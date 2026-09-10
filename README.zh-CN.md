@@ -78,7 +78,7 @@ setx VOICENOTE_RECORD_DIR "E:\RECORD"
 ## 依赖
 
 - **Bun >= 1.3(运行时必需)** -- 代码用到 `Bun.Glob` / `Bun.file`,纯 Node 无法运行
-- Node / npm -- 仅用于安装 pi CLI(pi-codex 后端)
+- Node / npm -- 仅用于安装 pi CLI(纪要后端)
 - ffmpeg / ffprobe(音频时长检测):
 
 ```bash
@@ -113,28 +113,29 @@ brew install ffmpeg
   "VOICENOTE_RECORD_DIR": "/Volumes/VTR6500/RECORD",
   "VOICENOTE_MAX_AGE_HOURS": "48",
   "VOICENOTE_PI_BIN": "pi",
-  "VOICENOTE_PI_PROVIDER": "openai-codex",
-  "VOICENOTE_PI_MODEL": "gpt-5.5",
   "VOICENOTE_PI_THINKING": "high",
   "VOICENOTE_PI_SUMMARY_TOOLS": "read,grep",
   "VOICENOTE_CONTEXT_DIR": "/Users/you/vault"
 }
 ```
 
-`VOICENOTE_PI_PROVIDER` 是从左到右尝试的回退链, 默认只有 `openai-codex`。如果你确实配了
- OpenAI API key, 可以显式写成 `openai-codex,openai`。凭证由 `pi auth check` 判定(覆盖
-OAuth、`pi` → `/login` 存下的 key、以及各 provider 自己的 API key 环境变量)。
-确定不可能工作的 provider(没凭证, 或 pi 根本不认识这个名字)会被剔除 —— 否则
-它必然抛出的 "No API key found" 会覆盖掉真正失败的那个 provider 的错误。整条链都失败时,
-报错会列出每个 provider 的失败原因, 回退项缺 key 不会再掩盖第一个 provider 的真正错误。
-若剪枝后链变空, `vn run --mode notes` 会直接跳过, 而不是花钱转写一个注定无法生成纪要的录音。
-实际生效的链和非 ready 项的状态由 `vn doctor` 打印。
+### 纪要用哪个模型
+
+voicenote 不选。它执行 `pi -p`, 不传 `--provider`/`--model`, 所以 provider、模型和凭证
+全部来自 pi 自己的配置(`pi` → `/login <provider>`、pi 的设置, 或环境里的 provider
+API key)。要换模型就去 pi 里改。也不会回退到第二个 provider: pi 失败时 transcript 会
+保留, 用 `vn run --latest` 重试纪要即可。
+
+配置里的 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` 只是透传给 pi 的环境变量。
+
+瞬时性失败(断连、5xx、429)会在同一个 provider 上重试, 次数由 `VOICENOTE_PI_RETRIES`
+控制(默认 3)。额度和鉴权错误不重试。
 
 ## 用法
 
 ```bash
 vn doctor                       # 检查环境与配置
-vn run                          # 默认:Volcano ASR + pi-codex 纪要
+vn run                          # 默认:Volcano ASR + pi 纪要
 vn run --mode transcript        # 只生成 transcript,跳过语义整理
 vn run --latest                 # 只处理最新有效录音
 vn run --latest --force         # 重跑最新条
@@ -186,7 +187,7 @@ vn uninstall-launch-agent
 3. 复制原始音频到 `${VOICENOTE_WORKSPACE}/_audio/YYYY-MM/`
 4. 转写:火山豆包【大模型录音文件识别标准版 API】,本地音频先传到 TOS,提交任务后轮询结果,完成后默认删除 TOS 对象
 5. 转写完成后立刻落盘原始 transcript(不做 lossy 清洗),避免后面步骤失败导致 ASR 费用白付
-6. summary 模型(默认 pi codex 走 ChatGPT Plus)直接看原始 transcript,在纪要生成阶段内部完成必要清理、说话人还原、观点/争论/共识形成过程还原;如果 summary 失败,下一次 `vn run` / `vn run --latest` 会复用已保存 transcript,直接重试纪要生成,不需要 `vn forget`
+6. summary 模型(由 pi 自身配置决定)直接看原始 transcript,在纪要生成阶段内部完成必要清理、说话人还原、观点/争论/共识形成过程还原;如果 summary 失败,下一次 `vn run` / `vn run --latest` 会复用已保存 transcript,直接重试纪要生成,不需要 `vn forget`
 7. 写出 notes / metadata；系统不做任何归档决定，文件留在配置的 workspace 中
 
 失败的录音会在后续运行中重试，但**最多 3 次**（转写失败、纪要失败、以及被中途 kill 的运行都算）。超过后标记为 `Gave up` 并不再自动重试，避免一个坏文件每个调度周期都烧一次 ASR/LLM 额度 —— `vn forget <name>` 会删掉该记录并重新入队。重新入队不等于重新转写：磁盘上已有 transcript 时会直接复用，所以 `vn forget` 不会让你再付一次 ASR。（`vn forget` 需要 run lock，因此在某次 run 进行中时会拒绝执行 —— 等该次 run 结束后重试即可。）
