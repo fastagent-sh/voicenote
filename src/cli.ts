@@ -1529,6 +1529,12 @@ async function runPi(opts: {
       if (!text) return reject(new Error('pi returned empty output'))
       resolve(text)
     })
+    // A pi that dies before draining stdin (bad flags, crash on startup) closes the
+    // pipe mid-write. Without this handler the EPIPE is an unhandled 'error' event
+    // that kills the whole run, hiding pi's actual error; 'close' below reports it.
+    child.stdin.on('error', (e: NodeJS.ErrnoException) => {
+      if (e.code !== 'EPIPE') warnSideEffect('write prompt to pi stdin', e)
+    })
     child.stdin.end(opts.userPrompt)
   })
 }

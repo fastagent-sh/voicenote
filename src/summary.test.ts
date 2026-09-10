@@ -5,8 +5,12 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-// Notes are written by pi under pi's own provider/model configuration: voicenote
-// must never pass --provider/--model, and must never retry on another provider.
+// Two invariants of the pi call, in one run:
+//   1. pi decides the provider and model — voicenote must never pass
+//      --provider/--model (the fake pi below exits 1 if it sees either).
+//   2. a pi that exits without draining stdin must not kill the run. The prompt
+//      is padded past the 64KB pipe buffer, so the write is still in flight when
+//      the fake pi exits: without the stdin error handler this run dies on EPIPE.
 test('the summary invokes pi with no provider/model override', async () => {
   const home = await mkdtemp(join(tmpdir(), 'voicenote-summary-'))
   const configDir = join(home, process.platform === 'win32' ? 'voicenote' : '.config/voicenote')
@@ -32,7 +36,7 @@ test('the summary invokes pi with no provider/model override', async () => {
     const audio = join(home, '20260908103805.mp3')
     await writeFile(audio, 'audio')
     await writeFile(join(workspace, '_transcripts', '2026-09', '2026-09-08-10-38-transcript.md'),
-      '# Transcript\n\n---\n\n## Raw transcript (no lossy cleanup)\n\nhello world\n')
+      `# Transcript\n\n---\n\n## Raw transcript (no lossy cleanup)\n\n${'hello world '.repeat(20_000)}\n`)
 
     const run = spawnSync(process.execPath, [join(import.meta.dir, 'cli.ts'), 'run', audio], {
       env: { HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home, PATH: dirname(process.execPath), SystemRoot: process.env.SystemRoot },
