@@ -27,9 +27,9 @@ const GROUPS: Group[] = [
     { key: "VOLCANO_TOS_ACCESS_KEY", label: "TOS Access Key", secret: true, required: true },
     { key: "VOLCANO_TOS_SECRET_KEY", label: "TOS Secret Key", secret: true, required: true },
   ]},
-  // Notes are written by pi with pi's own provider/model/credentials — nothing to
-  // configure here. These keys are only forwarded to pi's environment.
-  { label: "Notes generation (model and credentials come from pi)", fields: [
+  // Credentials always come from pi; only the model can be pinned here.
+  { label: "Notes generation (credentials come from pi)", fields: [
+    { key: "VOICENOTE_PI_MODEL", label: "Model", placeholder: "Empty = pi's own default; or e.g. openai-codex/gpt-5.6-sol" },
     { key: "DEEPSEEK_API_KEY", label: "DeepSeek API Key", secret: true, placeholder: "Leave empty to use credentials from pi or the environment" },
     { key: "OPENAI_API_KEY", label: "OpenAI API Key", secret: true, placeholder: "Leave empty to use credentials from pi or the environment" },
   ]},
@@ -52,6 +52,7 @@ type Status = {
   recorder: { dir: string; exists: boolean };
   volcano: { configured: true; tos: { bucket: string } } | { configured: false };
   pi: { available: boolean };
+  summary: { model: string | null };
   proxy: { url: string | null };
   identity: { self: string | null };
   deps: { ffprobe: boolean };
@@ -108,6 +109,7 @@ function renderStatus() {
   if (!status) { box.appendChild(statusRow(t("Status"), t("Checking…"), "muted")); return; }
   const s = status;
   box.appendChild(statusRow(t("Notes generation"), s.pi.available ? t("pi ready") : t("pi not available"), s.pi.available ? "ok" : "err"));
+  box.appendChild(statusRow(t("Summary model"), s.summary.model ?? t("pi's own default"), "muted"));
   box.appendChild(statusRow(t("Transcription"), s.volcano.configured ? t("Configured · {0}", s.volcano.tos.bucket) : t("Not configured"), s.volcano.configured ? "ok" : "err"));
   box.appendChild(statusRow(t("Proxy"), s.proxy.url ?? t("Not set"), s.proxy.url ? "ok" : "warn"));
   box.appendChild(statusRow(t("Recorder"), s.recorder.exists ? t("Connected") : t("Not detected"), s.recorder.exists ? "ok" : "muted"));

@@ -113,6 +113,7 @@ Optional settings:
   "VOICENOTE_RECORD_DIR": "/Volumes/VTR6500/RECORD",
   "VOICENOTE_MAX_AGE_HOURS": "48",
   "VOICENOTE_PI_BIN": "pi",
+  "VOICENOTE_PI_MODEL": "openai-codex/gpt-5.6-sol",
   "VOICENOTE_PI_THINKING": "high",
   "VOICENOTE_PI_SUMMARY_TOOLS": "read,grep",
   "VOICENOTE_CONTEXT_DIR": "/Users/you/vault"
@@ -121,12 +122,14 @@ Optional settings:
 
 ### Which model writes the notes
 
-voicenote does not choose one. It runs `pi -p` with no `--provider`/`--model`, so
-the provider, model and credentials are whatever pi itself is configured to use
-(`pi` → `/login <provider>`, pi's settings, or a provider API key in the
-environment). Change the model in pi, not here. There is no fallback to a second
-provider: if pi fails, the transcript is kept and the summary can be retried with
-`vn run --latest`.
+`VOICENOTE_PI_MODEL` is passed straight to pi as `--model`. pi accepts
+`provider/id`, so one value pins both (`openai-codex/gpt-5.6-sol`). Leave it unset
+and pi's own configured default model is used.
+
+Credentials always belong to pi (`pi` → `/login <provider>`, or a provider API key
+in the environment); voicenote never picks a provider and never falls back to a
+second one. If pi fails, the transcript is kept and the summary can be retried
+with `vn run --latest`.
 
 `DEEPSEEK_API_KEY` and `OPENAI_API_KEY` in the config are only forwarded to pi's
 environment for providers that read them.

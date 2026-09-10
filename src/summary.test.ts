@@ -5,13 +5,15 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-// Two invariants of the pi call, in one run:
-//   1. pi decides the provider and model — voicenote must never pass
-//      --provider/--model (the fake pi below exits 1 if it sees either).
-//   2. a pi that exits without draining stdin must not kill the run. The prompt
-//      is padded past the 64KB pipe buffer, so the write is still in flight when
-//      the fake pi exits: without the stdin error handler this run dies on EPIPE.
-test('the summary invokes pi with no provider/model override', async () => {
+// Runs `vn run <audio>` against a fake pi, with a transcript already on disk so
+// the run reaches the summary stage without spending ASR — the same path a retry
+// after a failed summary takes. `expectModel` is what the fake pi demands to see
+// as --model; it exits 1 (→ stub note) when the arguments disagree.
+//
+// The transcript is padded past the 64KB pipe buffer so the prompt write is
+// still in flight when the fake pi exits: without runPi's stdin error handler
+// the run dies on EPIPE instead of reading pi's output.
+async function runWithFakePi(config: Record<string, string>, expectModel: string | null) {
   const home = await mkdtemp(join(tmpdir(), 'voicenote-summary-'))
   const configDir = join(home, process.platform === 'win32' ? 'voicenote' : '.config/voicenote')
   const workspace = join(home, 'ws')
@@ -21,8 +23,10 @@ test('the summary invokes pi with no provider/model override', async () => {
     await mkdir(join(workspace, '_transcripts', '2026-09'), { recursive: true })
     await writeFile(fakePi, `
       const a = process.argv
+      const model = a.includes('--model') ? a[a.indexOf('--model') + 1] : null
       if (a.includes('--version')) console.log('fake-pi')
-      else if (a.includes('--provider') || a.includes('--model')) { console.error('voicenote must not override pi model config'); process.exit(1) }
+      else if (a.includes('--provider')) { console.error('voicenote must never pick a provider'); process.exit(1) }
+      else if (model !== ${JSON.stringify(expectModel)}) { console.error('unexpected --model: ' + model); process.exit(1) }
       else console.log(JSON.stringify({ title: 'Fake note', summary: 'ok' }))
     `)
     await writeFile(join(configDir, 'config.json'), JSON.stringify({
@@ -30,9 +34,8 @@ test('the summary invokes pi with no provider/model override', async () => {
       VOICENOTE_PI_CLI: fakePi,
       VOICENOTE_FFPROBE_BIN: process.execPath,
       VOICENOTE_WORKSPACE: workspace,
+      ...config,
     }))
-    // A transcript already on disk is what lets `run` reach the summary stage
-    // without spending ASR — same path a retry after a failed summary takes.
     const audio = join(home, '20260908103805.mp3')
     await writeFile(audio, 'audio')
     await writeFile(join(workspace, '_transcripts', '2026-09', '2026-09-08-10-38-transcript.md'),
@@ -52,4 +55,12 @@ test('the summary invokes pi with no provider/model override', async () => {
   } finally {
     await rm(home, { recursive: true, force: true })
   }
+}
+
+test('without VOICENOTE_PI_MODEL the summary leaves the model to pi', async () => {
+  await runWithFakePi({}, null)
+}, 30_000)
+
+test('VOICENOTE_PI_MODEL is passed straight to pi as --model', async () => {
+  await runWithFakePi({ VOICENOTE_PI_MODEL: 'openai-codex/gpt-5.6-sol' }, 'openai-codex/gpt-5.6-sol')
 }, 30_000)

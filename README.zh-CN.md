@@ -113,6 +113,7 @@ brew install ffmpeg
   "VOICENOTE_RECORD_DIR": "/Volumes/VTR6500/RECORD",
   "VOICENOTE_MAX_AGE_HOURS": "48",
   "VOICENOTE_PI_BIN": "pi",
+  "VOICENOTE_PI_MODEL": "openai-codex/gpt-5.6-sol",
   "VOICENOTE_PI_THINKING": "high",
   "VOICENOTE_PI_SUMMARY_TOOLS": "read,grep",
   "VOICENOTE_CONTEXT_DIR": "/Users/you/vault"
@@ -121,10 +122,13 @@ brew install ffmpeg
 
 ### 纪要用哪个模型
 
-voicenote 不选。它执行 `pi -p`, 不传 `--provider`/`--model`, 所以 provider、模型和凭证
-全部来自 pi 自己的配置(`pi` → `/login <provider>`、pi 的设置, 或环境里的 provider
-API key)。要换模型就去 pi 里改。也不会回退到第二个 provider: pi 失败时 transcript 会
-保留, 用 `vn run --latest` 重试纪要即可。
+`VOICENOTE_PI_MODEL` 会原样传给 pi 的 `--model`。pi 支持 `provider/id` 写法, 所以
+一个值就能同时定 provider 和模型(`openai-codex/gpt-5.6-sol`)。不设就用 pi 自己配置
+的默认模型。
+
+凭证始终属于 pi(`pi` → `/login <provider>`, 或环境里的 provider API key); voicenote
+不选 provider, 也不会回退到第二个。pi 失败时 transcript 会保留, 用 `vn run --latest`
+重试纪要即可。
 
 配置里的 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` 只是透传给 pi 的环境变量。
 

@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
 
-const VERSION = '0.19.0'
+const VERSION = '0.20.0'
 const LAUNCH_AGENT_LABEL = 'sh.fastagent.voicenote'
 const LAUNCH_AGENT_LABEL_LEGACY = 'com.kid7st.voicenote' // pre-fastagent installs; cleaned up on install
 const TASK_NAME = 'VoiceNote'   // Windows Task Scheduler name (mac uses LAUNCH_AGENT_LABEL)
@@ -126,6 +126,7 @@ const ENV_KEYS = [
   'VOICENOTE_PI_BIN',
   'VOICENOTE_PI_CLI',
   'VOICENOTE_FFPROBE_BIN',
+  'VOICENOTE_PI_MODEL',
   'VOICENOTE_PI_THINKING',
   'VOICENOTE_PI_SUMMARY_TOOLS',
   'VOICENOTE_CONTEXT_DIR',
@@ -1503,13 +1504,16 @@ async function runPi(opts: {
   appendSystemPrompt?: string
   cwd?: string  // agent working dir: the knowledge base, so read/grep/find default there
 }): Promise<string> {
-  // No --provider/--model: pi's own configuration picks the model and credentials.
   const args = [
     '-p',
     '--mode', 'text',
     '--no-extensions', '--no-skills', '--no-context-files', '--no-session', '--no-prompt-templates', '--no-themes',
     '--system-prompt', opts.systemPrompt,
   ]
+  // Unset means pi's own default model and provider. There is no second
+  // provider to fall back to either way.
+  const model = piSummaryModel()
+  if (model) args.push('--model', model)
   if (opts.thinking) args.push('--thinking', opts.thinking)
   if (opts.tools && opts.tools.trim()) args.push('--tools', opts.tools.trim())
   else args.push('--no-tools')
@@ -1560,6 +1564,12 @@ async function chatCompleteViaPi(opts: Parameters<typeof runPi>[0]): Promise<str
       await new Promise(res => setTimeout(res, backoffMs))
     }
   }
+}
+
+// pi's --model accepts "provider/id" (e.g. openai-codex/gpt-5.6-sol), so this one
+// setting pins both. Empty/unset = whatever pi is configured to use.
+function piSummaryModel(): string {
+  return (process.env.VOICENOTE_PI_MODEL || '').trim()
 }
 
 function piThinkingLevel(): string {
@@ -1758,7 +1768,7 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
 
   let summaryError: any = null
   if (needsNotes) {
-    progressStep(nextStep(), totalSteps, 'Generate integrated semantic notes', 'via pi (pi\'s own provider/model config)')
+    progressStep(nextStep(), totalSteps, 'Generate integrated semantic notes', `via pi, model=${piSummaryModel() || "pi's own default"}`)
     try {
       meta = await withHeartbeat('generate integrated semantic notes', () => summarizeTranscript(config, transcript, rec, files.audio), 60)
     } catch (e: any) {
@@ -2688,7 +2698,7 @@ async function collectDoctor() {
       : { configured: false as const },
     // Provider/model/credentials are pi's own configuration; `pi.available` is
     // all we can honestly report about whether a summary can run.
-    summary: { backend: 'pi', thinking: piThinkingLevel(), tools: tools || null, contextDir: tools ? summaryContextDir(config) : null },
+    summary: { backend: 'pi', model: piSummaryModel() || null, thinking: piThinkingLevel(), tools: tools || null, contextDir: tools ? summaryContextDir(config) : null },
     pi: { bin: piCodexBin(), version: piCheck.code === 0 ? (piCheck.stdout.trim() || piCheck.stderr.trim() || null) : null, available: piCheck.code === 0, auth: existsSync(PI_AUTH_PATH) },
     // Outbound proxy for HTTPS endpoints (updater/GitHub): honor the standard
     // env chain, not just lowercase http_proxy — an https_proxy-only setup must
@@ -2755,8 +2765,8 @@ async function doctor(opts: { json?: boolean } = {}): Promise<void> {
   } else {
     console.log(`volcano=not configured`)
   }
-  console.log(`summaryBackend=${s.summary.backend} (provider/model come from pi's own config)`)
-  console.log(`pi.bin=${s.pi.bin}`)
+  console.log(`summaryBackend=${s.summary.backend}`)
+  console.log(`pi.bin=${s.pi.bin} model=${s.summary.model || "<pi's own default>"}`)
   console.log(`pi.thinking=${s.summary.thinking}`)
   console.log(`pi.summaryTools=${s.summary.tools || '<disabled>'}`)
   if (s.summary.contextDir) console.log(`pi.contextDir=${s.summary.contextDir} (summary agent cwd + read/grep cross-reference root)`)
