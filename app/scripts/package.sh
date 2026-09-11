@@ -14,7 +14,13 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 APP="$(dirname "$HERE")"
 cd "$APP"
 IDENTITY="${1:--}"
-VER="$(node -p "require('./src-tauri/tauri.conf.json').version" 2>/dev/null || echo dev)"
+# app/package.json is the desktop version source; tauri.conf.json only points at
+# it. Reading the config here would yield the literal "../package.json" and name
+# the artifact after a path.
+VER="$(node -p "require('./package.json').version")"
+case "$VER" in
+  ''|*[!0-9.]*) echo "package.json version looks wrong: '$VER'" >&2; exit 1 ;;
+esac
 BUNDLE="src-tauri/target/universal-apple-darwin/release/bundle/macos/VoiceNote.app"
 OUT="release/VoiceNote-$VER.zip"
 
