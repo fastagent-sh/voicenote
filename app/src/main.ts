@@ -8,7 +8,7 @@ import { JobsRefreshState } from "./jobsState";
 import { t, applyStaticI18n, savedLang, setLang } from "./i18n";
 
 // ── Settings schema (flat, grouped; lives inline in the dashboard) ───────────
-type Field = { key: string; label: string; placeholder?: string; default?: string; secret?: boolean; required?: boolean; options?: { value: string; label: string }[] };
+type Field = { key: string; label: string; placeholder?: string; default?: string; secret?: boolean; required?: boolean };
 type Group = { label: string; fields: Field[] };
 
 const GROUPS: Group[] = [
@@ -74,7 +74,7 @@ let loginSucceeded = false;
 let settingsBuilt = false;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
-function inputEl(key: string) { return document.getElementById(`f_${key}`) as HTMLInputElement | HTMLSelectElement | null; }
+function inputEl(key: string) { return document.getElementById(`f_${key}`) as HTMLInputElement | null; }
 function setStatus(el: HTMLElement, text: string, kind: "" | "ok" | "err" | "wait" = "") { el.textContent = text; el.className = `status ${kind}`; }
 function showScreen(which: "dash" | "settings") { $("dash").hidden = which !== "dash"; $("settings").hidden = which !== "settings"; }
 
@@ -279,14 +279,10 @@ function makeInput(f: Field): HTMLElement {
   const wrap = document.createElement("label"); wrap.className = "field";
   const span = document.createElement("span"); span.textContent = t(f.label);
   if (f.required) { const s = document.createElement("em"); s.textContent = " *"; s.className = "req"; span.appendChild(s); }
-  const el = f.options ? document.createElement("select") : document.createElement("input");
+  const el = document.createElement("input");
   el.id = `f_${f.key}`;
-  if (el instanceof HTMLSelectElement) {
-    for (const option of f.options!) el.add(new Option(t(option.label), option.value));
-  } else {
-    el.type = f.secret ? "password" : "text";
-    if (f.placeholder) el.placeholder = t(f.placeholder);
-  }
+  el.type = f.secret ? "password" : "text";
+  if (f.placeholder) el.placeholder = t(f.placeholder);
   el.required = !!f.required;
   wrap.append(span, el);
   return wrap;

@@ -4,7 +4,7 @@
 // to 'reclaimed'. The heartbeat and release paths branch on these three
 // states, and collapsing 'unknown' into 'reclaimed' (or 'mine') is exactly
 // the bug that would either hand a live lock away or delete a reclaimer's lock.
-export type LockOwnership = "mine" | "reclaimed" | "unknown";
+type LockOwnership = "mine" | "reclaimed" | "unknown";
 
 /**
  * @param raw    lock-file contents, or null if the file could not be read

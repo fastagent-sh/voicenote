@@ -290,10 +290,10 @@ workflow 位于 `.github/workflows/release.yml`:CI 显式跑 typecheck/test/buil
 |------|------|------|
 | `vn`(编译版) | externalBin | pipeline + ChatGPT 登录 |
 | `bun` | externalBin | 跑 pi |
-| `ffprobe`(原生 arm64 静态) | externalBin | 音频时长(pi 只用 ffprobe,不用整个 ffmpeg) |
+| `ffprobe`(macOS 原生 universal) | externalBin | 音频时长(pi 只用 ffprobe,不用整个 ffmpeg) |
 | `pi` + node_modules | resource | 纪要后端(ChatGPT Codex agent) |
 
-运行时 Rust 生成一个 wrapper（`exec <包内bun> <包内pi/cli.js> "$@"`）并给 `vn` 注入 `VOICENOTE_PI_BIN` / `VOICENOTE_FFPROBE_BIN`。发布构建为 **universal**（x86_64 + arm64，vn/bun/ffprobe 各自 `lipo` 合并；pi 是 JS 无需）。
+运行时 Rust 直接调用包内 `vn`，并注入 `VOICENOTE_PI_BIN`、`VOICENOTE_PI_CLI`、`VOICENOTE_FFPROBE_BIN`；`vn` 无 wrapper 地运行 `<包内bun> <包内pi/cli.js>`。发布构建为 **universal**（x86_64 + arm64，vn/bun/ffprobe 各自 `lipo` 合并；pi 是 JS 无需）。
 
 ### 构建
 

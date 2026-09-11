@@ -20,10 +20,10 @@
 // fields have to agree about the same fact — an earlier cut expressed "gave up"
 // as `code` while leaving `state` alone, and the view and the classifier
 // promptly disagreed about what such a record was.
-export type JobState = 'queued' | 'running' | 'done' | 'filtered' | 'error' | 'gave_up'
+type JobState = 'queued' | 'running' | 'done' | 'filtered' | 'error' | 'gave_up'
 
 /** Which stage produced a failure; also carries the filter reason. */
-export type JobCode = 'transcribe_failed' | 'summary_failed' | 'interrupted' | 'too_small' | 'too_short' | 'too_old' | null
+type JobCode = 'transcribe_failed' | 'summary_failed' | 'interrupted' | 'too_small' | 'too_short' | 'too_old' | null
 
 export type JobRecord = {
   name: string
@@ -60,18 +60,18 @@ export const ownsOutput = (j: JobRecord): boolean => j.paths != null
 export const MAX_ATTEMPTS = 3
 
 /** The subset of JobCode a refusal may write to disk. */
-export type FilterCode = Extract<JobCode, 'too_small' | 'too_short' | 'too_old'>
+type FilterCode = Extract<JobCode, 'too_small' | 'too_short' | 'too_old'>
 
 // Split by whether the refusal is persisted, so the code that reaches disk is
 // typed as such. A single `code: string` needed a cast at the write site, and
 // the cast was the only thing keeping a display-only reason out of the record.
-export type Verdict =
+type Verdict =
   | { run: true }
   | { run: false; persist: true; code: FilterCode; detail: string | null }
   | { run: false; persist: false; code: 'already_done' | 'gave_up'; detail: string | null }
 
-export type ScanFacts = { recordedAt: Date; sizeBytes: number; durationSeconds: number | null }
-export type Limits = { maxAgeHours: number; minBytes: number; minDurationSeconds: number }
+type ScanFacts = { recordedAt: Date; sizeBytes: number; durationSeconds: number | null }
+type Limits = { maxAgeHours: number; minBytes: number; minDurationSeconds: number }
 
 /**
  * The single answer to "should this recording run now, and in what form".
@@ -114,7 +114,7 @@ export function classify(
 const RUNNABLE_STATES = new Set<JobState>(['queued', 'running', 'error'])
 
 /** Every way a started attempt can end. */
-export type Outcome =
+type Outcome =
   | { kind: 'done'; title: string | null; paths: Record<string, string | null> | null }
   | { kind: 'summary_failed'; title: string | null; paths: Record<string, string | null> | null; message: string }
   | { kind: 'failed'; message: string }
@@ -240,7 +240,7 @@ export function pruneUnseen(jobs: Record<string, JobRecord>, seen: Set<string>, 
 
 export type CurrentJob = { pid: number; source_id: string; step: string; started_at: string }
 
-export type JobView = {
+type JobView = {
   status: 'running' | 'queued' | 'done' | 'notes_failed' | 'error' | 'gave_up' | 'filtered'
   name: string
   title: string | null
@@ -342,7 +342,7 @@ const FILTER_LABELS: Record<string, string> = {
 }
 
 /** `2026-07-29T12:06:29` → `2026-07-29 12:06`. */
-export function displayTime(recordedAt: string | null): string | null {
+function displayTime(recordedAt: string | null): string | null {
   if (!recordedAt) return null
   return recordedAt.slice(0, 16).replace('T', ' ')
 }

@@ -233,10 +233,10 @@ Next steps:
        open ~/.config/voicenote/config.json
        # or open the directory: vn open config
      Fill Volcano ASR/TOS keys and your name/aliases in config.json.
-  2. Log in to ChatGPT (REQUIRED for the default pi-codex summary backend —
-     without it transcription will run but note generation will fail):
-       vn login                 # device-code flow; or run \`pi\` and use /login
-     Then confirm: vn doctor   # expect pi.auth=logged-in and Volcano config present
+  2. Configure pi credentials for your chosen model. ChatGPT users can run:
+       vn login                 # browser callback; --device-code is optional
+     Other providers use pi's /login or their API-key environment variable.
+     Then confirm: vn doctor
   3. Optional: install background watcher after config is ready:
        vn install-launch-agent
   4. Insert PHILIPS VTR6500 and test:

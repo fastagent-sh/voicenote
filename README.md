@@ -297,10 +297,10 @@ A self-contained macOS `.app` (Tauri v2) for **non-terminal users**: the target 
 |------|------|------|
 | `vn` (compiled) | externalBin | pipeline + ChatGPT sign-in |
 | `bun` | externalBin | runs pi |
-| `ffprobe` (native arm64 static) | externalBin | audio duration (pi only needs ffprobe, not all of ffmpeg) |
+| `ffprobe` (native universal on macOS) | externalBin | audio duration (pi only needs ffprobe, not all of ffmpeg) |
 | `pi` + node_modules | resource | notes backend (ChatGPT, OpenAI API, or DeepSeek) |
 
-At runtime, Rust generates a wrapper (`exec <bundled bun> <bundled pi/cli.js> "$@"`) and injects `VOICENOTE_PI_BIN` / `VOICENOTE_FFPROBE_BIN` into `vn`. Release builds are **universal** (x86_64 + arm64; vn/bun/ffprobe each merged with `lipo`; pi is JS and needs none).
+At runtime, Rust invokes the bundled `vn` directly and injects `VOICENOTE_PI_BIN`, `VOICENOTE_PI_CLI`, and `VOICENOTE_FFPROBE_BIN`; `vn` then runs `<bundled bun> <bundled pi/cli.js>` without a wrapper script. Release builds are **universal** (x86_64 + arm64; vn/bun/ffprobe each merged with `lipo`; pi is JS and needs none).
 
 ### Build
 
