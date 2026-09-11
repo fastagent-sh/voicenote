@@ -28,6 +28,7 @@ type JobCode = 'transcribe_failed' | 'summary_failed' | 'interrupted' | 'too_sma
 export type JobRecord = {
   name: string
   source_path: string
+  content_hash?: string
   /** Local wall-clock `YYYY-MM-DDTHH:mm:ss` — sorts lexicographically, no TZ drift. */
   recorded_at: string
   size_bytes: number
@@ -39,6 +40,7 @@ export type JobRecord = {
   updated_at: string
   title: string | null
   paths: Record<string, string | null> | null
+  origin?: 'import'
 }
 
 export type StateFile = {
@@ -101,17 +103,17 @@ export function classify(
   if (rec.sizeBytes < limits.minBytes) return { run: false, persist: true, code: 'too_small', detail: `${rec.sizeBytes} < ${limits.minBytes} bytes` }
   if (rec.durationSeconds !== null && rec.durationSeconds < limits.minDurationSeconds) return { run: false, persist: true, code: 'too_short', detail: `${rec.durationSeconds.toFixed(0)}s < ${limits.minDurationSeconds}s` }
 
-  // `error`, `queued` and `running` are retryable — `error` used to be terminal,
-  // which is how 127 dead entries piled up without a single retry. Anything else
-  // came off disk hand-edited or from a newer build: refuse it rather than run
-  // it, so the scheduler and the view (which shows it as unrecognised) agree.
+  // `error`, `queued` and `running` are retryable. A previously `filtered`
+  // record is runnable too once it passes the CURRENT filters, so widening the
+  // history range in Settings actually re-queues recordings marked `too_old`.
+  // Anything else came off disk hand-edited or from a newer build: refuse it.
   if (entry && !RUNNABLE_STATES.has(entry.state)) {
     return { run: false, persist: false, code: 'gave_up', detail: `Unrecognised state '${entry.state}'; \`vn forget ${entry.name}\` to start over` }
   }
   return { run: true }
 }
 
-const RUNNABLE_STATES = new Set<JobState>(['queued', 'running', 'error'])
+const RUNNABLE_STATES = new Set<JobState>(['queued', 'running', 'error', 'filtered'])
 
 /** Every way a started attempt can end. */
 type Outcome =
@@ -256,6 +258,8 @@ type JobView = {
   step: string | null
   detail: string | null
   notes: string | null
+  history_filtered: boolean
+  imported: boolean
 }
 
 export const SUMMARY_FAILED_STATUS = 'summary_failed_transcript_saved'
@@ -368,6 +372,7 @@ function foldFiltered(records: JobRecord[]): JobView | null {
     status: 'filtered',
     name: `${records.length} recording${records.length > 1 ? 's' : ''} filtered out`,
     title: null, time: null, step: null, detail, notes: null,
+    history_filtered: records.some(r => r.code === 'too_old'), imported: false,
   }
 }
 
@@ -375,7 +380,7 @@ export function buildJobsView(
   state: StateFile,
   current: CurrentJob | null,
   opts: { limit: number; alive: (pid: number) => boolean; recorderPresent: boolean },
-): { items: JobView[]; total: number; queued_total: number; recorder_present: boolean } {
+): { items: JobView[]; total: number; queued_total: number; recorder_queued_total: number; recorder_present: boolean } {
   // Two independent conditions must agree before a row is shown as running:
   // the declaring process is alive, AND the record itself says `running`.
   // current.json survives a kill -9, so the pid alone could be recycled by an
@@ -399,6 +404,8 @@ export function buildJobsView(
       step: null,
       detail: null as string | null,
       notes: j.paths?.notes ?? null,
+      history_filtered: false,
+      imported: j.origin === 'import',
       _t: j.recorded_at ?? '',
     }
     if (live && live.source_id === id) { running.push({ ...base, status: 'running', step: live.step }); continue }
@@ -443,5 +450,11 @@ export function buildJobsView(
   // from the visible page would contradict the "… X more" line right above it.
   // Read `recorder_present` live from the caller, never stored — a persisted
   // flag would keep claiming the recorder is connected after the agent stops.
-  return { items, total, queued_total: running.length + queued.length, recorder_present: opts.recorderPresent }
+  return {
+    items,
+    total,
+    queued_total: running.length + queued.length,
+    recorder_queued_total: [...running, ...queued].filter(job => !job.imported).length,
+    recorder_present: opts.recorderPresent,
+  }
 }

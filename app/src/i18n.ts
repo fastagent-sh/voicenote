@@ -9,6 +9,9 @@ export const ZH: Record<string, string> = {
   "Refresh status": "刷新状态",
   "Settings": "设置",
   "Processing": "处理进度",
+  "Drop an audio file here": "拖入一个录音",
+  "Drop to process this recording": "松开即可处理这个录音",
+  "It will be copied to the local queue first": "录音会先复制到本地队列，不会因窗口关闭而丢失",
   "Open notes folder ↗": "打开纪要文件夹 ↗",
   "Status": "状态",
   "Sign in to ChatGPT": "登录 ChatGPT",
@@ -34,8 +37,12 @@ export const ZH: Record<string, string> = {
     "留空 = 自动识别（macOS 上找 VTR6500）；Windows 请填盘符路径，如 E:\\RECORD",
   "Notes output directory": "纪要输出目录",
   "Empty = ~/Documents/meetings": "留空 = ~/Documents/meetings",
-  "Empty = 48": "留空 = 48",
-  "Only process recordings from the last N hours (0 = no limit)": "只处理最近 N 小时内的录音（0 = 不限）",
+  "Recording history to process": "处理多长时间范围内的录音",
+  "Default: last 48 hours": "默认：最近 48 小时",
+  "Last 7 days": "最近 7 天",
+  "Last 30 days": "最近 30 天",
+  "All recordings on the recorder (may use significant credits)": "录音笔上的全部录音（可能消耗较多额度）",
+  "Custom: {0} hours": "自定义：最近 {0} 小时",
   "Transcription (Volcano / Doubao)": "转写（火山 / 豆包）",
   // Volcano console field names: left untranslated on purpose so they match the
   // console the user is copying from.
@@ -127,12 +134,27 @@ export const ZH: Record<string, string> = {
   "{0} queued for retry": "已将 {0} 加入重试队列",
   "{0} was queued, but could not start now: {1}": "已将 {0} 加入重试队列，但暂时无法启动：{1}",
   "Retry failed: {0}": "重试失败：{0}",
+  "Change history range": "修改历史范围",
   "… {0} more": "…还有 {0} 条",
   "Recorder not connected — {0} recording(s) waiting for it.": "录音笔未连接 —— 有 {0} 条录音在等它。",
   "Recorder not connected.": "录音笔未连接。",
+  "Recorder not connected. Local imports can still be processed.": "录音笔未连接。本地导入的录音仍可继续处理。",
   "Failed to read processing status: {0}": "读取处理状态失败：{0}",
-  "No recordings yet. Plug in the recorder and the agent will transcribe and generate notes automatically; progress shows up here.":
-    "还没有录音。插上录音笔，后台会自动转写并生成纪要，进度显示在这里。",
+  "No recordings yet. Plug in the recorder or drop an audio file here; progress shows up automatically.":
+    "还没有录音。插上录音笔，或把录音拖到这里；处理进度会自动显示。",
+
+  // Manual import
+  "Drop one audio file at a time": "请一次只拖入一个录音",
+  "Another recording is being imported; wait a moment": "正在导入另一个录音，请稍候",
+  "Copying recording to the local queue…": "正在将录音复制到本地队列…",
+  "{0} was already processed · opened its note": "{0} 已处理过 · 已打开原有纪要",
+  "{0} was already processed": "{0} 已处理过",
+  "{0} is already processing": "{0} 已在处理中",
+  "{0} added to the queue · processing will start shortly": "已将 {0} 加入队列 · 即将开始处理",
+  "The recording was saved, but it could not be started now: {0}. Use Retry if it appears as failed.":
+    "录音已保存，但暂时无法启动：{0}。如果列表显示失败，请点“重试”。",
+  "Import failed: {0}": "导入失败：{0}",
+  "Drag and drop is unavailable: {0}": "拖拽导入不可用：{0}",
 
   // Sync
   "Syncing…": "同步中…",

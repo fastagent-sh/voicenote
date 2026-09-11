@@ -35,12 +35,13 @@ test('filtered records fold into a single counted row, always last', () => {
     a: rec({ name: 'a.mp3', recorded_at: '2026-07-01T10:00:00', state: 'filtered', code: 'too_small' }),
     b: rec({ name: 'b.mp3', recorded_at: '2026-07-02T10:00:00', state: 'filtered', code: 'too_small' }),
     c: rec({ name: 'c.mp3', recorded_at: '2026-07-03T10:00:00', state: 'filtered', code: 'too_short' }),
+    old: rec({ name: 'old.mp3', recorded_at: '2026-06-03T10:00:00', state: 'filtered', code: 'too_old' }),
     d: rec({ name: 'd.mp3', recorded_at: '2026-07-04T10:00:00', state: 'done' }),
   })
   const { items, total } = view(s)
   expect(items).toHaveLength(2)
   expect(total).toBe(2)
-  expect(items[1]).toMatchObject({ status: 'filtered', name: '3 recordings filtered out', detail: 'too small ×2, too short ×1' })
+  expect(items[1]).toMatchObject({ status: 'filtered', name: '4 recordings filtered out', detail: 'too small ×2, too short ×1, too old ×1', history_filtered: true })
 })
 
 test('queue is oldest-first (pipeline order), history newest-first', () => {
@@ -90,6 +91,17 @@ test('queued_total counts the whole backlog, not the visible page', () => {
   // it would contradict the "… X more" line printed directly above it.
   expect(queued_total).toBe(12)
   expect(total).toBe(12)
+})
+
+test('local imports do not claim to be waiting for a disconnected recorder', () => {
+  const jobs = state({
+    recorder: rec({ name: 'recorder.mp3', recorded_at: '2026-07-01T10:00:00', state: 'queued' }),
+    imported: rec({ name: 'imported.mp3', recorded_at: '2026-07-02T10:00:00', state: 'queued', origin: 'import' }),
+  })
+  const result = buildJobsView(jobs, null, { limit: 10, alive: () => true, recorderPresent: false })
+  expect(result.queued_total).toBe(2)
+  expect(result.recorder_queued_total).toBe(1)
+  expect(result.items.find(item => item.name === 'imported.mp3')?.imported).toBe(true)
 })
 
 // ── pruning (deletes state — the zombie fix) ────────────────────────────────
@@ -191,7 +203,7 @@ test('classify: unseen recordings run, done ones do not', () => {
   expect(classify(FACTS, done, LIMITS, opts({ force: true }))).toMatchObject({ run: true })
 })
 
-test('classify: filters win over retry state, and are deterministic', () => {
+test('classify: current filters win, and widening them re-queues old filtered records', () => {
   expect(classify({ ...FACTS, sizeBytes: 5_000 }, undefined, LIMITS, opts())).toMatchObject({ run: false, code: 'too_small', persist: true })
   expect(classify({ ...FACTS, durationSeconds: 30 }, undefined, LIMITS, opts())).toMatchObject({ run: false, code: 'too_short', persist: true })
   expect(classify(FACTS, undefined, { ...LIMITS, maxAgeHours: 1 }, opts())).toMatchObject({ run: false, code: 'too_old', persist: true })
@@ -200,6 +212,10 @@ test('classify: filters win over retry state, and are deterministic', () => {
   // between error and queued.
   const errored = rec({ name: 'a.mp3', recorded_at: '', state: 'error', attempts: 1 })
   expect(classify({ ...FACTS, durationSeconds: 30 }, errored, LIMITS, opts())).toMatchObject({ run: false, code: 'too_short' })
+
+  const tooOld = rec({ name: 'old.mp3', recorded_at: '', state: 'filtered', code: 'too_old' })
+  expect(classify(FACTS, tooOld, { ...LIMITS, maxAgeHours: 1 }, opts())).toMatchObject({ run: false, code: 'too_old' })
+  expect(classify(FACTS, tooOld, { ...LIMITS, maxAgeHours: 0 }, opts())).toEqual({ run: true })
 })
 
 

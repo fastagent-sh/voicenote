@@ -172,6 +172,7 @@ vn open <slug>                  # 按文件名片段打开纪要
 vn forget <id|filename>         # 让某条录音重新被处理
 vn log                          # 打印今天日志末尾(--lines N / -f 跟随 / --err 含 launchd.err / --date YYYY-MM-DD)
 vn errors                       # 打印最近 ERROR 日志
+vn import /path/to/audio.mp3    # 把一个本地录音复制进持久化手动导入队列
 vn login                        # 登录 ChatGPT, 纪要后端用(默认浏览器回调; 无头机器用 `--device-code`)。无需开 pi TUI
 vn upgrade                      # reinstall latest npm package
 vn install-launch-agent
@@ -210,6 +211,10 @@ vn uninstall-launch-agent
 6. summary 模型(由 pi 自身配置决定)直接看原始 transcript,在纪要生成阶段内部完成必要清理、说话人还原、观点/争论/共识形成过程还原;如果 summary 失败,下一次 `vn run` / `vn run --latest` 会复用已保存 transcript,直接重试纪要生成,不需要 `vn forget`
 7. 写出 notes / metadata；系统不做任何归档决定，文件留在配置的 workspace 中
 
+历史范围默认是 48 小时。GUI 可在**设置 → 处理多长时间范围内的录音**中选择最近 7 天、30 天或全部录音。扩大范围后，之前因 `too_old` 被过滤的录音会按新条件重新入队；dashboard 的过滤汇总也会直接链接到该设置。
+
+需要立即处理本地文件时，把一个支持的音频文件拖进 GUI 即可。应用会先原子复制到 `${VOICENOTE_WORKSPACE}/_inbox`；即使当前正在运行其他任务或录音笔未连接，也会持久排队。手动导入优先于录音笔的自动扫描任务，并跳过自动扫描的时间、大小和时长过滤。成功后删除 inbox 临时副本，失败时保留以供“重试”。导入按内容寻址；当系统已知相同内容的完成记录时，再次拖入会打开已有纪要，不会重复支付 ASR。
+
 失败的录音会在后续运行中重试，但**最多 3 次**（转写失败、纪要失败、以及被中途 kill 的运行都算）。超过后标记为 `Gave up` 并不再自动重试，避免一个坏文件每个调度周期都烧一次 ASR/LLM 额度。点击 GUI 记录上的**重试**会重置次数、保留已有产物并立即再跑；CLI 也可以用 `vn forget <name>` 删除记录后重新入队。两种方式都会复用磁盘上已有的 transcript，不会重复支付 ASR 费用。它们都需要 run lock；如果当前正在处理，请等本次 run 结束后再重试。
 
 源文件已不在录音笔上的记录，会在下一次扫描时被遗忘（并记入日志），**已经产出纪要或 transcript 的除外** —— 那部分历史会保留。所以换录音笔、或从设备上删文件，不再会留下永久的 “失败” 条目。
@@ -222,6 +227,7 @@ vn uninstall-launch-agent
 - 原始音频:`${VOICENOTE_WORKSPACE}/_audio/YYYY-MM/`
 - 完整转写:`${VOICENOTE_WORKSPACE}/_transcripts/YYYY-MM/`
 - metadata:`${VOICENOTE_WORKSPACE}/_metadata/YYYY-MM/`
+- 待处理的手动导入：`${VOICENOTE_WORKSPACE}/_inbox/`（成功后删除）
 - 状态：`${VOICENOTE_WORKSPACE}/_state/jobs.json` —— 每条录音一条记录，包含 `state`（生命周期位置：`queued`、`running`、`done`、`filtered`、`error`，以及重试耗尽后的 `gave_up`）、`code`（原因：`summary_failed`、`transcribe_failed`、`interrupted`、`too_small` 等）、重试次数和产物路径。`vn run` 写入正常生命周期变化，除此之外只有显式重试或 forget 操作会修改它；`vn jobs` 和 GUI 的被动刷新都是纯读取，因此看到的队列就是实际会跑的队列。0.18 之前的 `processed.json` 会在首次运行时自动转换，旧文件保留为 `processed.json.v1.bak`。
 - 索引:`${VOICENOTE_WORKSPACE}/_index/notes.jsonl`
 
@@ -237,7 +243,7 @@ launchctl enable gui/$(id -u)/sh.fastagent.voicenote
 vn status
 ```
 
-LaunchAgent 每 60 秒调用 `vn run`。没插录音笔时安全跳过;插上 VTR6500 后自动处理新录音。
+LaunchAgent 每 60 秒调用 `vn run`。没插录音笔时仍会处理本地导入队列；插上 VTR6500 后也会自动处理录音笔里的新录音。
 
 > 后台 agent 会在下一次运行时读取 `config.json` 的改动。plist 只保存固定 PATH 和可执行文件路径：**改了 `VOICENOTE_PI_BIN` 后需重跑 `vn install-launch-agent --load`**（`vn upgrade` 会自动处理）。shell 中临时设置的值不会复制进 scheduler，请用 `vn config set` 持久化。未配置 pi / ASR 时，agent 会在支付 ASR 成本前跳过。
 
@@ -277,10 +283,10 @@ workflow 位于 `.github/workflows/release.yml`:CI 显式跑 typecheck、测试�
 
 面向**非终端用户**:一个自包含的 macOS `.app`(Tauri v2),目标机器无需预装 bun / pi / ffprobe / 全局 `vn`。
 
-**定位**:GUI 是工作状态 dashboard，提供产出快捷入口以及手动同步/重试。全流程仍由后台 LaunchAgent 用包内 CLI 每 60s 自主运行(关掉 GUI 也跑)。
+**定位**:GUI 是工作状态 dashboard，提供产出快捷入口、拖拽导入以及手动同步/重试。全流程仍由后台 LaunchAgent 用包内 CLI 每 60s 自主运行(关掉 GUI 也跑)。
 
 - 首次:配置向导(身份 / Volcano keys / 代理)→ ChatGPT 登录(设备无终端,走 `vn login` 的浏览器回调流)
-- 之后:主界面显示 agent 活动和最近纪要，可打开产物或重试失败录音
+- 之后:主界面显示 agent 活动和最近纪要，可打开产物、重试失败录音，也可把一个本地音频文件拖到窗口任意位置立即排队
 
 ### 打包内容
 

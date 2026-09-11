@@ -5,7 +5,7 @@ import { parseLockOwner } from './runLock'
 import { tosObject, type TosConfig as VolcanoTosConfig } from './tos'
 import { applyOutcome, buildJobsView, classify, emptyState, localIso, MAX_ATTEMPTS, migrateLegacyState, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs'
 import { createHash, randomUUID } from 'node:crypto'
-import { appendFile, chmod, mkdir, readFile, writeFile, copyFile, rename, unlink, stat, readdir } from 'node:fs/promises'
+import { appendFile, chmod, mkdir, readFile, writeFile, copyFile, rename, unlink, stat, readdir, rmdir, utimes } from 'node:fs/promises'
 import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, appendFileSync, openSync, closeSync, statSync, readSync, unlinkSync, renameSync } from 'node:fs'
 import { dlopen, FFIType, suffix } from 'bun:ffi'
 import { basename, dirname, extname, join, resolve } from 'node:path'
@@ -52,7 +52,9 @@ type Recording = {
   modifiedAt: string
   durationSeconds: number | null
   sourceId: string
+  contentHash: string
   recordedAt: Date
+  imported: boolean
 }
 
 type LocalFiles = {
@@ -354,8 +356,10 @@ function formatSeconds(seconds: number | null | undefined): string {
 // File state IO
 // ────────────────────────────────────────────────────────────────────────────
 
+const inboxPathFor = (config: Config) => join(config.workspace, '_inbox')
+
 async function ensureDirs(config: Config): Promise<void> {
-  for (const dir of ['_state', '_index', '_audio', '_transcripts', '_metadata']) {
+  for (const dir of ['_state', '_index', '_audio', '_transcripts', '_metadata', '_inbox']) {
     await mkdir(join(config.workspace, dir), { recursive: true })
   }
 }
@@ -646,10 +650,10 @@ async function sha256File(path: string): Promise<string> {
   return h.digest('hex')
 }
 
-async function sourceIdFor(path: string): Promise<string> {
-  const st = await stat(path)
-  const digest = await sha256File(path)
-  return createHash('sha256').update(`${path}|${st.size}|${Math.floor(st.mtimeMs / 1000)}|${digest}`).digest('hex')
+function sourceIdFor(path: string, size: number, mtimeMs: number, digest: string, imported = false): string {
+  // Manual imports are content-addressed: dropping the same audio again must
+  // find its existing job even after the temporary inbox copy was removed.
+  return imported ? `import:${digest}` : createHash('sha256').update(`${path}|${size}|${Math.floor(mtimeMs / 1000)}|${digest}`).digest('hex')
 }
 
 function runCommand(command: string, args: string[], timeoutMs = 20000): Promise<{ stdout: string; stderr: string; code: number }> {
@@ -744,41 +748,49 @@ function isCandidateFile(path: string): boolean {
  * treating a half-read device as authoritative would delete live queue entries
  * along with their retry counters.
  */
-async function toRecording(config: Config, file: string): Promise<Recording> {
+async function toRecording(config: Config, file: string, imported = false): Promise<Recording> {
   const st = await stat(file)
+  const contentHash = await sha256File(file)
   return {
     sourcePath: file,
     sizeBytes: st.size,
     modifiedAt: st.mtime.toISOString(),
     durationSeconds: await ffprobeDuration(config, file),
-    sourceId: await sourceIdFor(file),
+    sourceId: sourceIdFor(file, st.size, st.mtimeMs, contentHash, imported),
+    contentHash,
     recordedAt: parseRecordedAt(file),
+    imported,
   }
 }
 
 async function scanRecordings(config: Config): Promise<{ recordings: Recording[]; complete: boolean }> {
-  if (!existsSync(config.recordDir)) return { recordings: [], complete: false }
   const recordings: Recording[] = []
-  let complete = true
-  try {
-    for await (const file of new Bun.Glob('**/*').scan({ cwd: config.recordDir, absolute: true, dot: true })) {
-      if (!isCandidateFile(file)) continue
-      const st = await stat(file).catch(() => null)
-      // Listed a moment ago but unreadable now: the device is going away, or
-      // this file is. Either way the listing is no longer trustworthy.
-      if (!st) { complete = false; continue }
-      if (!st.isFile()) continue
-      try {
-        recordings.push(await toRecording(config, file))
-      } catch (e) { complete = false; warnSideEffect(`read ${basename(file)} during scan`, e) }
+  const recorderPresent = existsSync(config.recordDir)
+  let complete = recorderPresent
+  const roots = [
+    ...(recorderPresent ? [{ dir: config.recordDir, imported: false }] : []),
+    ...(existsSync(inboxPathFor(config)) ? [{ dir: inboxPathFor(config), imported: true }] : []),
+  ]
+  for (const root of roots) {
+    try {
+      for await (const file of new Bun.Glob('**/*').scan({ cwd: root.dir, absolute: true, dot: true })) {
+        if (!isCandidateFile(file)) continue
+        const st = await stat(file).catch(() => null)
+        // Listed a moment ago but unreadable now: the device is going away, or
+        // this file is. Either way the listing is no longer trustworthy.
+        if (!st) { complete = false; continue }
+        if (!st.isFile()) continue
+        try {
+          recordings.push(await toRecording(config, file, root.imported))
+        } catch (e) { complete = false; warnSideEffect(`read ${basename(file)} during scan`, e) }
+      }
+    } catch (e) {
+      complete = false
+      warnSideEffect(`scan ${root.imported ? 'import inbox' : 'recorder'}`, e)
     }
-  } catch (e) {
-    complete = false
-    warnSideEffect('scan recorder', e)
   }
-  // Oldest first: backlog is drained in chronological order, so every file is
-  // guaranteed a turn before newer arrivals jump the queue.
-  recordings.sort((a, b) => a.recordedAt.getTime() - b.recordedAt.getTime())
+  // Explicit imports go first; each group remains oldest-first.
+  recordings.sort((a, b) => Number(b.imported) - Number(a.imported) || a.recordedAt.getTime() - b.recordedAt.getTime())
   return { recordings, complete }
 }
 
@@ -1735,13 +1747,16 @@ async function saveState(config: Config, store: StateFile): Promise<void> {
 function recordFor(store: StateFile, rec: Recording): JobRecord {
   const existing = store.jobs[rec.sourceId]
   const next: JobRecord = existing ?? {
-    name: basename(rec.sourcePath), source_path: rec.sourcePath, recorded_at: localIso(rec.recordedAt),
+    name: basename(rec.sourcePath), source_path: rec.sourcePath, content_hash: rec.contentHash, recorded_at: localIso(rec.recordedAt),
     size_bytes: rec.sizeBytes, duration_seconds: rec.durationSeconds,
     state: 'queued', code: null, detail: null, attempts: 0, updated_at: nowIso(), title: null, paths: null,
+    ...(rec.imported ? { origin: 'import' as const } : {}),
   }
   next.source_path = rec.sourcePath
+  next.content_hash = rec.contentHash
   next.size_bytes = rec.sizeBytes
   next.duration_seconds = rec.durationSeconds
+  next.origin = rec.imported ? 'import' : undefined
   store.jobs[rec.sourceId] = next
   return next
 }
@@ -1831,15 +1846,17 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   // filters (age/size/duration) don't apply — the user named the file.
   const single = opts.file ? resolve(String(opts.file)) : null
   if (single && !statSync(single, { throwIfNoEntry: false })?.isFile()) throw new Error(`Not a file: ${single}`)
-  if (!single && !existsSync(config.recordDir)) {
-    if (shouldLogIdleStatus(`missing:${config.recordDir}`)) {
-      console.log(`Idle: recorder not mounted or record dir missing: ${config.recordDir} (repeated idle logs suppressed for 30m)`)
-    }
-    return
-  }
+  if (single && !isCandidateFile(single)) throw new Error(`Unsupported audio file. Use: ${[...AUDIO_EXTENSIONS].join(', ')}`)
+  const recorderPresent = existsSync(config.recordDir)
   const { recordings, complete: scanComplete } = single
     ? { recordings: [await toRecording(config, single)], complete: false }
     : await scanRecordings(config)
+  if (!single && !recorderPresent && !recordings.length) {
+    if (shouldLogIdleStatus(`missing:${config.recordDir}`)) {
+      console.log(`Idle: recorder not mounted and no manual imports are queued: ${config.recordDir} (repeated idle logs suppressed for 30m)`)
+    }
+    return
+  }
   const mode = normalizeRunMode(opts)
   const force = Boolean(opts.force)
   const eligible: Recording[] = []
@@ -1849,17 +1866,28 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   // idle-suppressed silence meant for the 60s scheduler tick.
   const verboseSkips = Boolean(opts.verbose || opts.dryRun || single)
   const seen = new Set<string>()
-  const limits = single
-    ? { maxAgeHours: 0, minBytes: 0, minDurationSeconds: 0 }
-    : { maxAgeHours: config.maxAgeHours, minBytes: config.minBytes, minDurationSeconds: config.minDurationSeconds }
+  const automaticLimits = { maxAgeHours: config.maxAgeHours, minBytes: config.minBytes, minDurationSeconds: config.minDurationSeconds }
+  const manualLimits = { maxAgeHours: 0, minBytes: 0, minDurationSeconds: 0 }
   for (const rec of recordings) {
     seen.add(rec.sourceId)
+    const completedDuplicate = rec.imported && !store.jobs[rec.sourceId]
+      ? completedJobByHash(store, rec.contentHash)
+      : undefined
+    if (completedDuplicate) {
+      const name = basename(rec.sourcePath)
+      skipCounts.already_done = (skipCounts.already_done || 0) + 1
+      ;(skipSamples.already_done ||= []).push(name)
+      if (!opts.dryRun) await removeImportedSource(rec.sourcePath)
+      if (verboseSkips) console.log(`  Skip: ${name} (already_done)`)
+      continue
+    }
     const entry = recordFor(store, rec)
-    const verdict = classify(rec, store.jobs[rec.sourceId], limits, { force, notesMode: mode === 'notes', now: Date.now() })
+    const verdict = classify(rec, store.jobs[rec.sourceId], single || rec.imported ? manualLimits : automaticLimits, { force, notesMode: mode === 'notes', now: Date.now() })
     if (verdict.run) { eligible.push(rec); continue }
     skipCounts[verdict.code] = (skipCounts[verdict.code] || 0) + 1
     ;(skipSamples[verdict.code] ||= []).push(entry.name)
     if (verdict.persist) patchJob(entry, { state: 'filtered', code: verdict.code, detail: verdict.detail }, nowIso())
+    if (rec.imported && verdict.code === 'already_done' && !opts.dryRun) await removeImportedSource(rec.sourcePath)
     if (verboseSkips) console.log(`  Skip: ${entry.name} (${verdict.code}${verdict.detail ? `: ${verdict.detail}` : ''})`)
   }
   // Only prune against a listing we believe to be complete: if the recorder went
@@ -1908,8 +1936,9 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   }
   await saveState(config, store)
 
-  for (const rec of targets) {
+  for (const [targetIndex, rec] of targets.entries()) {
     const entry = store.jobs[rec.sourceId]!
+    let importedDone = false
     // --force means "start over", so it refunds the retry budget too. Without
     // this it only skips one refusal: a spent record would be back at `gave_up`
     // the moment this attempt failed.
@@ -1925,6 +1954,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
       applyOutcome(entry, result.status === SUMMARY_FAILED_STATUS
         ? { kind: 'summary_failed', title: result.title ?? null, paths: result.final_paths ?? null, message: String(result.summary_error ?? 'summary failed; transcript saved') }
         : { kind: 'done', title: result.title ?? null, paths: result.final_paths ?? null }, nowIso())
+      importedDone = rec.imported && result.status !== SUMMARY_FAILED_STATUS
     } catch (e: any) {
       const message = String(e?.message || e)
       console.error(`ERROR processing ${rec.sourcePath}: ${message}`)
@@ -1944,9 +1974,10 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
       clearCurrent()
       await saveState(config, store)   // per job, not per batch: a kill -9 costs one job, not the batch
     }
-    // Whole recorder went away — every remaining target would fail the same way
-    // and churn ASR-free but noisy retries. Stop and let the next run rescan.
-    if (!single && !existsSync(config.recordDir)) {
+    if (importedDone) await removeImportedSource(rec.sourcePath)
+    // Whole recorder went away — every remaining recorder target would fail the
+    // same way. Local imports do not depend on the recorder and keep running.
+    if (!single && !existsSync(config.recordDir) && targets.slice(targetIndex + 1).some(target => !target.imported)) {
       console.error(`Recorder disappeared mid-run (${config.recordDir}); stopping. Remaining recordings stay queued.`)
       break
     }
@@ -2286,6 +2317,74 @@ async function openTarget(arg?: string): Promise<void> {
   }
   await openPath(target)
   console.log(`open ${target}`)
+}
+
+function completedJobByHash(store: StateFile, digest: string): [string, JobRecord] | undefined {
+  return Object.entries(store.jobs).find(([, job]) => job.state === 'done' && job.content_hash === digest)
+}
+
+type ImportResult = {
+  status: 'queued' | 'running' | 'gave_up' | 'already_done'
+  id: string
+  name: string
+  title: string | null
+  notes: string | null
+}
+
+async function importRecording(file: string, opts: { json?: boolean }): Promise<void> {
+  const source = resolve(file)
+  const sourceStat = await stat(source).catch(() => null)
+  if (!sourceStat?.isFile()) throw new Error(`Not a file: ${source}`)
+  if (!isCandidateFile(source)) throw new Error(`Unsupported audio file. Use: ${[...AUDIO_EXTENSIONS].join(', ')}`)
+
+  const config = getConfig()
+  await ensureDirs(config)
+  const digest = await sha256File(source)
+  const id = `import:${digest}`
+  const store = await loadState(config)
+  const entry = store.jobs[id]
+  const doneMatch = entry?.state === 'done'
+    ? [id, entry] as const
+    : entry ? undefined : completedJobByHash(store, digest)
+  let result: ImportResult
+
+  if (doneMatch) {
+    const [doneId, done] = doneMatch
+    result = { status: 'already_done', id: doneId, name: done.name, title: done.title, notes: done.paths?.notes ?? null }
+  } else {
+    const digestDir = join(inboxPathFor(config), digest)
+    const queuedName = (await readdir(digestDir).catch(() => []))
+      .find(name => isCandidateFile(name) && statSync(join(digestDir, name), { throwIfNoEntry: false })?.isFile())
+    const existingSource = entry?.source_path && existsSync(entry.source_path) ? entry.source_path : null
+    const inboxFile = existingSource ?? (queuedName ? join(digestDir, queuedName) : join(digestDir, basename(source)))
+    if (!existsSync(inboxFile)) {
+      await mkdir(dirname(inboxFile), { recursive: true })
+      const tmp = join(dirname(inboxFile), `.${basename(inboxFile)}.tmp-${process.pid}`)
+      try {
+        await copyFile(source, tmp)
+        await utimes(tmp, sourceStat.atime, sourceStat.mtime)
+        await rename(tmp, inboxFile)
+      } finally {
+        await unlink(tmp).catch(() => {})
+      }
+    }
+    result = {
+      status: entry?.state === 'running' ? 'running' : entry?.state === 'gave_up' ? 'gave_up' : 'queued',
+      id, name: entry?.name ?? basename(source), title: entry?.title ?? null, notes: entry?.paths?.notes ?? null,
+    }
+  }
+
+  if (opts.json) console.log(JSON.stringify(result))
+  else if (result.status === 'already_done') console.log(`already processed: ${result.title || result.name}`)
+  else console.log(`${result.status}: ${result.name}`)
+}
+
+async function removeImportedSource(path: string): Promise<void> {
+  try { await unlink(path) }
+  catch (e: any) { if (e?.code !== 'ENOENT') { warnSideEffect(`remove imported source ${path}`, e); return } }
+  await rmdir(dirname(path)).catch((e: any) => {
+    if (e?.code !== 'ENOENT' && e?.code !== 'ENOTEMPTY') warnSideEffect(`remove empty import dir ${dirname(path)}`, e)
+  })
 }
 
 async function forgetRecording(needle: string): Promise<void> {
@@ -2641,6 +2740,9 @@ cli.command('jobs', 'Show every recording\'s processing status (running, queued,
 
 cli.command('open [target]', 'Open notes dir, config dir (`config`), logs dir (`logs`), or a note matching the slug').action((target?: string) => openTarget(target))
 
+cli.command('import <file>', 'Copy one audio file into the durable manual-import queue')
+  .option('--json', 'Output structured status (for the GUI)')
+  .action((file: string, opts: { json?: boolean }) => importRecording(file, opts))
 cli.command('forget <key>', 'Drop a recording\'s job record so it is queued again (a saved transcript on disk is still reused)').action((key: string) => forgetRecording(key))
 cli.command('retry <id>', 'Requeue one failed recording while retaining saved outputs').action((id: string) => retryRecording(id))
 

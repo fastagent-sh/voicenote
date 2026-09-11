@@ -85,6 +85,18 @@ body {
 
 .col-head { display: flex; align-items: baseline; justify-content: space-between; margin: 2px 4px 12px; }
 .col-head h2 { margin: 0; font-size: 15px; font-weight: 650; }
+.col-head-actions { display: flex; align-items: center; gap: 14px; }
+.drop-tip { color: var(--text-3); font-size: 12px; }
+.drop-overlay {
+  position: fixed; inset: 28px 14px 14px; z-index: 100;
+  display: grid; place-items: center; pointer-events: none;
+  border: 2px dashed var(--accent); border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(5px);
+}
+.drop-overlay div { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.drop-overlay strong { font-size: 18px; }
+.drop-overlay span { color: var(--text-2); font-size: 13px; }
 
 /* ── job (status) cards ── */
 .notes { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; display: flex; flex-direction: column; gap: 10px; padding-right: 8px; }

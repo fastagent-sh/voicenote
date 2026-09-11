@@ -221,6 +221,16 @@ async fn retry_job(app: AppHandle, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn import_recording(app: AppHandle, path: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let stdout = run_vn(&app, &["import", &path, "--json"], None)?;
+        parse_json(&stdout, "import --json")
+    })
+    .await
+    .map_err(|e| format!("vn task failed: {e}"))?
+}
+
+#[tauri::command]
 async fn trigger_run(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut cmd = vn_process(&app);
@@ -344,6 +354,7 @@ pub fn run() {
             doctor_status,
             recent_jobs,
             retry_job,
+            import_recording,
             trigger_run,
             ensure_agent
         ])

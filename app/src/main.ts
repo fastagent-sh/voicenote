@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { openUrl, openPath } from "@tauri-apps/plugin-opener";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -9,8 +10,8 @@ import { t, applyStaticI18n, savedLang, setLang } from "./i18n";
 // ── Settings schema (flat, grouped; lives inline in the dashboard) ───────────
 // No `default` here on purpose: an empty field is saved as null (key deleted) and
 // vn applies its own default, so default VALUES are defined once, in src/cli.ts.
-// Placeholders only tell the user what that default is.
-type Field = { key: string; label: string; placeholder?: string; secret?: boolean; required?: boolean };
+// UI labels/placeholders only tell the user what that default is.
+type Field = { key: string; label: string; placeholder?: string; secret?: boolean; required?: boolean; options?: { value: string; label: string }[] };
 type Group = { label: string; fields: Field[] };
 
 const GROUPS: Group[] = [
@@ -21,7 +22,12 @@ const GROUPS: Group[] = [
   { label: "Recording & output", fields: [
     { key: "VOICENOTE_RECORD_DIR", label: "Recording directory", placeholder: "Empty = auto (VTR6500 on macOS); on Windows use a drive path like E:\\RECORD" },
     { key: "VOICENOTE_WORKSPACE", label: "Notes output directory", placeholder: "Empty = ~/Documents/meetings" },
-    { key: "VOICENOTE_MAX_AGE_HOURS", label: "Only process recordings from the last N hours (0 = no limit)", placeholder: "Empty = 48" },
+    { key: "VOICENOTE_MAX_AGE_HOURS", label: "Recording history to process", options: [
+      { value: "", label: "Default: last 48 hours" },
+      { value: "168", label: "Last 7 days" },
+      { value: "720", label: "Last 30 days" },
+      { value: "0", label: "All recordings on the recorder (may use significant credits)" },
+    ]},
   ]},
   { label: "Transcription (Volcano / Doubao)", fields: [
     { key: "VOLCANO_ASR_KEY", label: "ASR Key", secret: true, required: true },
@@ -60,6 +66,14 @@ type Status = {
   deps: { ffprobe: boolean };
   agent: { installed: boolean; logTail: string[] };
 };
+type ImportResponse = {
+  status: "queued" | "running" | "gave_up" | "already_done";
+  id: string;
+  name: string;
+  title: string | null;
+  notes: string | null;
+};
+
 type Job = {
   id: string | null;
   status: "running" | "queued" | "done" | "notes_failed" | "error" | "gave_up" | "filtered";
@@ -69,15 +83,18 @@ type Job = {
   time?: string | null;
   detail?: string | null;
   notes: string | null;
+  history_filtered: boolean;
+  imported: boolean;
 };
 
 let status: Status | null = null;
 let loginRunning = false;
 let loginSucceeded = false;
 let settingsBuilt = false;
+let importRunning = false;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
-function inputEl(key: string) { return document.getElementById(`f_${key}`) as HTMLInputElement | null; }
+function inputEl(key: string) { return document.getElementById(`f_${key}`) as HTMLInputElement | HTMLSelectElement | null; }
 function setStatus(el: HTMLElement, text: string, kind: "" | "ok" | "err" | "wait" = "") { el.textContent = text; el.className = `status ${kind}`; }
 function showScreen(which: "dash" | "settings") { $("dash").hidden = which !== "dash"; $("settings").hidden = which !== "settings"; }
 
@@ -133,7 +150,7 @@ const JOB_META: Record<Job["status"], { label: string; tone: string }> = {
 const RETRYABLE_STATUSES = new Set<Job["status"]>(["notes_failed", "error", "gave_up"]);
 const retryingJobs = new Set<string>();
 
-function renderJobs(jobs: Job[], total = jobs.length, recorderPresent = true, queuedTotal = 0) {
+function renderJobs(jobs: Job[], total = jobs.length, recorderPresent = true, recorderQueuedTotal = 0) {
   const list = $("notes-list");
   list.innerHTML = "";
   if (!jobs.length) {
@@ -141,7 +158,7 @@ function renderJobs(jobs: Job[], total = jobs.length, recorderPresent = true, qu
     e.className = "empty";
     e.innerHTML = `<div class="e-icon">🎙️</div>`;
     const p = document.createElement("p");
-    p.textContent = t("No recordings yet. Plug in the recorder and the agent will transcribe and generate notes automatically; progress shows up here.");
+    p.textContent = t("No recordings yet. Plug in the recorder or drop an audio file here; progress shows up automatically.");
     e.appendChild(p);
     list.appendChild(e);
     return;
@@ -172,6 +189,11 @@ function renderJobs(jobs: Job[], total = jobs.length, recorderPresent = true, qu
       retry.addEventListener("click", () => void retryJob(j, retry));
       actions.appendChild(retry);
     }
+    if (j.history_filtered) {
+      const history = document.createElement("button"); history.type = "button"; history.className = "job-action"; history.textContent = t("Change history range");
+      history.addEventListener("click", () => void openHistorySettings());
+      actions.appendChild(history);
+    }
     if (actions.childElementCount) head.appendChild(actions);
 
     const title = document.createElement("div"); title.className = "job-title";
@@ -196,11 +218,57 @@ function renderJobs(jobs: Job[], total = jobs.length, recorderPresent = true, qu
   if (!recorderPresent) {
     const note = document.createElement("div");
     note.className = "job-time";
-    note.textContent = queuedTotal
-      ? t("Recorder not connected — {0} recording(s) waiting for it.", queuedTotal)
-      : t("Recorder not connected.");
+    note.textContent = recorderQueuedTotal
+      ? t("Recorder not connected — {0} recording(s) waiting for it.", recorderQueuedTotal)
+      : t("Recorder not connected. Local imports can still be processed.");
     list.appendChild(note);
   }
+}
+
+async function importDroppedRecording(paths: string[]) {
+  const st = $("sync-status");
+  if (paths.length !== 1) { setStatus(st, t("Drop one audio file at a time"), "err"); return; }
+  if (importRunning) { setStatus(st, t("Another recording is being imported; wait a moment"), "wait"); return; }
+
+  importRunning = true;
+  let queued = false;
+  setStatus(st, t("Copying recording to the local queue…"), "wait");
+  try {
+    const result = await invoke<ImportResponse>("import_recording", { path: paths[0] });
+    const name = result.title || result.name;
+    if (result.status === "already_done") {
+      let opened = false;
+      if (result.notes) {
+        try { await openPath(result.notes); opened = true; } catch (e) { console.error("open imported note", e); }
+      }
+      setStatus(st, opened ? t("{0} was already processed · opened its note", name) : t("{0} was already processed", name), "ok");
+      await refreshJobs(true);
+      return;
+    }
+
+    queued = true;
+    if (result.status === "gave_up") await invoke("retry_job", { id: result.id });
+    if (result.status !== "running") await invoke("trigger_run");
+    setStatus(st, result.status === "running" ? t("{0} is already processing", name) : t("{0} added to the queue · processing will start shortly", name), "wait");
+    await refreshJobs(true);
+  } catch (e) {
+    setStatus(st, queued
+      ? t("The recording was saved, but it could not be started now: {0}. Use Retry if it appears as failed.", String(e))
+      : t("Import failed: {0}", String(e)), "err");
+  } finally {
+    importRunning = false;
+  }
+}
+
+async function setupRecordingDrop() {
+  const overlay = $("drop-overlay");
+  await getCurrentWebview().onDragDropEvent(({ payload }) => {
+    if (payload.type === "enter" || payload.type === "over") overlay.hidden = false;
+    else {
+      overlay.hidden = true;
+      if (payload.type === "drop") void importDroppedRecording(payload.paths);
+    }
+  });
 }
 
 async function retryJob(job: Job, button: HTMLButtonElement) {
@@ -235,7 +303,7 @@ function renderError(containerId: string, msg: string) {
   box.appendChild(p);
 }
 
-type JobsResponse = { items: Job[]; total?: number; queued_total?: number; recorder_present?: boolean };
+type JobsResponse = { items: Job[]; total?: number; queued_total?: number; recorder_queued_total?: number; recorder_present?: boolean };
 let jobsRequest: Promise<JobsResponse> | null = null;
 let jobsSnapshot = "";
 let jobsRendered = false;
@@ -259,9 +327,9 @@ async function refreshJobs(explicit = false) {
   const items = r.items ?? [];
   const total = r.total ?? items.length;
   const present = r.recorder_present ?? true;
-  const queuedTotal = r.queued_total ?? 0;
-  const snapshot = JSON.stringify({ items, total, present, queuedTotal });
-  if (!jobsRendered || snapshot !== jobsSnapshot) renderJobs(items, total, present, queuedTotal);
+  const recorderQueuedTotal = r.recorder_queued_total ?? r.queued_total ?? 0;
+  const snapshot = JSON.stringify({ items, total, present, recorderQueuedTotal });
+  if (!jobsRendered || snapshot !== jobsSnapshot) renderJobs(items, total, present, recorderQueuedTotal);
   jobsSnapshot = snapshot;
   jobsRendered = true;
 }
@@ -324,10 +392,19 @@ function makeInput(f: Field): HTMLElement {
   const wrap = document.createElement("label"); wrap.className = "field";
   const span = document.createElement("span"); span.textContent = t(f.label);
   if (f.required) { const s = document.createElement("em"); s.textContent = " *"; s.className = "req"; span.appendChild(s); }
-  const el = document.createElement("input");
+  let el: HTMLInputElement | HTMLSelectElement;
+  if (f.options) {
+    el = document.createElement("select");
+    for (const item of f.options) {
+      const option = document.createElement("option"); option.value = item.value; option.textContent = t(item.label);
+      el.appendChild(option);
+    }
+  } else {
+    el = document.createElement("input");
+    el.type = f.secret ? "password" : "text";
+    if (f.placeholder) el.placeholder = t(f.placeholder);
+  }
   el.id = `f_${f.key}`;
-  el.type = f.secret ? "password" : "text";
-  if (f.placeholder) el.placeholder = t(f.placeholder);
   el.required = !!f.required;
   wrap.append(span, el);
   return wrap;
@@ -348,6 +425,7 @@ function buildSettings() {
 }
 
 async function openSettings() { buildSettings(); showScreen("settings"); setStatus($("settings-status"), ""); void showAppVersion(); await loadConfig(); }
+async function openHistorySettings() { await openSettings(); inputEl("VOICENOTE_MAX_AGE_HOURS")?.focus(); }
 
 // ── Software update (Tauri updater; static latest.json on GitHub Releases) ────
 // `check()` reads the pubkey-verified latest.json from the updater endpoint;
@@ -432,7 +510,12 @@ async function loadConfig() {
     if (f.key.startsWith("self_")) continue;
     const el = inputEl(f.key);
     if (el) {
-      el.value = cfg.env?.[f.key] ?? "";
+      const value = cfg.env?.[f.key] ?? "";
+      if (el instanceof HTMLSelectElement && value && ![...el.options].some(option => option.value === value)) {
+        const option = document.createElement("option"); option.value = value; option.textContent = t("Custom: {0} hours", value);
+        el.appendChild(option);
+      }
+      el.value = value;
     }
   }
   const name = inputEl("self_name"); if (name) name.value = cfg.self?.name ?? "";
@@ -512,6 +595,7 @@ function startLogin() {
 window.addEventListener("DOMContentLoaded", async () => {
   applyStaticI18n();
   listen<LoginEvent>("login-event", (e) => onLoginEvent(e.payload));
+  setupRecordingDrop().catch((e) => setStatus($("sync-status"), t("Drag and drop is unavailable: {0}", String(e)), "err"));
 
   $("refresh-btn").addEventListener("click", () => void refreshStatus(true));
   $("sync-btn").addEventListener("click", () => void syncNow());

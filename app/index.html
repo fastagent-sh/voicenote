@@ -26,7 +26,10 @@
         <main class="col col-notes">
           <div class="col-head">
             <h2 data-i18n>Processing</h2>
-            <a id="open-ws" href="#" class="text-link" data-i18n>Open notes folder ↗</a>
+            <div class="col-head-actions">
+              <span class="drop-tip" data-i18n>Drop an audio file here</span>
+              <a id="open-ws" href="#" class="text-link" data-i18n>Open notes folder ↗</a>
+            </div>
           </div>
           <p id="sync-status" class="status sync-status" role="status"></p>
           <div id="notes-list" class="notes"></div>
@@ -85,5 +88,12 @@
         </footer>
       </form>
     </section>
+
+    <div id="drop-overlay" class="drop-overlay" hidden>
+      <div>
+        <strong data-i18n>Drop to process this recording</strong>
+        <span data-i18n>It will be copied to the local queue first</span>
+      </div>
+    </div>
   </body>
 </html>

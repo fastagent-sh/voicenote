@@ -177,6 +177,7 @@ vn open <slug>                  # open a note by filename fragment
 vn forget <id|filename>         # let a recording be processed again
 vn log                          # print today's log tail (--lines N / -f follow / --err include launchd.err / --date YYYY-MM-DD)
 vn errors                       # print recent ERROR logs
+vn import /path/to/audio.mp3    # copy one local recording into the durable manual-import queue
 vn login                        # sign in to ChatGPT for the notes backend (browser callback; `--device-code` for headless machines). No pi TUI needed
 vn upgrade                      # reinstall latest npm package
 vn install-launch-agent
@@ -215,6 +216,10 @@ Changes take effect on the next `vn run`. `~`, `$HOME`, and `${HOME}` are accept
 6. The summary model (default: pi codex via ChatGPT Plus) reads the raw transcript directly, performing necessary cleanup, speaker restoration, and reconstruction of views/debates/consensus inside the notes-generation stage; if the summary fails, the next `vn run` / `vn run --latest` reuses the saved transcript and retries only the notes generation — no `vn forget` needed
 7. Write notes / metadata; the system makes no archiving decisions — files stay in the configured workspace
 
+The history range defaults to 48 hours. In the GUI, choose 7 days, 30 days, or all recordings under **Settings → Recording history to process**. Expanding it re-evaluates recordings previously filtered as `too_old`; the dashboard's filtered summary links directly to this setting.
+
+To process a local file immediately, drop one supported audio file onto the GUI. It is copied atomically to `${VOICENOTE_WORKSPACE}/_inbox`, queued even if another run is active or the recorder is disconnected, and processed before automatic recorder items without the automatic age/size/duration filters. The temporary inbox copy is removed after success and retained after failure for Retry. Imports are content-addressed, so dropping the same audio again opens the existing note instead of paying for ASR twice when a matching completed job is known.
+
 A failing recording is retried on later runs, but at most **3 times** (whether it fails in transcription or in summarisation, and a run killed mid-job counts too). After that it is marked `Gave up` and left alone, so one broken file can't burn ASR/LLM budget on every scheduler tick. Use **Retry** on its GUI row to reset the budget, preserve saved outputs, and run it again; `vn forget <name>` is the CLI escape hatch that drops the record and re-queues it. Either path reuses a saved transcript instead of paying for ASR again. Both take the run lock, so retry after the active run finishes if the state file is busy.
 
 Records whose source file is no longer on the recorder are forgotten on the next scan (and the removal is logged), *unless* they already produced notes or a transcript — that history is kept. This is why swapping recorders, or deleting files from the device, no longer leaves permanent "failed" rows behind.
@@ -227,6 +232,7 @@ Records whose source file is no longer on the recorder are forgotten on the next
 - Original audio: `${VOICENOTE_WORKSPACE}/_audio/YYYY-MM/`
 - Full transcripts: `${VOICENOTE_WORKSPACE}/_transcripts/YYYY-MM/`
 - Metadata: `${VOICENOTE_WORKSPACE}/_metadata/YYYY-MM/`
+- Pending manual imports: `${VOICENOTE_WORKSPACE}/_inbox/` (removed after success)
 - State: `${VOICENOTE_WORKSPACE}/_state/jobs.json` — one record per recording, holding its `state` — where it is in its lifecycle (`queued`, `running`, `done`, `filtered`, `error`, or `gave_up` once retries are spent) — plus a `code` saying why (`summary_failed`, `transcribe_failed`, `interrupted`, `too_small`, …), its attempt count and its output paths. `vn run` writes lifecycle updates; only explicit retry/forget actions mutate it otherwise. `vn jobs` and passive GUI refreshes are pure reads, so what you see is what will run. A pre-0.18 `processed.json` is converted automatically on the first run and kept as `processed.json.v1.bak`.
 - Index: `${VOICENOTE_WORKSPACE}/_index/notes.jsonl`
 
@@ -242,7 +248,7 @@ launchctl enable gui/$(id -u)/sh.fastagent.voicenote
 vn status
 ```
 
-The LaunchAgent invokes `vn run` every 60 seconds. It skips safely when no recorder is plugged in; once the VTR6500 is connected, new recordings are processed automatically.
+The LaunchAgent invokes `vn run` every 60 seconds. Without a recorder it still processes queued local imports; once the VTR6500 is connected, new recorder items are processed automatically too.
 
 > `config.json` changes are picked up by the background agent on its next run. The plist stores only a fixed PATH and executable paths: **after changing `VOICENOTE_PI_BIN`, re-run `vn install-launch-agent --load`** (`vn upgrade` does this automatically). Shell-only settings are deliberately not copied into the scheduler; persist them with `vn config set`. If pi or ASR is not configured, the agent skips before spending ASR.
 
@@ -282,10 +288,10 @@ The workflow lives at `.github/workflows/release.yml`: CI explicitly runs typech
 
 A self-contained macOS `.app` (Tauri v2) for **non-terminal users**: the target machine needs no pre-installed bun / pi / ffprobe / global `vn`.
 
-**Positioning**: the GUI is a status dashboard with quick access to output and manual Sync/Retry controls. The full pipeline still runs autonomously every 60s via the background LaunchAgent using the bundled CLI (it keeps running with the GUI closed).
+**Positioning**: the GUI is a status dashboard with quick access to output, drag-to-import, and manual Sync/Retry controls. The full pipeline still runs autonomously every 60s via the background LaunchAgent using the bundled CLI (it keeps running with the GUI closed).
 
 - First run: settings (identity / Volcano keys / proxy). The notes model comes from pi; ChatGPT users can sign in from the Status panel (`vn login`'s browser-callback flow).
-- After that: the main view shows agent activity and recent notes, opens outputs, and can retry failed recordings.
+- After that: the main view shows agent activity and recent notes, opens outputs, retries failed recordings, and accepts one local audio file dropped anywhere on the window.
 
 ### What's bundled
 

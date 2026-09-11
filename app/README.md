@@ -1,6 +1,6 @@
 # VoiceNote desktop app
 
-Self-contained macOS GUI (Tauri v2). Positioning: a status dashboard + quick access to notes; the actual transcription/notes pipeline runs autonomously via the background LaunchAgent using the bundled `vn` CLI.
+Self-contained desktop GUI (Tauri v2). It provides a status dashboard, quick access to notes, drag-to-import, and manual Sync/Retry controls; the actual transcription/notes pipeline runs autonomously via the background scheduler using the bundled `vn` CLI.
 
 Full documentation (architecture / bundle contents / install / distribution / signing) lives in the "Desktop app" section of the repo root `README.md`.
 
