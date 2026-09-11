@@ -74,7 +74,7 @@ configure_shell_env() {
 }
 
 # Write the canonical config template to ~/.config/voicenote/config.json. Existing
-# values win; environment variables preseed missing values during install.
+# values win; environment variables preseed the ones still empty.
 write_config_json() {
   log "Preparing ~/.config/voicenote/config.json"
   VOICENOTE_WORKSPACE="$WORKSPACE" \
@@ -92,17 +92,6 @@ const { join } = require('node:path')
 const configDir = join(process.env.HOME, '.config/voicenote')
 const path = join(configDir, 'config.json')
 const keys = ['VOICENOTE_WORKSPACE','VOLCANO_ASR_KEY','VOLCANO_ASR_RESOURCE_ID','VOLCANO_TOS_REGION','VOLCANO_TOS_ENDPOINT','VOLCANO_TOS_BUCKET','VOLCANO_TOS_ACCESS_KEY','VOLCANO_TOS_SECRET_KEY','VOLCANO_TOS_KEEP']
-const defaults = {
-  VOICENOTE_WORKSPACE: process.env.VOICENOTE_WORKSPACE,
-  VOLCANO_ASR_KEY: '',
-  VOLCANO_ASR_RESOURCE_ID: process.env.VOLCANO_ASR_RESOURCE_ID,
-  VOLCANO_TOS_REGION: process.env.VOLCANO_TOS_REGION,
-  VOLCANO_TOS_ENDPOINT: process.env.VOLCANO_TOS_ENDPOINT,
-  VOLCANO_TOS_BUCKET: '',
-  VOLCANO_TOS_ACCESS_KEY: '',
-  VOLCANO_TOS_SECRET_KEY: '',
-  VOLCANO_TOS_KEEP: process.env.VOLCANO_TOS_KEEP,
-}
 let cfg = {}
 try {
   cfg = JSON.parse(readFileSync(path, 'utf8'))
@@ -110,7 +99,7 @@ try {
 } catch (error) {
   if (error.code !== 'ENOENT') throw error
 }
-for (const k of keys) if (cfg[k] == null) cfg[k] = defaults[k] ?? ''
+for (const k of keys) if (!cfg[k]) cfg[k] = process.env[k] || ''
 const currentSelf = cfg.speakers?.self
 cfg.speakers = {
   self: {
