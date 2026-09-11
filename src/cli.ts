@@ -153,14 +153,8 @@ const ENV_KEYS = [
 //   2) routing China-mainland Volcano APIs through an overseas proxy is slower / unreliable
 const VOLCANO_NO_PROXY_HOSTS = ['.volces.com', '.volcengineapi.com', 'openspeech.bytedance.com']
 
-// Provenance: ENV_KEYS this process synthesized — hydrated from config.json /
-// .zshrc, or derived (http_proxy from LOCAL_PROXY_HOST or the macOS system
-// proxy; no_proxy seeded/merged below) — as opposed to inherited from the
-// real environment. Two consumers:
-//   - reloadEnvConfig() deletes exactly these before re-hydrating, so the
-//     long-lived `vn serve` picks up GUI config edits immediately;
-//   - launchAgentEnv() skips them when embedding env into the scheduler
-//     (they are recoverable at run time; real env values are not).
+// Provenance: ENV_KEYS this process synthesized from files or proxy settings.
+// launchAgentEnv() skips them because each scheduled run reads the files again.
 const hydratedEnvKeys = new Set<string>()
 
 // Real-environment no_proxy/NO_PROXY values captured BEFORE the volcano-hosts
@@ -254,21 +248,6 @@ function loadEnvConfig(): void {
   // Derive http_proxy etc. from LOCAL_PROXY_HOST/PORT regardless of source, and
   // always keep Volcano hosts on NO_PROXY. (Runs even with no config files.)
   applyDerivedProxy()
-}
-
-// Re-hydrate after config.json changes. Needed by the long-lived `vn serve`:
-// without this, a GUI config edit only reaches OTHER processes (vn run reads
-// the file fresh each start), while serve's own doctor kept reporting stale
-// values and ensure_agent re-embedded them into the scheduler env on
-// reinstall. Only hydrated/derived keys are dropped — real environment
-// variables keep their precedence (a real-env no_proxy stays merged in place;
-// its pre-merge original survives in premergeRealNoProxy, and the volcano
-// merge is idempotent on the next pass).
-function reloadEnvConfig(): void {
-  for (const k of hydratedEnvKeys) delete process.env[k]
-  hydratedEnvKeys.clear()
-  envConfigLoaded = false
-  loadEnvConfig()
 }
 
 function getVolcanoConfigFromEnv(): VolcanoConfig | null {
@@ -1451,9 +1430,6 @@ async function configSetData(payload: ConfigSetPayload): Promise<{ ok: true; pat
     await rename(tmp, CONFIG_ENV_PATH)
   }
 
-  // Make the new values visible to THIS process immediately (see reloadEnvConfig).
-  reloadEnvConfig()
-
   return { ok: true, path: CONFIG_ENV_PATH, ...(ignored.length ? { ignoredKeys: ignored } : {}) }
 }
 
@@ -1899,7 +1875,7 @@ async function loadState(config: Config): Promise<StateFile> {
     return migrateLegacyState(await readLegacyState(config), nowIso())
   }
   const store = existsSync(path) ? parseStateFile(await readFile(path, 'utf8'), path) : emptyState()
-  lastSavedState.set(path, JSON.stringify(store))
+  lastSavedState = JSON.stringify(store)
   return store
 }
 
@@ -1913,23 +1889,19 @@ async function migrateStateOnDisk(config: Config): Promise<void> {
   if (existsSync(path) || !existsSync(legacy)) return
   const store = migrateLegacyState(await readLegacyState(config), nowIso())
   await writeJson(path, store)
-  lastSavedState.set(path, JSON.stringify(store))
+  lastSavedState = JSON.stringify(store)
   await rename(legacy, `${legacy}.v1.bak`).catch(e => warnSideEffect('archive pre-0.18 state', e))
   console.log(`Converted ${basename(legacy)} → ${basename(path)} (${Object.keys(store.jobs).length} records; old file kept as .v1.bak)`)
 }
 
-// The scheduler ticks every 60s and the workspace is often a synced folder
-// (iCloud/Dropbox). Rewriting an unchanged state file on every tick would be
-// pure sync noise, so writes are content-gated. Keyed by path, not a single
-// value: `vn serve` handles config.set (which can move the workspace) and runs
-// in one process, and a shared key could skip the first write to a new path.
-const lastSavedState = new Map<string, string>()
+// Workspaces are often synced folders; skip writes when a run did not change
+// the state.
+let lastSavedState = ''
 async function saveState(config: Config, store: StateFile): Promise<void> {
-  const path = statePathFor(config)
   const serialized = JSON.stringify(store)
-  if (serialized === lastSavedState.get(path)) return
-  await writeJson(path, store)
-  lastSavedState.set(path, serialized)
+  if (serialized === lastSavedState) return
+  await writeJson(statePathFor(config), store)
+  lastSavedState = serialized
 }
 
 /** Upsert the scan-time facts; never touches lifecycle fields. */
@@ -2302,7 +2274,7 @@ async function installScheduledTask(opts: { load?: boolean } = {}): Promise<void
   await mkdir(STATE_DIR, { recursive: true })
   await mkdir(LOG_DIR, { recursive: true })
   // The task carries no env (Task Scheduler has no per-task env block), so the
-  // bundled-engine paths the GUI injected via process env (pi runtime + cli.js +
+  // bundled CLI paths the GUI injected via process env (pi runtime + cli.js +
   // ffprobe) must be persisted to config.json, which `vn run` reads on startup.
   // (On mac these ride in the LaunchAgent plist instead.)
   const persist: Record<string, string> = {}
@@ -2785,24 +2757,12 @@ async function doctor(opts: { json?: boolean } = {}): Promise<void> {
   console.log(`ffprobe=${s.deps.ffprobe ? 'ok' : 'missing'}`)
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// serve — persistent JSON-RPC engine over stdio (the desktop GUI's client)
-// ────────────────────────────────────────────────────────────────────────────
-// One long-lived process the GUI talks to instead of spawning `vn` per call, so
-// Bun cold start (and on Windows the AV scan + console flash) is paid ONCE.
-// Protocol (newline-delimited JSON on stdio):
-//   client→: {"type":"req","id":N,"method":M,"params":P}
-//   →client: {"type":"res","id":N,"result":R} | {"type":"res","id":N,"error":E}
-//   →client: {"type":"event","event":"login-event","payload":{...}}  (login stream)
-
-// Is the background scheduler already installed AND pointing at THIS binary?
-// (Mirrors what the GUI's ensure_agent used to check in Rust; kept here so the
-// staleness logic lives in one place.)
+// Is the background scheduler installed and pointing at this binary?
 async function schedulerIsCurrent(): Promise<boolean> {
   const exe = process.execPath
   if (IS_WINDOWS) {
     if ((await runCommand('schtasks', ['/query', '/tn', TASK_NAME], 10000)).code !== 0) return false
-    // The task XML points at wscript; the actual engine path lives in the VBS.
+    // The task XML points at wscript; the actual CLI path lives in the VBS.
     try { return readFileSync(taskVbsPath(), 'utf16le').includes(exe) } catch { return false }
   }
   try { return readFileSync(plistPath(), 'utf8').includes(exe) } catch { return false }
@@ -2812,99 +2772,6 @@ async function ensureScheduler(force: boolean): Promise<{ ok: true; skipped?: bo
   if (!force && await schedulerIsCurrent()) return { ok: true, skipped: true }
   await installScheduler({ load: true })
   return { ok: true }
-}
-
-async function dispatchServe(req: any, send: (o: unknown) => void): Promise<void> {
-  const { id, method, params } = req || {}
-  try {
-    let result: unknown
-    switch (method) {
-      case 'config.get': result = configGetData(); break
-      case 'config.set': result = await configSetData(params || {}); break
-      case 'doctor': result = await collectDoctor(); break
-      case 'jobs': result = await jobsListData(parseJobsLimit(params?.limit, 40)); break
-      case 'ensure_agent': result = await ensureScheduler(!!params?.force); break
-      case 'run': {
-        // Long-running (minutes) like login: ack immediately so the GUI's 60s
-        // request timeout can't misread it as a wedged engine. Progress shows
-        // via the jobs poll; acquireRunLock inside runPipeline dedupes against
-        // the scheduler tick and a double-click.
-        void runPipeline(undefined, {}).catch(e => console.error('manual run failed:', e?.message || e))
-        result = { started: true }
-        break
-      }
-      case 'login': {
-        // Ack immediately: the OAuth round-trip takes minutes (user in browser),
-        // and the GUI client times requests out after 60s — a long-lived login
-        // response would be misread as a wedged engine. Progress and outcome
-        // ride entirely on login-event; the response carries nothing.
-        void (async () => {
-          let ok = false
-          // Attempt latch: once this attempt settles (timeout or completion),
-          // late events from a still-dangling OAuth flow must not reach the
-          // UI — a stale success/error would clobber a NEWER login attempt's
-          // state (the closed for this attempt has already been sent).
-          let settled = false
-          const sendEvent = (o: Record<string, unknown>) => { if (!settled) send({ type: 'event', event: 'login-event', payload: o }) }
-          try {
-            // Bound the OAuth wait: if the user closes the browser without
-            // authorizing, the callback never arrives and the flow would hang
-            // forever — with the GUI's login button locked until app restart.
-            // True cancellation is not available (the browser flow of
-            // @earendil-works/pi-ai takes no AbortSignal), so on timeout the
-            // abandoned flow keeps running muted (settled latch above). Two
-            // consequences, both surfaced in the timeout message: a LATE
-            // authorization still persists credentials silently (login may
-            // actually have succeeded — hence “refresh to confirm”), and the dangling
-            // localhost callback server may hold its port until serve exits,
-            // so an immediate retry can fail fast with a port-busy error.
-            const timeout = new Promise<never>((_, rej) => {
-              const t = setTimeout(() => rej(new Error('Login timed out: authorization was not completed within 10 minutes. If you just authorized in the browser, click Refresh to confirm login status; otherwise retry')), 10 * 60 * 1000)
-              ;(t as any).unref?.()
-            })
-            await Promise.race([
-              loginChatGPT({ json: true, deviceCode: !!params?.deviceCode, emit: (o) => { if (o.event === 'success') ok = true; sendEvent(o) } }),
-              timeout,
-            ])
-          } catch (e: any) {
-            // loginChatGPT handles its own errors; this catches the timeout
-            // above plus anything it lets escape (fail visibly).
-            sendEvent({ event: 'error', message: String(e?.message || e) })
-          }
-          sendEvent({ event: 'closed', code: ok ? 0 : 1 })
-          settled = true
-        })()
-        result = { started: true }
-        break
-      }
-      default: throw new Error(`unknown method: ${method}`)
-    }
-    send({ type: 'res', id, result })
-  } catch (e: any) {
-    send({ type: 'res', id, error: String(e?.message || e) })
-  }
-}
-
-async function serve(): Promise<void> {
-  loadEnvConfig()
-  // The protocol owns stdout; route any stray console.log from reused helpers
-  // (e.g. installScheduler) to stderr so it can't corrupt the JSONL stream.
-  console.log = (...args: any[]) => { console.error(...args) }
-  const send = (o: unknown) => process.stdout.write(JSON.stringify(o) + '\n')
-  let buf = ''
-  process.stdin.setEncoding('utf8')
-  process.stdin.on('data', (chunk: string) => {
-    buf += chunk
-    let nl: number
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1)
-      if (!line) continue
-      let req: any
-      try { req = JSON.parse(line) } catch { continue }
-      void dispatchServe(req, send)
-    }
-  })
-  await new Promise<void>((resolve) => { process.stdin.on('end', resolve); process.stdin.on('close', resolve) })
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -2951,7 +2818,6 @@ cli.command('upgrade', 'Upgrade to the latest published version via bun add -g')
 cli.command('doctor', 'Check environment')
   .option('--json', 'Output structured status as JSON (for the GUI)')
   .action((opts: { json?: boolean }) => doctor(opts))
-cli.command('serve', 'Run a persistent JSON-RPC engine over stdio (used by the desktop GUI)').action(serve)
 cli.command('login', 'Sign in to ChatGPT (Codex OAuth) for the pi summary backend')
   .option('--json', 'Emit machine-readable JSON events (for the GUI client)')
   .option('--device-code', 'Use the device-code flow instead of the browser callback (needs the ChatGPT security-settings opt-in)')
@@ -2966,6 +2832,9 @@ cli.command('config <action>', 'Read/write file-based config. action: get (print
 cli.command('install-launch-agent', 'Install background scheduler (mac LaunchAgent / Windows Task Scheduler)')
   .option('--load', 'Also (re)load/start it immediately')
   .action((opts: { load?: boolean }) => installScheduler(opts))
+cli.command('ensure-launch-agent', 'Install the background scheduler when missing or stale')
+  .option('--force', 'Reinstall even when the scheduler is current')
+  .action((opts: { force?: boolean }) => ensureScheduler(!!opts.force))
 cli.command('uninstall-launch-agent', 'Remove the background scheduler').action(uninstallScheduler)
 cli.command('status', 'Print background scheduler status').action(printSchedulerStatus)
 

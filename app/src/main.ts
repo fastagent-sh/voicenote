@@ -4,7 +4,6 @@ import { getVersion } from "@tauri-apps/api/app";
 import { openUrl, openPath } from "@tauri-apps/plugin-opener";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { JobsRefreshState } from "./jobsState";
 import { t, applyStaticI18n, savedLang, setLang } from "./i18n";
 
 // ── Settings schema (flat, grouped; lives inline in the dashboard) ───────────
@@ -195,30 +194,35 @@ function renderError(containerId: string, msg: string) {
   box.appendChild(p);
 }
 
-// Refresh decisions (latest-wins rendering, cross-request explicit feedback,
-// failure escalation) live in a pure, tested state machine — see jobsState.ts
-// for the invariants and jobsState.test.ts for their proofs.
-const jobsState = new JobsRefreshState();
+type JobsResponse = { items: Job[]; total?: number; queued_total?: number; recorder_present?: boolean };
+let jobsRequest: Promise<JobsResponse> | null = null;
+let jobsSnapshot = "";
+let jobsRendered = false;
+
+function fetchJobs(): Promise<JobsResponse> {
+  if (!jobsRequest) jobsRequest = invoke<JobsResponse>("recent_jobs").finally(() => { jobsRequest = null; });
+  return jobsRequest;
+}
 
 async function refreshJobs(explicit = false) {
-  const seq = jobsState.begin(explicit);
-  // The try covers ONLY the engine round-trip: this catch feeds the state
-  // machine's failure accounting, and a renderJobs/DOM bug recorded as an
-  // engine failure would both corrupt that accounting (success then failure
-  // for one request) and misreport a frontend bug as an engine failure.
-  let r: { items: Job[]; total?: number; queued_total?: number; recorder_present?: boolean };
+  let r: JobsResponse;
   try {
-    r = (await invoke("recent_jobs")) as { items: Job[]; total?: number; queued_total?: number; recorder_present?: boolean };
+    r = await fetchJobs();
   } catch (e) {
-    if (jobsState.failure() === "error") renderError("notes-list", t("Failed to read processing status: {0}", String(e)));
-    else console.error("refreshJobs (background)", e); // poll/boot/post-save flow: keep last-good list
+    if (explicit || !jobsRendered) {
+      jobsRendered = false;
+      renderError("notes-list", t("Failed to read processing status: {0}", String(e)));
+    } else console.error("refreshJobs (background)", e);
     return;
   }
   const items = r.items ?? [];
   const total = r.total ?? items.length;
   const present = r.recorder_present ?? true;
   const queuedTotal = r.queued_total ?? 0;
-  if (jobsState.success(seq, JSON.stringify({ items, total, present, queuedTotal })) === "render") renderJobs(items, total, present, queuedTotal);
+  const snapshot = JSON.stringify({ items, total, present, queuedTotal });
+  if (!jobsRendered || snapshot !== jobsSnapshot) renderJobs(items, total, present, queuedTotal);
+  jobsSnapshot = snapshot;
+  jobsRendered = true;
 }
 
 // `explicit` = the user pressed the refresh button (needs failure feedback);
@@ -427,11 +431,11 @@ type LoginEvent =
   | { event: "device_code"; userCode: string; verificationUri: string }
   | { event: "success"; provider: string }
   | { event: "error"; message: string }
-  | { event: "closed"; code: number | null; reason?: string };
+  | { event: "closed"; code: number | null };
 
 function onLoginEvent(e: LoginEvent) {
-  // No login running → every login-event is stale or synthetic (an abandoned
-  // flow's stragglers, or the engine-teardown closed) — none of them may touch
+  // No login running → every login event is stale (for example, output from a
+  // process that just closed) — none of them may touch
   // the UI. This single gate keeps all branches consistent; `error` flips
   // loginRunning off itself, which also makes its follow-up `closed` a no-op.
   if (!loginRunning) return;
@@ -452,7 +456,6 @@ function onLoginEvent(e: LoginEvent) {
     case "closed":
       loginRunning = false; ($("login-btn") as HTMLButtonElement).disabled = false;
       if (loginSucceeded) ensureAgent(true).then(() => refreshStatus());
-      else if (e.reason === "engine-exited") setStatus(st, t("Engine exited unexpectedly; sign-in aborted, please retry"), "err");
       else if (e.code !== 0) setStatus(st, t("Sign-in exited (code={0})", e.code ?? "?"), "err");
       break;
   }
@@ -488,14 +491,17 @@ window.addEventListener("DOMContentLoaded", async () => {
   // The background agent retries/processes recordings on its own 60s tick;
   // poll the jobs list so failed→done transitions show up without a manual refresh.
   // Chained (next tick scheduled only after the previous settles) so at most
-  // one poll is in flight — a slow/wedged engine gets one pending request, not
+  // one poll is in flight — a slow CLI request gets one process, not
   // a new one stacking every 10s. Deliberately NOT polled: the agent pill /
   // status rows. They come from doctor_status, which spawns sidecars
   // (`pi --version`, ffprobe) on every call — too heavy for a 10s tick — so
   // the pill can lag the job list until the next manual refresh.
-  // Reschedule in finally so the chain survives any rejection out of
-  // refreshJobs — a broken link would silently stop all polling.
-  const pollJobs = () => setTimeout(() => { refreshJobs().catch(console.error).finally(pollJobs); }, 10_000);
+  // Poll only while visible; overlapping manual and automatic refreshes share
+  // one process through fetchJobs().
+  const pollJobs = () => setTimeout(() => {
+    const refresh = document.hidden ? Promise.resolve() : refreshJobs();
+    refresh.catch(console.error).finally(pollJobs);
+  }, 10_000);
   pollJobs();
 
   buildSettings();

@@ -284,14 +284,14 @@ The workflow lives at `.github/workflows/release.yml`: CI explicitly runs typech
 
 A self-contained macOS `.app` (Tauri v2) for **non-terminal users**: the target machine needs no pre-installed bun / pi / ffprobe / global `vn`.
 
-**Positioning**: the GUI is only a "status dashboard + quick access to output" — it does **not** drive processing. The full pipeline runs autonomously every 60s via the background LaunchAgent using the bundled engine (it keeps running with the GUI closed).
+**Positioning**: the GUI is only a "status dashboard + quick access to output" — it does **not** drive processing. The full pipeline runs autonomously every 60s via the background LaunchAgent using the bundled CLI (it keeps running with the GUI closed).
 
 - First run: settings (identity / Volcano keys / proxy). The notes model comes from pi; ChatGPT users can sign in from the Status panel (`vn login`'s browser-callback flow).
 - After that: the main view shows agent activity + recent notes (open note / open folder)
 
 ### What's bundled
 
-`bun build --compile` compiles the `vn` engine (bun runtime + pi-ai included) into a single-file sidecar; pi cannot be compiled (it reads data files from disk at runtime), so the whole package ships alongside and runs with a bundled `bun`:
+`bun build --compile` compiles the `vn` CLI (bun runtime + pi-ai included) into a single-file sidecar; pi cannot be compiled (it reads data files from disk at runtime), so the whole package ships alongside and runs with a bundled `bun`:
 
 | Component | Form | Purpose |
 |------|------|------|
@@ -344,7 +344,7 @@ irm https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/instal
 
 `install-app.sh` downloads the packaged `.app` from GitHub Releases → installs to `/Applications` → **removes the quarantine flag for the user** (Gatekeeper bypass for un-notarized builds) → opens it. The target machine needs no bun/pi/ffprobe/global vn (all bundled).
 
-**First launch**: the app lands on Settings. Fill in identity, your Volcano ASR/TOS keys, and proxy as needed. Notes are written by pi with pi's own provider and model; for ChatGPT, click "Sign in to ChatGPT" in the Status panel. Saving installs and loads the background LaunchAgent using the bundled engine. Once credentials are configured, plug in the recorder for automatic transcription and notes.
+**First launch**: the app lands on Settings. Fill in identity, your Volcano ASR/TOS keys, and proxy as needed. Notes are written by pi with pi's own provider and model; for ChatGPT, click "Sign in to ChatGPT" in the Status panel. Saving installs and loads the background LaunchAgent using the bundled CLI. Once credentials are configured, plug in the recorder for automatic transcription and notes.
 
 > The background agent label is `sh.fastagent.voicenote` (same as the CLI version; only one exists per machine). If the `.app` is moved, open it once to recalibrate the plist.
 

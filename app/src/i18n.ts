@@ -137,7 +137,6 @@ export const ZH: Record<string, string> = {
   "Enter {0} at {1}": "在 {1} 输入 {0}",
   "✓ Signed in": "✓ 已登录",
   "Sign-in failed: {0}": "登录失败：{0}",
-  "Engine exited unexpectedly; sign-in aborted, please retry": "引擎意外退出，登录已中断，请重试",
   "Sign-in exited (code={0})": "登录已退出（code={0}）",
   "Failed to start: {0}": "启动失败：{0}",
 };

@@ -277,14 +277,14 @@ workflow 位于 `.github/workflows/release.yml`:CI 显式跑 typecheck、测试�
 
 面向**非终端用户**:一个自包含的 macOS `.app`(Tauri v2),目标机器无需预装 bun / pi / ffprobe / 全局 `vn`。
 
-**定位**:GUI 只是「工作状态 dashboard + 产出快捷入口」,**不驱动处理**。真正的全流程由后台 LaunchAgent 用包内引擎每 60s 自主运行(关掉 GUI 也跑)。
+**定位**:GUI 只是「工作状态 dashboard + 产出快捷入口」,**不驱动处理**。真正的全流程由后台 LaunchAgent 用包内 CLI 每 60s 自主运行(关掉 GUI 也跑)。
 
 - 首次:配置向导(身份 / Volcano keys / 代理)→ ChatGPT 登录(设备无终端,走 `vn login` 的浏览器回调流)
 - 之后:主界面显示 agent 活动 + 最近纪要(点开 / 打开文件夹)
 
 ### 打包内容
 
-`bun build --compile` 把 `vn` 引擎(含 bun 运行时 + pi-ai)编成单文件 sidecar;pi 不能 compile(运行时读磁盘数据文件),故整包随行,用一个随包的 `bun` 运行:
+`bun build --compile` 把 `vn` CLI(含 bun 运行时 + pi-ai)编成单文件 sidecar;pi 不能 compile(运行时读磁盘数据文件),故整包随行,用一个随包的 `bun` 运行:
 
 | 组件 | 形式 | 用途 |
 |------|------|------|
@@ -337,7 +337,7 @@ irm https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/instal
 
 `install-app.sh` 会:从 GitHub Releases 下载已打包的 `.app` → 装到 `/Applications` → **替用户去掉隔离标记**(未公证时绕过 Gatekeeper)→ 打开。目标机器无需 bun/pi/ffprobe/全局 vn(全内置)。
 
-**首次打开**:应用落在「设置」页 → 填身份 + 自己的火山 ASR/TOS 密钥 + 代理(BYOK)→ 保存 → 「状态」面板点「登录 ChatGPT」(浏览器授权一次)。完成后 GUI 自动安装并加载后台 LaunchAgent(指向包内引擎),插上录音笔即自动转写+生成纪要。
+**首次打开**:应用落在「设置」页 → 填身份 + 自己的火山 ASR/TOS 密钥 + 代理(BYOK)→ 保存 → 「状态」面板点「登录 ChatGPT」(浏览器授权一次)。完成后 GUI 自动安装并加载后台 LaunchAgent(指向包内 CLI),插上录音笔即自动转写+生成纪要。
 
 > 后台 agent label 是 `sh.fastagent.voicenote`(与 CLI 版同名,机器上只保留一个)。`.app` 换位置后再打开一次即可重新校准 plist。
 
