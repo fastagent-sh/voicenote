@@ -318,17 +318,6 @@ async fn login_chatgpt(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parse_json;
-
-    #[test]
-    fn cli_json_must_not_be_mixed_with_logs() {
-        assert!(parse_json("{\"ok\":true}", "test").is_ok());
-        assert!(parse_json("log\n{\"ok\":true}", "test").is_err());
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -346,4 +335,15 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_json;
+
+    #[test]
+    fn cli_json_must_not_be_mixed_with_logs() {
+        assert!(parse_json("{\"ok\":true}", "test").is_ok());
+        assert!(parse_json("log\n{\"ok\":true}", "test").is_err());
+    }
 }
