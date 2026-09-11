@@ -215,7 +215,7 @@ Changes take effect on the next `vn run`. `~`, `$HOME`, and `${HOME}` are accept
 6. The summary model (default: pi codex via ChatGPT Plus) reads the raw transcript directly, performing necessary cleanup, speaker restoration, and reconstruction of views/debates/consensus inside the notes-generation stage; if the summary fails, the next `vn run` / `vn run --latest` reuses the saved transcript and retries only the notes generation — no `vn forget` needed
 7. Write notes / metadata; the system makes no archiving decisions — files stay in the configured workspace
 
-A failing recording is retried on later runs, but at most **3 times** (whether it fails in transcription or in summarisation, and a run killed mid-job counts too). After that it is marked `Gave up` and left alone, so one broken file can't burn ASR/LLM budget on every scheduler tick — `vn forget <name>` drops the record and re-queues it. Re-queuing is not the same as re-transcribing: if the transcript is already on disk it is reused, so `vn forget` never re-pays for ASR. (`vn forget` takes the run lock, so it refuses while a run is in progress — wait for that run to finish and repeat.)
+A failing recording is retried on later runs, but at most **3 times** (whether it fails in transcription or in summarisation, and a run killed mid-job counts too). After that it is marked `Gave up` and left alone, so one broken file can't burn ASR/LLM budget on every scheduler tick. Use **Retry** on its GUI row to reset the budget, preserve saved outputs, and run it again; `vn forget <name>` is the CLI escape hatch that drops the record and re-queues it. Either path reuses a saved transcript instead of paying for ASR again. Both take the run lock, so retry after the active run finishes if the state file is busy.
 
 Records whose source file is no longer on the recorder are forgotten on the next scan (and the removal is logged), *unless* they already produced notes or a transcript — that history is kept. This is why swapping recorders, or deleting files from the device, no longer leaves permanent "failed" rows behind.
 
@@ -227,7 +227,7 @@ Records whose source file is no longer on the recorder are forgotten on the next
 - Original audio: `${VOICENOTE_WORKSPACE}/_audio/YYYY-MM/`
 - Full transcripts: `${VOICENOTE_WORKSPACE}/_transcripts/YYYY-MM/`
 - Metadata: `${VOICENOTE_WORKSPACE}/_metadata/YYYY-MM/`
-- State: `${VOICENOTE_WORKSPACE}/_state/jobs.json` — one record per recording, holding its `state` — where it is in its lifecycle (`queued`, `running`, `done`, `filtered`, `error`, or `gave_up` once retries are spent) — plus a `code` saying why (`summary_failed`, `transcribe_failed`, `interrupted`, `too_small`, …), its attempt count and its output paths. `vn run` is the only writer; `vn jobs` and the GUI dashboard are pure reads of it, so what you see is what will run. A pre-0.18 `processed.json` is converted automatically on the first run and kept as `processed.json.v1.bak`.
+- State: `${VOICENOTE_WORKSPACE}/_state/jobs.json` — one record per recording, holding its `state` — where it is in its lifecycle (`queued`, `running`, `done`, `filtered`, `error`, or `gave_up` once retries are spent) — plus a `code` saying why (`summary_failed`, `transcribe_failed`, `interrupted`, `too_small`, …), its attempt count and its output paths. `vn run` writes lifecycle updates; only explicit retry/forget actions mutate it otherwise. `vn jobs` and passive GUI refreshes are pure reads, so what you see is what will run. A pre-0.18 `processed.json` is converted automatically on the first run and kept as `processed.json.v1.bak`.
 - Index: `${VOICENOTE_WORKSPACE}/_index/notes.jsonl`
 
 ## Automation
@@ -282,10 +282,10 @@ The workflow lives at `.github/workflows/release.yml`: CI explicitly runs typech
 
 A self-contained macOS `.app` (Tauri v2) for **non-terminal users**: the target machine needs no pre-installed bun / pi / ffprobe / global `vn`.
 
-**Positioning**: the GUI is only a "status dashboard + quick access to output" — it does **not** drive processing. The full pipeline runs autonomously every 60s via the background LaunchAgent using the bundled CLI (it keeps running with the GUI closed).
+**Positioning**: the GUI is a status dashboard with quick access to output and manual Sync/Retry controls. The full pipeline still runs autonomously every 60s via the background LaunchAgent using the bundled CLI (it keeps running with the GUI closed).
 
 - First run: settings (identity / Volcano keys / proxy). The notes model comes from pi; ChatGPT users can sign in from the Status panel (`vn login`'s browser-callback flow).
-- After that: the main view shows agent activity + recent notes (open note / open folder)
+- After that: the main view shows agent activity and recent notes, opens outputs, and can retry failed recordings.
 
 ### What's bundled
 

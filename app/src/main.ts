@@ -61,6 +61,7 @@ type Status = {
   agent: { installed: boolean; logTail: string[] };
 };
 type Job = {
+  id: string | null;
   status: "running" | "queued" | "done" | "notes_failed" | "error" | "gave_up" | "filtered";
   name: string;
   title: string | null;
@@ -125,10 +126,12 @@ const JOB_META: Record<Job["status"], { label: string; tone: string }> = {
   done: { label: "Done", tone: "ok" },
   notes_failed: { label: "Notes retry pending", tone: "err" },
   error: { label: "Failed — will retry", tone: "err" },
-  // Retries are spent; `detail` carries the count and the `vn forget` way out.
+  // Retries are spent; `detail` carries the count and the manual retry way out.
   gave_up: { label: "Gave up", tone: "err" },
   filtered: { label: "Filtered out", tone: "" },
 };
+const RETRYABLE_STATUSES = new Set<Job["status"]>(["notes_failed", "error", "gave_up"]);
+const retryingJobs = new Set<string>();
 
 function renderJobs(jobs: Job[], total = jobs.length, recorderPresent = true, queuedTotal = 0) {
   const list = $("notes-list");
@@ -148,15 +151,28 @@ function renderJobs(jobs: Job[], total = jobs.length, recorderPresent = true, qu
     // notes_failed's stub note links the saved transcript + retry command —
     // openable so the user can actually reach them.
     const openable = (j.status === "done" || j.status === "notes_failed" || j.status === "gave_up") && !!j.notes;
-    const card = document.createElement("button");
+    const retryable = !!j.id && RETRYABLE_STATUSES.has(j.status);
+    const card = document.createElement("div");
     card.className = "job-card";
-    card.disabled = !openable;
 
     const head = document.createElement("div"); head.className = "job-head";
     const badge = document.createElement("span"); badge.className = `jbadge ${meta.tone}`;
     badge.textContent = j.status === "running" && j.step ? `${meta.label} · ${j.step}` : meta.label;
     head.appendChild(badge);
-    if (openable) { const open = document.createElement("span"); open.className = "job-open"; open.textContent = t("Open ↗"); head.appendChild(open); }
+
+    const actions = document.createElement("div"); actions.className = "job-actions";
+    if (openable) {
+      const open = document.createElement("button"); open.type = "button"; open.className = "job-action"; open.textContent = t("Open ↗");
+      open.addEventListener("click", () => void openPath(j.notes!));
+      actions.appendChild(open);
+    }
+    if (retryable) {
+      const retry = document.createElement("button"); retry.type = "button"; retry.className = "job-action"; retry.textContent = t("Retry");
+      retry.disabled = retryingJobs.has(j.id!);
+      retry.addEventListener("click", () => void retryJob(j, retry));
+      actions.appendChild(retry);
+    }
+    if (actions.childElementCount) head.appendChild(actions);
 
     const title = document.createElement("div"); title.className = "job-title";
     title.textContent = j.title || j.name;
@@ -166,7 +182,6 @@ function renderJobs(jobs: Job[], total = jobs.length, recorderPresent = true, qu
     if (j.detail) {
       const r = document.createElement("div"); r.className = "job-reason"; r.textContent = j.detail; card.appendChild(r);
     }
-    if (openable) card.addEventListener("click", () => openPath(j.notes!));
     list.appendChild(card);
   }
   // The list is capped; say so rather than letting a long backlog look short.
@@ -185,6 +200,29 @@ function renderJobs(jobs: Job[], total = jobs.length, recorderPresent = true, qu
       ? t("Recorder not connected — {0} recording(s) waiting for it.", queuedTotal)
       : t("Recorder not connected.");
     list.appendChild(note);
+  }
+}
+
+async function retryJob(job: Job, button: HTMLButtonElement) {
+  if (!job.id || retryingJobs.has(job.id)) return;
+  const name = job.title || job.name;
+  retryingJobs.add(job.id);
+  button.disabled = true;
+  setStatus($("sync-status"), t("Queuing {0} for retry…", name), "wait");
+  let queued = false;
+  try {
+    await invoke("retry_job", { id: job.id });
+    queued = true;
+    await invoke("trigger_run");
+    setStatus($("sync-status"), t("{0} queued for retry", name), "wait");
+  } catch (e) {
+    setStatus($("sync-status"), queued
+      ? t("{0} was queued, but could not start now: {1}", name, String(e))
+      : t("Retry failed: {0}", String(e)), "err");
+  } finally {
+    retryingJobs.delete(job.id);
+    button.disabled = false;
+    if (queued) await refreshJobs(true);
   }
 }
 

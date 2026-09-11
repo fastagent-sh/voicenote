@@ -92,11 +92,15 @@ body {
   -webkit-app-region: no-drag; width: 100%; text-align: left;
   display: flex; flex-direction: column; gap: 8px; padding: 14px 16px;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-  cursor: default; transition: box-shadow .15s, border-color .15s;
 }
-.job-card:not(:disabled) { cursor: pointer; }
-.job-card:not(:disabled):hover { box-shadow: 0 6px 20px rgba(0,0,0,.08); border-color: #d6d6dc; }
 .job-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.job-actions { display: flex; align-items: center; gap: 10px; }
+.job-action {
+  border: 0; padding: 2px; background: transparent; color: var(--accent);
+  font: inherit; font-size: 12px; cursor: pointer;
+}
+.job-action:hover:not(:disabled) { text-decoration: underline; }
+.job-action:disabled { opacity: .5; cursor: default; }
 .jbadge {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px;
@@ -109,7 +113,6 @@ body {
 .jbadge.wait::before { background: var(--warn); animation: pulse 1.4s ease-in-out infinite; }
 .jbadge.err { background: rgba(255,59,48,.14); color: var(--err); }
 .jbadge.err::before { background: var(--err); }
-.job-open { font-size: 12px; color: var(--accent); }
 .job-title { font-size: 14.5px; font-weight: 600; line-height: 1.4; color: var(--text); }
 .job-time { font-size: 12px; color: var(--text-3); }
 .job-reason { font-size: 12px; color: var(--err); word-break: break-all; }
@@ -181,7 +184,6 @@ body {
     --bg: #1c1c1e; --surface: #2c2c2e; --surface-2: #3a3a3c; --surface-hover: #48484a;
     --text: #f5f5f7; --text-2: #aeaeb2; --text-3: #8e8e93; --border: #38383b;
   }
-  .job-card:not(:disabled):hover { box-shadow: 0 6px 20px rgba(0,0,0,.35); border-color: #4a4a4e; }
   .field input::placeholder { color: #6e6e73; }
   .srow { border-bottom-color: #38383b; }
 }

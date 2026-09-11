@@ -163,6 +163,13 @@ export function startAttempt(entry: JobRecord, now: string): void {
   patchJob(entry, { state: 'running', code: null, detail: null, attempts: entry.attempts + 1 }, now)
 }
 
+/** Manually requeue a failed job while retaining any saved transcript/audio. */
+export function requeueFailed(entry: JobRecord, now: string): boolean {
+  if (entry.state !== 'error' && entry.state !== 'gave_up') return false
+  patchJob(entry, { state: 'queued', detail: null, attempts: 0 }, now)
+  return true
+}
+
 /**
  * Reclaim records left `running` by a dead run. Safe to do wholesale because the
  * caller holds the run lock: no other run can own a `running` record right now.
@@ -241,6 +248,7 @@ export function pruneUnseen(jobs: Record<string, JobRecord>, seen: Set<string>, 
 export type CurrentJob = { pid: number; source_id: string; step: string; started_at: string }
 
 type JobView = {
+  id: string | null
   status: 'running' | 'queued' | 'done' | 'notes_failed' | 'error' | 'gave_up' | 'filtered'
   name: string
   title: string | null
@@ -356,6 +364,7 @@ function foldFiltered(records: JobRecord[]): JobView | null {
   }
   const detail = [...counts].map(([label, n]) => `${label} ×${n}`).join(', ')
   return {
+    id: null,
     status: 'filtered',
     name: `${records.length} recording${records.length > 1 ? 's' : ''} filtered out`,
     title: null, time: null, step: null, detail, notes: null,
@@ -383,6 +392,7 @@ export function buildJobsView(
 
   for (const [id, j] of Object.entries(state.jobs ?? {})) {
     const base = {
+      id,
       name: j.name,
       title: j.title ?? null,
       time: displayTime(j.recorded_at),

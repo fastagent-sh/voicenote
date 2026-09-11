@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { applyOutcome, buildJobsView, classify, emptyState, MAX_ATTEMPTS, migrateLegacyState, parseJobsLimit, parseStateFile, patchJob, pruneUnseen, reconcileInterrupted, startAttempt, type JobRecord, type StateFile } from './jobs'
+import { applyOutcome, buildJobsView, classify, emptyState, MAX_ATTEMPTS, migrateLegacyState, parseJobsLimit, parseStateFile, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, startAttempt, type JobRecord, type StateFile } from './jobs'
 
 const rec = (over: Partial<JobRecord> & { name: string; recorded_at: string; state: JobRecord['state'] }): JobRecord => ({
   source_path: `/Volumes/VTR6500/RECORD/A/${over.name}`,
@@ -17,7 +17,7 @@ test('a running row needs BOTH a live pid and a `running` record', () => {
   const running = state({ a: rec({ name: 'a.mp3', recorded_at: '2026-07-29T12:00:00', state: 'running' }) })
   const current = { pid: 999, source_id: 'a', step: 'transcribing', started_at: '' }
 
-  expect(view(running, current).items[0]).toMatchObject({ status: 'running', step: 'transcribing' })
+  expect(view(running, current).items[0]).toMatchObject({ id: 'a', status: 'running', step: 'transcribing' })
 
   // Dead pid — the case that used to wedge at "Processing" forever because
   // liveness was inferred from log text.
@@ -225,6 +225,19 @@ test('startAttempt counts the attempt up front, so crashes are not free', () => 
   reconcileInterrupted({ j }, 'T2')
   expect(j).toMatchObject({ state: 'error', code: 'interrupted', attempts: 1 })
   expect(j.detail).toContain('attempt 1/3')
+})
+
+test('manual retry resets the budget but keeps saved outputs', () => {
+  const j = rec({
+    name: 'a.mp3', recorded_at: '', state: 'gave_up', code: 'summary_failed',
+    attempts: 3, detail: 'no more', paths: { transcript: '/w/a-transcript.md' },
+  })
+  expect(requeueFailed(j, 'T')).toBe(true)
+  expect(j).toMatchObject({ state: 'queued', code: 'summary_failed', detail: null, attempts: 0, paths: { transcript: '/w/a-transcript.md' }, updated_at: 'T' })
+
+  const done = rec({ name: 'done.mp3', recorded_at: '', state: 'done' })
+  expect(requeueFailed(done, 'T')).toBe(false)
+  expect(done.state).toBe('done')
 })
 
 test('applyOutcome: only a clean finish refunds the attempt budget', () => {

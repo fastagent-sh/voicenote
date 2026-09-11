@@ -214,6 +214,13 @@ async fn recent_jobs(app: AppHandle) -> Result<Value, String> {
 }
 
 #[tauri::command]
+async fn retry_job(app: AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || run_vn(&app, &["retry", &id], None).map(|_| ()))
+        .await
+        .map_err(|e| format!("vn task failed: {e}"))?
+}
+
+#[tauri::command]
 async fn trigger_run(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut cmd = vn_process(&app);
@@ -336,6 +343,7 @@ pub fn run() {
             config_set,
             doctor_status,
             recent_jobs,
+            retry_job,
             trigger_run,
             ensure_agent
         ])

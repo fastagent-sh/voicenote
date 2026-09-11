@@ -3,7 +3,7 @@ import { cac } from 'cac'
 import packageJson from '../package.json' with { type: 'json' }
 import { parseLockOwner } from './runLock'
 import { tosObject, type TosConfig as VolcanoTosConfig } from './tos'
-import { applyOutcome, buildJobsView, classify, emptyState, localIso, MAX_ATTEMPTS, migrateLegacyState, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs'
+import { applyOutcome, buildJobsView, classify, emptyState, localIso, MAX_ATTEMPTS, migrateLegacyState, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs'
 import { createHash, randomUUID } from 'node:crypto'
 import { appendFile, chmod, mkdir, readFile, writeFile, copyFile, rename, unlink, stat, readdir } from 'node:fs/promises'
 import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, appendFileSync, openSync, closeSync, statSync, readSync, unlinkSync, renameSync } from 'node:fs'
@@ -2310,6 +2310,21 @@ async function forgetRecording(needle: string): Promise<void> {
   } finally { await lock.release() }
 }
 
+async function retryRecording(id: string): Promise<void> {
+  const config = getConfig()
+  const lock = await acquireRunLock()
+  if (!lock) throw new Error('A voicenote run is in progress. Retry once it finishes.')
+  try {
+    await migrateStateOnDisk(config)
+    const store = await loadState(config)
+    const entry = store.jobs[id]
+    if (!entry) throw new Error('Recording no longer exists in the processing list.')
+    if (!requeueFailed(entry, nowIso())) throw new Error(`Cannot retry a recording in state '${entry.state}'.`)
+    await saveState(config, store)
+    console.log(`queued ${entry.name} for retry`)
+  } finally { await lock.release() }
+}
+
 async function showLog(opts: { lines?: number; follow?: boolean; err?: boolean; date?: string }): Promise<void> {
   const lines = Number(opts.lines || 30)
   const wanted = [opts.date ? join(LOG_DIR, `${opts.date}.log`) : dailyLogPath()]
@@ -2627,6 +2642,7 @@ cli.command('jobs', 'Show every recording\'s processing status (running, queued,
 cli.command('open [target]', 'Open notes dir, config dir (`config`), logs dir (`logs`), or a note matching the slug').action((target?: string) => openTarget(target))
 
 cli.command('forget <key>', 'Drop a recording\'s job record so it is queued again (a saved transcript on disk is still reused)').action((key: string) => forgetRecording(key))
+cli.command('retry <id>', 'Requeue one failed recording while retaining saved outputs').action((id: string) => retryRecording(id))
 
 cli.command('log', 'Print the daily log (today by default)')
   .option('--lines <n>', 'How many trailing lines to print', { default: 30 })
