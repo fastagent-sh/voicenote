@@ -31,15 +31,6 @@ const STATE_DIR = appStateDir()
 const LOG_DIR = join(STATE_DIR, 'logs')
 const LOCK_PATH = join(STATE_DIR, 'run.lock')
 const CONFIG_ENV_PATH = join(CONFIG_DIR, 'config.json')
-// pi keeps credentials in its config dir, which PI_CODING_AGENT_DIR relocates.
-// Point it at a voicenote-owned directory to get an auth.json that only the
-// pipeline reads and refreshes: an interactive pi session rewrites its own
-// auth.json wholesale on exit and has already dropped entries that way.
-// Resolved per call — the env is hydrated from config.json after module load.
-function piAuthPath(): string {
-  const dir = process.env.PI_CODING_AGENT_DIR || join(os.homedir(), '.pi', 'agent')
-  return join(expandHome(dir), 'auth.json')
-}
 
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.wma', '.aac', '.flac'])
 
@@ -83,6 +74,20 @@ type VolcanoConfig = {
   tos: VolcanoTosConfig
 }
 
+/** How this install runs pi: which binary, which model, what it may read. */
+type PiConfig = {
+  bin: string
+  /** Set when pi ships as plain JS next to a bundled bun: `<bin> <cli> <args>`. */
+  cli: string | null
+  model: string | null
+  thinking: string
+  /** Comma-separated tool list; empty = run the summary without tools. */
+  tools: string
+  contextDir: string
+  retries: number
+  authPath: string
+}
+
 type Config = {
   recordDir: string
   workspace: string
@@ -91,10 +96,20 @@ type Config = {
   maxAgeHours: number
   speakers: SpeakersConfig
   volcano: VolcanoConfig | null
+  ffprobeBin: string
+  pi: PiConfig
+  /** Added to the environment of every process vn spawns. */
+  childEnv: Record<string, string>
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Env loading
+// Settings → Config
+//
+// config.json is the only persisted source; the inherited environment overrides
+// it for this process only. Everything the program needs is resolved once, in
+// getConfig(), and passed down as a frozen Config — no code below reads a
+// business setting out of process.env, so behaviour can never depend on whether
+// some earlier call happened to hydrate it.
 // ────────────────────────────────────────────────────────────────────────────
 
 // Config keys accepted by `vn config set` and loaded from config.json when the
@@ -137,11 +152,6 @@ const ENV_KEYS = [
 //   2) routing China-mainland Volcano APIs through an overseas proxy is slower / unreliable
 const VOLCANO_NO_PROXY_HOSTS = ['.volces.com', '.volcengineapi.com', 'openspeech.bytedance.com']
 
-// Node/Bun fetch reads standard proxy environment variables. Keep an explicit
-// copy for child processes because Bun can omit proxy variables that were added
-// to process.env after startup.
-const childProxyEnv: Record<string, string> = {}
-
 function systemProxyUrl(): string | null {
   if (process.platform !== 'darwin') return null
   try {
@@ -154,48 +164,52 @@ function systemProxyUrl(): string | null {
   } catch { return null }
 }
 
-function applyDerivedProxy(): void {
-  const inherited = process.env.https_proxy || process.env.HTTPS_PROXY || process.env.http_proxy || process.env.HTTP_PROXY || process.env.all_proxy || process.env.ALL_PROXY
-  const host = process.env.LOCAL_PROXY_HOST
-  const port = process.env.LOCAL_PROXY_PORT
-  const url = inherited || (host && port ? `http://${host}:${port}` : null) || systemProxyUrl()
-  if (!url) return
-  for (const key of ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']) {
-    process.env[key] ||= url
-    childProxyEnv[key] = process.env[key]!
-  }
-  const base = process.env.LOCAL_NO_PROXY || process.env.no_proxy || process.env.NO_PROXY || 'localhost,127.0.0.1,::1'
-  const bypass = [...new Set([...base.split(',').map(s => s.trim()).filter(Boolean), ...VOLCANO_NO_PROXY_HOSTS])].join(',')
-  for (const key of ['no_proxy', 'NO_PROXY']) {
-    process.env[key] = bypass
-    childProxyEnv[key] = bypass
-  }
-}
+type Settings = Record<string, string>
 
-let envConfigLoaded = false
-function loadEnvConfig(): void {
-  if (envConfigLoaded) return
-  envConfigLoaded = true
-  const data = loadConfigJson()
+/** This run's settings: config.json, overridden by the inherited environment. */
+function readSettings(file: Record<string, unknown>): Settings {
+  const settings: Settings = {}
   for (const key of ENV_KEYS) {
-    if (process.env[key] === undefined && typeof data[key] === 'string') process.env[key] = data[key]
+    const inherited = process.env[key]
+    if (inherited !== undefined) settings[key] = inherited
+    else if (typeof file[key] === 'string') settings[key] = file[key] as string
   }
-  applyDerivedProxy()
+  return settings
 }
 
-function getVolcanoConfigFromEnv(): VolcanoConfig | null {
-  const apiKey = process.env.VOLCANO_ASR_KEY || ''
-  const tosAccess = process.env.VOLCANO_TOS_ACCESS_KEY
-  const tosSecret = process.env.VOLCANO_TOS_SECRET_KEY
-  const bucket = process.env.VOLCANO_TOS_BUCKET
+/**
+ * Proxy variables, resolved from settings or the macOS system proxy. Returned as
+ * a map instead of being pushed onto process.env alone because Bun does not hand
+ * a child the variables this process added after startup — every spawn site
+ * passes them explicitly (covered by summary.test.ts).
+ */
+function proxyEnv(s: Settings): Record<string, string> {
+  const url = s.https_proxy || s.HTTPS_PROXY || s.http_proxy || s.HTTP_PROXY || s.all_proxy || s.ALL_PROXY
+    || (s.LOCAL_PROXY_HOST && s.LOCAL_PROXY_PORT ? `http://${s.LOCAL_PROXY_HOST}:${s.LOCAL_PROXY_PORT}` : '')
+    || systemProxyUrl()
+  if (!url) return {}
+  const env: Record<string, string> = {}
+  for (const key of ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']) env[key] = s[key] || url
+  const base = s.LOCAL_NO_PROXY || s.no_proxy || s.NO_PROXY || 'localhost,127.0.0.1,::1'
+  const bypass = [...new Set([...base.split(',').map(v => v.trim()).filter(Boolean), ...VOLCANO_NO_PROXY_HOSTS])].join(',')
+  env.no_proxy = bypass
+  env.NO_PROXY = bypass
+  return env
+}
+
+function volcanoFrom(s: Settings): VolcanoConfig | null {
+  const apiKey = s.VOLCANO_ASR_KEY || ''
+  const tosAccess = s.VOLCANO_TOS_ACCESS_KEY
+  const tosSecret = s.VOLCANO_TOS_SECRET_KEY
+  const bucket = s.VOLCANO_TOS_BUCKET
   if (!apiKey || !tosAccess || !tosSecret || !bucket) return null
-  const region = process.env.VOLCANO_TOS_REGION || 'cn-guangzhou'
-  const endpoint = process.env.VOLCANO_TOS_ENDPOINT || `tos-s3-${region}.volces.com`
-  const keep = ['1', 'true', 'yes'].includes((process.env.VOLCANO_TOS_KEEP || '0').toLowerCase())
+  const region = s.VOLCANO_TOS_REGION || 'cn-guangzhou'
+  const endpoint = s.VOLCANO_TOS_ENDPOINT || `tos-s3-${region}.volces.com`
+  const keep = ['1', 'true', 'yes'].includes((s.VOLCANO_TOS_KEEP || '0').toLowerCase())
   return {
     apiKey,
-    resourceId: process.env.VOLCANO_ASR_RESOURCE_ID || 'volc.seedasr.auc',
-    language: process.env.VOLCANO_ASR_LANGUAGE || undefined,
+    resourceId: s.VOLCANO_ASR_RESOURCE_ID || 'volc.seedasr.auc',
+    language: s.VOLCANO_ASR_LANGUAGE || undefined,
     tos: { endpoint, region, bucket, accessKey: tosAccess, secretKey: tosSecret, keep },
   }
 }
@@ -211,27 +225,67 @@ function volcanoAuthHeaders(volc: VolcanoConfig, taskId: string, includeSequence
   return base
 }
 
-function configNumber(key: string, fallback: number): number {
-  const raw = process.env[key]
+function settingNumber(s: Settings, key: string, fallback: number): number {
+  const raw = s[key]
   const value = raw === undefined || raw === '' ? fallback : Number(raw)
   if (!Number.isFinite(value) || value < 0) throw new Error(`Invalid ${key}: expected a non-negative number, got '${raw}'`)
   return value
 }
 
+let configCache: Config | null = null
+
 function getConfig(): Config {
-  loadEnvConfig()
-  const deviceVolume = process.env.VOICENOTE_DEVICE_VOLUME || 'VTR6500'
-  return {
-    recordDir: expandHome(process.env.VOICENOTE_RECORD_DIR || `/Volumes/${deviceVolume}/RECORD`),
-    workspace: expandHome(process.env.VOICENOTE_WORKSPACE || '~/Documents/meetings'),
-    minBytes: configNumber('VOICENOTE_MIN_BYTES', 100000),
-    minDurationSeconds: configNumber('VOICENOTE_MIN_DURATION_SECONDS', 60),
+  if (configCache) return configCache
+  const file = loadConfigJson()
+  const s = readSettings(file)
+  const proxy = proxyEnv(s)
+  // vn's own fetch (the ChatGPT OAuth flow) reads the proxy from the process
+  // environment, so the derived values have to land there as well.
+  for (const [key, value] of Object.entries(proxy)) process.env[key] = value
+  // Passed to every child: the proxy, plus the credentials and config dir that
+  // pi — not vn — resolves for itself.
+  const childEnv = { ...proxy }
+  for (const key of ['PI_CODING_AGENT_DIR', 'OPENAI_API_KEY', 'DEEPSEEK_API_KEY']) if (s[key]) childEnv[key] = s[key]!
+
+  const deviceVolume = s.VOICENOTE_DEVICE_VOLUME || 'VTR6500'
+  const workspace = expandHome(s.VOICENOTE_WORKSPACE || '~/Documents/meetings')
+  // pi keeps credentials in its config dir, which PI_CODING_AGENT_DIR relocates.
+  // Point it at a voicenote-owned directory to get an auth.json that only the
+  // pipeline reads and refreshes: an interactive pi session rewrites its own
+  // auth.json wholesale on exit and has already dropped entries that way.
+  const piAgentDir = expandHome(s.PI_CODING_AGENT_DIR || join(os.homedir(), '.pi', 'agent'))
+  configCache = Object.freeze({
+    recordDir: expandHome(s.VOICENOTE_RECORD_DIR || `/Volumes/${deviceVolume}/RECORD`),
+    workspace,
+    minBytes: settingNumber(s, 'VOICENOTE_MIN_BYTES', 100000),
+    minDurationSeconds: settingNumber(s, 'VOICENOTE_MIN_DURATION_SECONDS', 60),
     // Only recordings from the last N hours are picked up (0 = no limit), so a
     // fresh install doesn't drain the recorder's entire history.
-    maxAgeHours: configNumber('VOICENOTE_MAX_AGE_HOURS', 48),
-    volcano: getVolcanoConfigFromEnv(),
-    speakers: loadSpeakers(),
-  }
+    maxAgeHours: settingNumber(s, 'VOICENOTE_MAX_AGE_HOURS', 48),
+    volcano: volcanoFrom(s),
+    speakers: normalizeSpeakers(file.speakers ?? DEFAULT_SPEAKERS),
+    // ffprobe is the only ffmpeg-suite binary the pipeline uses (duration
+    // detection); a configurable path lets the GUI point at its bundled copy.
+    ffprobeBin: expandHome(s.VOICENOTE_FFPROBE_BIN || 'ffprobe'),
+    pi: {
+      bin: expandHome(s.VOICENOTE_PI_BIN || 'pi'),
+      cli: s.VOICENOTE_PI_CLI ? expandHome(s.VOICENOTE_PI_CLI) : null,
+      // pi's --model accepts "provider/id" (e.g. openai-codex/gpt-5.6-sol), so
+      // this one setting pins both. Null = whatever pi is configured to use.
+      model: (s.VOICENOTE_PI_MODEL || '').trim() || null,
+      thinking: s.VOICENOTE_PI_THINKING || 'high',
+      // Default ON: let the summary model read/grep prior notes for cross-reference
+      // consistency. Set VOICENOTE_PI_SUMMARY_TOOLS='' to disable.
+      tools: s.VOICENOTE_PI_SUMMARY_TOOLS === undefined ? 'read,grep' : s.VOICENOTE_PI_SUMMARY_TOOLS.trim(),
+      // Directory the summary model may read/grep. The published default must not
+      // reach outside the configured workspace.
+      contextDir: expandHome(s.VOICENOTE_CONTEXT_DIR || workspace),
+      retries: Math.max(1, Math.floor(settingNumber(s, 'VOICENOTE_PI_RETRIES', 3))),
+      authPath: join(piAgentDir, 'auth.json'),
+    },
+    childEnv,
+  })
+  return configCache
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -263,10 +317,6 @@ function loadConfigJson(): Record<string, unknown> {
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${CONFIG_ENV_PATH} must contain a JSON object`)
   return value as Record<string, unknown>
-}
-
-function loadSpeakers(): SpeakersConfig {
-  return normalizeSpeakers(loadConfigJson().speakers ?? DEFAULT_SPEAKERS)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -671,13 +721,8 @@ async function tailFiles(files: string[], lines: number, follow: boolean): Promi
   })
 }
 
-// ffprobe is the only ffmpeg-suite binary the pipeline actually uses (duration
-// detection). Resolve a configurable path so a bundled binary (GUI .app sidecar)
-// can be used without relying on PATH — mirrors the VOICENOTE_PI_BIN convention.
-function ffprobeBin(): string { return expandHome(process.env.VOICENOTE_FFPROBE_BIN || 'ffprobe') }
-
-async function ffprobeDuration(path: string): Promise<number | null> {
-  const result = await runCommand(ffprobeBin(), ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', path])
+async function ffprobeDuration(config: Config, path: string): Promise<number | null> {
+  const result = await runCommand(config.ffprobeBin, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', path])
   if (result.code !== 0) return null
   const v = Number(result.stdout.trim())
   return Number.isFinite(v) ? v : null
@@ -699,13 +744,13 @@ function isCandidateFile(path: string): boolean {
  * treating a half-read device as authoritative would delete live queue entries
  * along with their retry counters.
  */
-async function toRecording(file: string): Promise<Recording> {
+async function toRecording(config: Config, file: string): Promise<Recording> {
   const st = await stat(file)
   return {
     sourcePath: file,
     sizeBytes: st.size,
     modifiedAt: st.mtime.toISOString(),
-    durationSeconds: await ffprobeDuration(file),
+    durationSeconds: await ffprobeDuration(config, file),
     sourceId: await sourceIdFor(file),
     recordedAt: parseRecordedAt(file),
   }
@@ -724,7 +769,7 @@ async function scanRecordings(config: Config): Promise<{ recordings: Recording[]
       if (!st) { complete = false; continue }
       if (!st.isFile()) continue
       try {
-        recordings.push(await toRecording(file))
+        recordings.push(await toRecording(config, file))
       } catch (e) { complete = false; warnSideEffect(`read ${basename(file)} during scan`, e) }
     }
   } catch (e) {
@@ -1091,21 +1136,14 @@ ${transcript}`
 // the notes. VoiceNote does not implement a provider fallback chain.
 // ───────────────────────────────────────────────────────────────────────
 
-function piCodexBin(): string {
-  return expandHome(process.env.VOICENOTE_PI_BIN || 'pi')
-}
-
 // pi can't be `bun build --compile`'d (it reads data files from disk), so the
 // bundled GUI ships pi as plain JS and runs it under a bundled bun. When
-// VOICENOTE_PI_CLI is set, piCodexBin() is the runtime (bun) and the cli.js is
-// prepended to pi's args — `<bun> <cli.js> <args>`, no wrapper script and no
-// shell (critical on Windows, where pi args include a huge --system-prompt that
-// a .cmd/%* wrapper would mangle). CLI users with a real `pi` on PATH leave
-// PI_CLI unset and pi is invoked directly.
-function piInvocation(args: string[]): { bin: string; args: string[] } {
-  const cli = process.env.VOICENOTE_PI_CLI ? expandHome(process.env.VOICENOTE_PI_CLI) : undefined
-  const bin = piCodexBin()
-  return cli ? { bin, args: [cli, ...args] } : { bin, args }
+// `pi.cli` is set, `pi.bin` is the runtime (bun) and the cli.js is prepended to
+// pi's args — `<bun> <cli.js> <args>`, no wrapper script and no shell (critical
+// on Windows, where pi args include a huge --system-prompt that a .cmd/%*
+// wrapper would mangle). CLI users with a real `pi` on PATH leave it unset.
+function piInvocation(pi: PiConfig, args: string[]): { bin: string; args: string[] } {
+  return pi.cli ? { bin: pi.bin, args: [pi.cli, ...args] } : { bin: pi.bin, args }
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -1116,8 +1154,7 @@ function piInvocation(args: string[]): { bin: string; args: string[] } {
 // to pi's auth.json in the exact shape it reads: { type: 'oauth', ...creds }.
 // ───────────────────────────────────────────────────────────────────────
 
-async function persistPiOAuth(providerId: string, creds: Record<string, unknown>): Promise<void> {
-  const authPath = piAuthPath()
+async function persistPiOAuth(authPath: string, providerId: string, creds: Record<string, unknown>): Promise<void> {
   await mkdir(dirname(authPath), { recursive: true })
   let existing: Json = {}
   if (existsSync(authPath)) {
@@ -1130,9 +1167,9 @@ async function persistPiOAuth(providerId: string, creds: Record<string, unknown>
 }
 
 async function loginChatGPT(opts: { json?: boolean; deviceCode?: boolean; emit?: (o: Record<string, unknown>) => void }): Promise<void> {
-  // OpenAI's OAuth endpoint is geo-blocked in some regions; hydrate the proxy
-  // env (LOCAL_PROXY_HOST/PORT -> http_proxy) before any request goes out.
-  loadEnvConfig()
+  // OpenAI's OAuth endpoint is geo-blocked in some regions; getConfig() resolves
+  // the proxy into this process's env before any request goes out.
+  const authPath = getConfig().pi.authPath
   const json = !!opts.json
   const emit = opts.emit ?? ((o: Record<string, unknown>) => { if (json) console.log(JSON.stringify(o)) })
   try {
@@ -1174,9 +1211,9 @@ async function loginChatGPT(opts: { json?: boolean; deviceCode?: boolean; emit?:
         },
       }) as Record<string, unknown>
     }
-    await persistPiOAuth(oauth.openaiCodexOAuthProvider.id, creds)
+    await persistPiOAuth(authPath, oauth.openaiCodexOAuthProvider.id, creds)
     if (json) emit({ event: 'success', provider: oauth.openaiCodexOAuthProvider.id })
-    else console.log(`\n✓ Signed in. Credentials saved to ${piAuthPath()}. Verify with: vn doctor`)
+    else console.log(`\n✓ Signed in. Credentials saved to ${authPath}. Verify with: vn doctor`)
   } catch (e: any) {
     let message = String(e?.message || e)
     if (/unsupported_country_region_territory|\b403\b/.test(message)) {
@@ -1306,7 +1343,7 @@ function extractFirstJsonObject(text: string): string {
   return trimmed
 }
 
-async function runPi(opts: {
+type PiRunOptions = {
   systemPrompt: string
   userPrompt: string
   timeoutMs?: number
@@ -1314,7 +1351,9 @@ async function runPi(opts: {
   tools?: string  // e.g. 'read,grep'; empty/undefined = --no-tools
   appendSystemPrompt?: string
   cwd?: string  // agent working dir: the knowledge base, so read/grep/find default there
-}): Promise<string> {
+}
+
+async function runPi(config: Config, opts: PiRunOptions): Promise<string> {
   const args = [
     '-p',
     '--mode', 'text',
@@ -1323,15 +1362,14 @@ async function runPi(opts: {
   ]
   // Unset means pi's own default model and provider. There is no second
   // provider to fall back to either way.
-  const model = piSummaryModel()
-  if (model) args.push('--model', model)
+  if (config.pi.model) args.push('--model', config.pi.model)
   if (opts.thinking) args.push('--thinking', opts.thinking)
   if (opts.tools && opts.tools.trim()) args.push('--tools', opts.tools.trim())
   else args.push('--no-tools')
   if (opts.appendSystemPrompt) args.push('--append-system-prompt', opts.appendSystemPrompt)
   return new Promise<string>((resolve, reject) => {
-    const inv = piInvocation(args)
-    const child = spawn(inv.bin, inv.args, { stdio: ['pipe', 'pipe', 'pipe'], cwd: opts.cwd, windowsHide: true, env: { ...process.env, ...childProxyEnv } })
+    const inv = piInvocation(config.pi, args)
+    const child = spawn(inv.bin, inv.args, { stdio: ['pipe', 'pipe', 'pipe'], cwd: opts.cwd, windowsHide: true, env: { ...process.env, ...config.childEnv } })
     let stdout = '', stderr = ''
     const timer = opts.timeoutMs ? setTimeout(() => child.kill('SIGKILL'), opts.timeoutMs) : null
     child.stdout.on('data', d => stdout += String(d))
@@ -1363,11 +1401,11 @@ function isTransientPiError(e: any): boolean {
   return /socket connection was closed|socket hang up|econnreset|etimedout|esockettimedout|enetunreach|econnrefused|eai_again|fetch failed|network error|timed ?out|temporarily|overloaded|\b(429|500|502|503|504)\b/.test(msg)
 }
 
-async function chatCompleteViaPi(opts: Parameters<typeof runPi>[0]): Promise<string> {
-  const maxAttempts = Math.max(1, Math.floor(configNumber('VOICENOTE_PI_RETRIES', 3)))
+async function chatCompleteViaPi(config: Config, opts: PiRunOptions): Promise<string> {
+  const maxAttempts = config.pi.retries
   for (let attempt = 1; ; attempt++) {
     try {
-      return await runPi(opts)
+      return await runPi(config, opts)
     } catch (e: any) {
       if (attempt >= maxAttempts || !isTransientPiError(e)) throw e
       const backoffMs = Math.min(30000, 2000 * 2 ** (attempt - 1))
@@ -1375,32 +1413,6 @@ async function chatCompleteViaPi(opts: Parameters<typeof runPi>[0]): Promise<str
       await new Promise(res => setTimeout(res, backoffMs))
     }
   }
-}
-
-// pi's --model accepts "provider/id" (e.g. openai-codex/gpt-5.6-sol), so this one
-// setting pins both. Empty/unset = whatever pi is configured to use.
-function piSummaryModel(): string {
-  return (process.env.VOICENOTE_PI_MODEL || '').trim()
-}
-
-function piThinkingLevel(): string {
-  return process.env.VOICENOTE_PI_THINKING || 'high'
-}
-
-function piSummaryTools(): string {
-  // Default ON: let the summary model read/grep prior notes for cross-reference consistency.
-  // Set VOICENOTE_PI_SUMMARY_TOOLS='' (empty) to disable.
-  const v = process.env.VOICENOTE_PI_SUMMARY_TOOLS
-  if (v === undefined) return 'read,grep'
-  return v.trim()
-}
-
-function summaryContextDir(config: Config): string {
-  // Directory the summary model may read/grep for cross-reference consistency.
-  // Defaults to the workspace itself. Users can opt into a wider notes/vault
-  // directory with VOICENOTE_CONTEXT_DIR, but the published default must not
-  // read outside the configured workspace.
-  return expandHome(process.env.VOICENOTE_CONTEXT_DIR || config.workspace)
 }
 
 function piSummaryToolsHint(contextDir: string): string {
@@ -1412,17 +1424,17 @@ function piSummaryToolsHint(contextDir: string): string {
 // missing, say so loudly and run without tools rather than searching the wrong
 // tree (tools, the cwd hint, and the spawn cwd move together).
 async function chatComplete(opts: { systemPrompt: string; userPrompt: string; config: Config }): Promise<string> {
-  const wantTools = !!piSummaryTools()
-  const ctx = wantTools ? summaryContextDir(opts.config) : undefined
+  const { pi } = opts.config
+  const ctx = pi.tools ? pi.contextDir : undefined
   const ctxExists = ctx ? existsSync(ctx) : false
   if (ctx && !ctxExists) console.error(`Warning: context dir ${ctx} does not exist; summary agent runs WITHOUT read/grep cross-reference.`)
-  const toolsActive = wantTools && ctxExists
-  return chatCompleteViaPi({
+  const toolsActive = !!ctx && ctxExists
+  return chatCompleteViaPi(opts.config, {
     systemPrompt: opts.systemPrompt,
     userPrompt: opts.userPrompt,
     timeoutMs: 60 * 60 * 1000,
-    thinking: piThinkingLevel(),
-    tools: toolsActive ? piSummaryTools() : undefined,
+    thinking: pi.thinking,
+    tools: toolsActive ? pi.tools : undefined,
     appendSystemPrompt: toolsActive ? piSummaryToolsHint(ctx!) : undefined,
     cwd: toolsActive ? ctx : undefined,
   })
@@ -1579,7 +1591,7 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
 
   let summaryError: any = null
   if (needsNotes) {
-    progressStep(nextStep(), totalSteps, 'Generate integrated semantic notes', `via pi, model=${piSummaryModel() || "pi's own default"}`)
+    progressStep(nextStep(), totalSteps, 'Generate integrated semantic notes', `via pi, model=${config.pi.model || "pi's own default"}`)
     try {
       meta = await withHeartbeat('generate integrated semantic notes', () => summarizeTranscript(config, transcript, rec, files.audio), 60)
     } catch (e: any) {
@@ -1838,7 +1850,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
     return
   }
   const { recordings, complete: scanComplete } = single
-    ? { recordings: [await toRecording(single)], complete: false }
+    ? { recordings: [await toRecording(config, single)], complete: false }
     : await scanRecordings(config)
   const mode = normalizeRunMode(opts)
   const force = Boolean(opts.force)
@@ -1977,16 +1989,18 @@ function xmlEscape(s: string): string {
 // Scheduled runs read all business settings from config.json. The plist only
 // carries a fixed PATH and desktop-bundled runtime paths that do not exist in
 // that file.
-async function launchAgentEnv(): Promise<Record<string, string>> {
-  loadEnvConfig()
+async function launchAgentEnv(config: Config): Promise<Record<string, string>> {
   const env: Record<string, string> = {
     PATH: `${os.homedir()}/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
   }
+  // Provenance matters here, so this reads the raw sources rather than Config:
+  // only paths the GUI injected into our environment (and that config.json does
+  // not already carry) have to be written into the plist.
   const fileEnv = configFileEnv()
   for (const key of ['VOICENOTE_PI_CLI', 'VOICENOTE_FFPROBE_BIN'] as const) {
     if (process.env[key] && process.env[key] !== fileEnv[key]) env[key] = process.env[key]!
   }
-  const configuredPi = expandHome(process.env.VOICENOTE_PI_BIN || 'pi')
+  const configuredPi = config.pi.bin
   if (configuredPi.startsWith('/')) env.VOICENOTE_PI_BIN = configuredPi
   else {
     const found = await runCommand(IS_WINDOWS ? 'where' : 'which', [configuredPi], 5000)
@@ -2005,7 +2019,7 @@ async function installLaunchAgent(opts: { load?: boolean } = {}): Promise<void> 
   const plist = plistPath()
   await mkdir(dirname(plist), { recursive: true })
   await mkdir(LOG_DIR, { recursive: true })
-  const env = await launchAgentEnv()
+  const env = await launchAgentEnv(getConfig())
   const envEntries = Object.entries(env)
     .map(([k, v]) => `    <key>${xmlEscape(k)}</key>\n    <string>${xmlEscape(v)}</string>`).join('\n')
   const content = `<?xml version="1.0" encoding="UTF-8"?>
@@ -2345,13 +2359,16 @@ async function showErrors(opts: { lines?: number }): Promise<void> {
 }
 
 async function upgradeSelf(): Promise<void> {
+  // The registry fetch needs the configured proxy: `bun add -g` only sees it if
+  // we pass it, because the proxy lives in config.json, not in the shell.
+  const env = { ...process.env, ...getConfig().childEnv }
   const cmd = IS_WINDOWS ? 'bun' : (existsSync('/opt/homebrew/bin/bun') ? '/opt/homebrew/bin/bun' : 'bun')
   // `bun add -g` upgrades in place: verified no dependency loop on npm→npm re-add
   // (the steady-state upgrade path) nor on replacing an old git-ref install. No
   // remove-first, so a failed add leaves the running vn intact.
   console.log(`$ ${cmd} add -g @fastagent-sh/voicenote`)
   const addCode = await new Promise<number>(res =>
-    spawn(cmd, ['add', '-g', '@fastagent-sh/voicenote'], { stdio: 'inherit', shell: IS_WINDOWS })
+    spawn(cmd, ['add', '-g', '@fastagent-sh/voicenote'], { stdio: 'inherit', shell: IS_WINDOWS, env })
       .on('close', c => res(c ?? 1)).on('error', () => res(1)))
   if (addCode !== 0) {
     console.error(`Upgrade failed: \`${cmd} add -g @fastagent-sh/voicenote\` exited ${addCode}. Your current install is unchanged; retry later.`)
@@ -2466,11 +2483,11 @@ async function collectDoctor() {
   const config = getConfig()
   // pi is a bun-based CLI; cold start (esp. behind a proxy) can take >5s, so
   // give --version a generous timeout to avoid a false 'missing' on a healthy pi.
-  const piInv = piInvocation(['--version'])
+  const piInv = piInvocation(config.pi, ['--version'])
   const piCheck = await runCommand(piInv.bin, piInv.args, 15000)
-  const ff = await runCommand(ffprobeBin(), ['-version'], 5000)
+  const ff = await runCommand(config.ffprobeBin, ['-version'], 5000)
   const v = config.volcano
-  const tools = piSummaryTools()
+  const { pi } = config
   return {
     version: VERSION,
     bun: process.versions.bun || null,
@@ -2488,12 +2505,11 @@ async function collectDoctor() {
       : { configured: false as const },
     // Provider/model/credentials are pi's own configuration; `pi.available` is
     // all we can honestly report about whether a summary can run.
-    summary: { backend: 'pi', model: piSummaryModel() || null, thinking: piThinkingLevel(), tools: tools || null, contextDir: tools ? summaryContextDir(config) : null },
-    pi: { bin: piCodexBin(), version: piCheck.code === 0 ? (piCheck.stdout.trim() || piCheck.stderr.trim() || null) : null, available: piCheck.code === 0, auth: existsSync(piAuthPath()), authPath: piAuthPath() },
-    // Outbound proxy for HTTPS endpoints (updater/GitHub): honor the standard
-    // env chain, not just lowercase http_proxy — an https_proxy-only setup must
-    // still route the updater.
-    proxy: { url: process.env.https_proxy || process.env.HTTPS_PROXY || process.env.http_proxy || process.env.HTTP_PROXY || null },
+    summary: { backend: 'pi', model: pi.model, thinking: pi.thinking, tools: pi.tools || null, contextDir: pi.tools ? pi.contextDir : null },
+    pi: { bin: pi.bin, version: piCheck.code === 0 ? (piCheck.stdout.trim() || piCheck.stderr.trim() || null) : null, available: piCheck.code === 0, auth: existsSync(pi.authPath), authPath: pi.authPath },
+    // Outbound proxy for HTTPS endpoints (updater/GitHub). The GUI reads this to
+    // route its own update check, so it reports the resolved value.
+    proxy: { url: config.childEnv.https_proxy ?? null },
     identity: { self: config.speakers.self.name || null, aliases: config.speakers.self.aliases, knownCount: config.speakers.known.length },
     // The thresholds that silently decide what never gets processed. Without
     // them here, confirming a change to VOICENOTE_MAX_AGE_HOURS meant planting
