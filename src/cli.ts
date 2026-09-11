@@ -1,7 +1,6 @@
 #!/usr/bin/env bun
 import { cac } from 'cac'
 import packageJson from '../package.json' with { type: 'json' }
-import { deriveNoProxy, envKeysToEmbed, hydrateFromFileEnv, parseFileEnv } from './envConfig'
 import { parseLockOwner } from './runLock'
 import { applyOutcome, buildJobsView, classify, emptyState, localIso, MAX_ATTEMPTS, migrateLegacyState, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs'
 import { createHash, createHmac, randomUUID } from 'node:crypto'
@@ -30,7 +29,6 @@ const CONFIG_DIR = appConfigDir()
 const STATE_DIR = appStateDir()
 const LOG_DIR = join(STATE_DIR, 'logs')
 const LOCK_PATH = join(STATE_DIR, 'run.lock')
-const SPEAKERS_PATH = join(CONFIG_DIR, 'speakers.json')
 const CONFIG_ENV_PATH = join(CONFIG_DIR, 'config.json')
 // pi keeps credentials in its config dir, which PI_CODING_AGENT_DIR relocates.
 // Point it at a voicenote-owned directory to get an auth.json that only the
@@ -94,7 +92,6 @@ type VolcanoConfig = {
 }
 
 type Config = {
-  deviceVolume: string
   recordDir: string
   workspace: string
   minBytes: number
@@ -108,14 +105,8 @@ type Config = {
 // Env loading
 // ────────────────────────────────────────────────────────────────────────────
 
-// Single source of truth for every env var the pipeline reads. Both consumers
-// derive from this list so they can never drift:
-//   - loadEnvConfig() hydrates these from config.json / ~/.zshrc for non-interactive runs
-//   - launchAgentEnv() embeds the REAL-environment subset into the LaunchAgent
-//     plist (file-sourced values are skipped — vn run re-reads the files at
-//     startup, and plist env overrides config.json, so embedding a file value
-//     would freeze it: later GUI edits would silently never reach the agent)
-// Anything documented in the README as a configurable knob MUST live here.
+// Config keys accepted by `vn config set` and loaded from config.json when the
+// inherited environment does not already define them.
 const ENV_KEYS = [
   'VOICENOTE_DEVICE_VOLUME',
   'VOICENOTE_RECORD_DIR',
@@ -137,6 +128,7 @@ const ENV_KEYS = [
   'PI_CODING_AGENT_DIR',
   'VOICENOTE_FFPROBE_BIN',
   'VOICENOTE_PI_MODEL',
+  'VOICENOTE_PI_RETRIES',
   'VOICENOTE_PI_THINKING',
   'VOICENOTE_PI_SUMMARY_TOOLS',
   'VOICENOTE_CONTEXT_DIR',
@@ -153,20 +145,11 @@ const ENV_KEYS = [
 //   2) routing China-mainland Volcano APIs through an overseas proxy is slower / unreliable
 const VOLCANO_NO_PROXY_HOSTS = ['.volces.com', '.volcengineapi.com', 'openspeech.bytedance.com']
 
-// Provenance: ENV_KEYS this process synthesized from files or proxy settings.
-// launchAgentEnv() skips them because each scheduled run reads the files again.
-const hydratedEnvKeys = new Set<string>()
+// Node/Bun fetch reads standard proxy environment variables. Keep an explicit
+// copy for child processes because Bun can omit proxy variables that were added
+// to process.env after startup.
+const childProxyEnv: Record<string, string> = {}
 
-// Real-environment no_proxy/NO_PROXY values captured BEFORE the volcano-hosts
-// merge below. The merged value is partly synthesized and must never be
-// embedded into the scheduler (vn run re-merges at startup); launchAgentEnv
-// substitutes these originals when deciding what to embed.
-const premergeRealNoProxy: Record<string, string> = {}
-
-// Node/Bun fetch doesn't read the macOS system proxy — only http_proxy env. Read
-// the active SCDynamicStore proxy so users whose proxy app sets the system proxy
-// (Clash/Surge “system proxy” mode) don't have to type host/port. Prefer HTTPS
-// (OpenAI is https); ignore PAC/auth setups. Returns http://host:port or null.
 function systemProxyUrl(): string | null {
   if (process.platform !== 'darwin') return null
   try {
@@ -179,74 +162,32 @@ function systemProxyUrl(): string | null {
   } catch { return null }
 }
 
-// Bun's child_process does NOT hand a child the proxy variables this process set
-// on process.env (http_proxy/https_proxy/no_proxy and their uppercase forms are
-// special-cased internally; only all_proxy survives). Every spawn that must reach
-// the network through the proxy has to pass them explicitly, so record them here.
-// Without this, a scheduler run whose proxy comes from config.json rather than a
-// real shell env leaves pi with no proxy at all — it fails with `fetch failed`.
-const childProxyEnv: Record<string, string> = {}
-
 function applyDerivedProxy(): void {
+  const inherited = process.env.https_proxy || process.env.HTTPS_PROXY || process.env.http_proxy || process.env.HTTP_PROXY || process.env.all_proxy || process.env.ALL_PROXY
   const host = process.env.LOCAL_PROXY_HOST
   const port = process.env.LOCAL_PROXY_PORT
-  // Source precedence: explicit http_proxy > LOCAL_PROXY_HOST/PORT > macOS system
-  // proxy. (Volcano always bypasses, below.)
-  let url: string | null = host && port ? `http://${host}:${port}` : null
-  if (!url) {
-    const cur = process.env.http_proxy || process.env.HTTP_PROXY
-    if (!cur || cur.includes('${')) url = systemProxyUrl()
+  const url = inherited || (host && port ? `http://${host}:${port}` : null) || systemProxyUrl()
+  if (!url) return
+  for (const key of ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']) {
+    process.env[key] ||= url
+    childProxyEnv[key] = process.env[key]!
   }
-  if (url) {
-    // Set when unset, OR when a config/.zshrc value came in with unexpanded shell
-    // vars (e.g. "http://${LOCAL_PROXY_HOST}:...") — those are never valid as-is.
-    const needs = (k: string) => !process.env[k] || process.env[k]!.includes('${')
-    for (const k of ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']) {
-      if (needs(k)) { process.env[k] = url; hydratedEnvKeys.add(k) } // derived, not real env
-      childProxyEnv[k] = process.env[k]!
-    }
+  const base = process.env.LOCAL_NO_PROXY || process.env.no_proxy || process.env.NO_PROXY || 'localhost,127.0.0.1,::1'
+  const bypass = [...new Set([...base.split(',').map(s => s.trim()).filter(Boolean), ...VOLCANO_NO_PROXY_HOSTS])].join(',')
+  for (const key of ['no_proxy', 'NO_PROXY']) {
+    process.env[key] = bypass
+    childProxyEnv[key] = bypass
   }
-  // no_proxy/NO_PROXY: seed a base when a proxy is active, then always merge
-  // the Volcano bypass hosts. Provenance bookkeeping (capture pre-merge real
-  // original vs mark synthesized-hydrated) lives in deriveNoProxy — pure and
-  // tested; see envConfig.ts.
-  const baseNoProxy = process.env.LOCAL_NO_PROXY || 'localhost,127.0.0.1,::1'
-  for (const k of ['no_proxy', 'NO_PROXY'] as const) {
-    const r = deriveNoProxy(process.env[k], premergeRealNoProxy[k], hydratedEnvKeys.has(k), !!url, baseNoProxy, VOLCANO_NO_PROXY_HOSTS)
-    process.env[k] = r.runtime
-    childProxyEnv[k] = r.runtime
-    if (r.hydrate) hydratedEnvKeys.add(k)
-    if (r.capture !== undefined) premergeRealNoProxy[k] = r.capture
-  }
-}
-
-// File values for each ENV_KEY. Hydration passes the current environment for
-// variable references; scheduler comparison uses files alone. Primary source is
-// ~/.config/voicenote/config.json
-// (ENV-style runtime keys at the top level; identity under `speakers`); the
-// legacy fallback is `export KEY=...` lines in ~/.zshrc, for CLI installs
-// that predate config.json. Precedence/expansion logic lives in envConfig.ts
-// (pure + tested). Two consumers: loadEnvConfig() hydrates these into
-// process.env for keys the real environment doesn't set, and launchAgentEnv()
-// uses them to decide which values are recoverable at run time.
-function fileProvidedEnv(environment: Record<string, string | undefined> = {}): Record<string, string> {
-  const data = loadJsonSync<Record<string, unknown>>(CONFIG_ENV_PATH, {})
-  let zshrc: string | null = null
-  const zshrcPath = join(os.homedir(), '.zshrc')
-  if (existsSync(zshrcPath)) { try { zshrc = readFileSync(zshrcPath, 'utf8') } catch { zshrc = null } }
-  return parseFileEnv(ENV_KEYS, data, zshrc, os.homedir(), environment)
 }
 
 let envConfigLoaded = false
 function loadEnvConfig(): void {
   if (envConfigLoaded) return
   envConfigLoaded = true
-  // Precedence: process.env > config.json (GUI) > ~/.zshrc (legacy); an
-  // explicit empty string in the environment is never overridden.
-  const toApply = hydrateFromFileEnv(ENV_KEYS, process.env, fileProvidedEnv(process.env))
-  for (const [key, v] of Object.entries(toApply)) { process.env[key] = v; hydratedEnvKeys.add(key) }
-  // Derive http_proxy etc. from LOCAL_PROXY_HOST/PORT regardless of source, and
-  // always keep Volcano hosts on NO_PROXY. (Runs even with no config files.)
+  const data = loadConfigJson()
+  for (const key of ENV_KEYS) {
+    if (process.env[key] === undefined && typeof data[key] === 'string') process.env[key] = data[key]
+  }
   applyDerivedProxy()
 }
 
@@ -278,19 +219,24 @@ function volcanoAuthHeaders(volc: VolcanoConfig, taskId: string, includeSequence
   return base
 }
 
+function configNumber(key: string, fallback: number): number {
+  const raw = process.env[key]
+  const value = raw === undefined || raw === '' ? fallback : Number(raw)
+  if (!Number.isFinite(value) || value < 0) throw new Error(`Invalid ${key}: expected a non-negative number, got '${raw}'`)
+  return value
+}
+
 function getConfig(): Config {
   loadEnvConfig()
   const deviceVolume = process.env.VOICENOTE_DEVICE_VOLUME || 'VTR6500'
-  const recordDir = process.env.VOICENOTE_RECORD_DIR || `/Volumes/${deviceVolume}/RECORD`
   return {
-    deviceVolume,
-    recordDir,
+    recordDir: expandHome(process.env.VOICENOTE_RECORD_DIR || `/Volumes/${deviceVolume}/RECORD`),
     workspace: expandHome(process.env.VOICENOTE_WORKSPACE || '~/Documents/meetings'),
-    minBytes: Number(process.env.VOICENOTE_MIN_BYTES || 100000),
-    minDurationSeconds: Number(process.env.VOICENOTE_MIN_DURATION_SECONDS || 60),
+    minBytes: configNumber('VOICENOTE_MIN_BYTES', 100000),
+    minDurationSeconds: configNumber('VOICENOTE_MIN_DURATION_SECONDS', 60),
     // Only recordings from the last N hours are picked up (0 = no limit), so a
     // fresh install doesn't drain the recorder's entire history.
-    maxAgeHours: Number(process.env.VOICENOTE_MAX_AGE_HOURS || 48),
+    maxAgeHours: configNumber('VOICENOTE_MAX_AGE_HOURS', 48),
     volcano: getVolcanoConfigFromEnv(),
     speakers: loadSpeakers(),
   }
@@ -301,12 +247,6 @@ function getConfig(): Config {
 // ────────────────────────────────────────────────────────────────────────────
 
 const DEFAULT_SPEAKERS: SpeakersConfig = { self: { name: null, aliases: [] }, known: [] }
-
-
-function loadJsonSync<T>(path: string, fallback: T): T {
-  if (!existsSync(path)) return fallback
-  try { return JSON.parse(readFileSync(path, 'utf8')) as T } catch (e) { warnSideEffect(`parse ${path}`, e); return fallback }
-}
 
 function normalizeSpeakers(data: unknown): SpeakersConfig {
   const raw = (data && typeof data === 'object') ? data as Partial<SpeakersConfig> : {}
@@ -324,34 +264,17 @@ function normalizeSpeakers(data: unknown): SpeakersConfig {
 }
 
 function loadConfigJson(): Record<string, unknown> {
-  return loadJsonSync<Record<string, unknown>>(CONFIG_ENV_PATH, {})
+  if (!existsSync(CONFIG_ENV_PATH)) return {}
+  let value: unknown
+  try { value = JSON.parse(readFileSync(CONFIG_ENV_PATH, 'utf8')) } catch (e: any) {
+    throw new Error(`${CONFIG_ENV_PATH} is invalid JSON: ${e?.message || e}`)
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${CONFIG_ENV_PATH} must contain a JSON object`)
+  return value as Record<string, unknown>
 }
 
 function loadSpeakers(): SpeakersConfig {
-  ensureConfigSeed()
-  const config = loadConfigJson()
-  if (config.speakers) return normalizeSpeakers(config.speakers)
-  // Backward compatibility for installs created before speakers moved into config.json.
-  return normalizeSpeakers(loadJsonSync<unknown>(SPEAKERS_PATH, DEFAULT_SPEAKERS))
-}
-
-
-let configSeeded = false
-function ensureConfigSeed(): void {
-  if (configSeeded) return
-  configSeeded = true
-  try {
-    if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true })
-
-    const current = loadConfigJson()
-    if (!current.speakers) {
-      const legacy = existsSync(SPEAKERS_PATH) ? loadJsonSync<unknown>(SPEAKERS_PATH, DEFAULT_SPEAKERS) : DEFAULT_SPEAKERS
-      current.speakers = normalizeSpeakers(legacy)
-      writeFileSync(CONFIG_ENV_PATH, JSON.stringify(current, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 })
-    }
-  } catch {
-    // Don't crash if we can't seed; commands still work with defaults in memory.
-  }
+  return normalizeSpeakers(loadConfigJson().speakers ?? DEFAULT_SPEAKERS)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -359,9 +282,7 @@ function ensureConfigSeed(): void {
 // ────────────────────────────────────────────────────────────────────────────
 
 function expandHome(path: string): string {
-  if (path === '~') return os.homedir()
-  if (path.startsWith('~/')) return join(os.homedir(), path.slice(2))
-  return path
+  return path.replace(/^(?:~|\$\{?HOME\}?)(?=\/|$)/, os.homedir())
 }
 
 function nowIso(): string { return new Date().toISOString() }
@@ -766,7 +687,7 @@ async function tailFiles(files: string[], lines: number, follow: boolean): Promi
 // ffprobe is the only ffmpeg-suite binary the pipeline actually uses (duration
 // detection). Resolve a configurable path so a bundled binary (GUI .app sidecar)
 // can be used without relying on PATH — mirrors the VOICENOTE_PI_BIN convention.
-function ffprobeBin(): string { return process.env.VOICENOTE_FFPROBE_BIN || 'ffprobe' }
+function ffprobeBin(): string { return expandHome(process.env.VOICENOTE_FFPROBE_BIN || 'ffprobe') }
 
 async function ffprobeDuration(path: string): Promise<number | null> {
   const result = await runCommand(ffprobeBin(), ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', path])
@@ -1160,7 +1081,7 @@ async function volcanoTranscribeAudio(volc: VolcanoConfig, audioPath: string, re
 }
 
 async function transcribeAudio(config: Config, audioPath: string, rec: Recording): Promise<string> {
-  if (!config.volcano) throw new Error('Volcano ASR not configured. Set VOLCANO_ASR_KEY / VOLCANO_TOS_* in ~/.zshrc.')
+  if (!config.volcano) throw new Error('Volcano ASR not configured. Set VOLCANO_ASR_KEY / VOLCANO_TOS_* in config.json.')
   return volcanoTranscribeAudio(config.volcano, audioPath, rec)
 }
 
@@ -1270,7 +1191,7 @@ ${transcript}`
 // ───────────────────────────────────────────────────────────────────────
 
 function piCodexBin(): string {
-  return process.env.VOICENOTE_PI_BIN || 'pi'
+  return expandHome(process.env.VOICENOTE_PI_BIN || 'pi')
 }
 
 // pi can't be `bun build --compile`'d (it reads data files from disk), so the
@@ -1281,7 +1202,7 @@ function piCodexBin(): string {
 // a .cmd/%* wrapper would mangle). CLI users with a real `pi` on PATH leave
 // PI_CLI unset and pi is invoked directly.
 function piInvocation(args: string[]): { bin: string; args: string[] } {
-  const cli = process.env.VOICENOTE_PI_CLI
+  const cli = process.env.VOICENOTE_PI_CLI ? expandHome(process.env.VOICENOTE_PI_CLI) : undefined
   const bin = piCodexBin()
   return cli ? { bin, args: [cli, ...args] } : { bin, args }
 }
@@ -1382,18 +1303,18 @@ function readStdin(): Promise<string> {
   })
 }
 
-function configFileEnv(): Record<string, string> {
-  const raw = loadConfigJson()
+function configFileEnv(raw = loadConfigJson()): Record<string, string> {
   const env: Record<string, string> = {}
   for (const k of ENV_KEYS) if (typeof raw[k] === 'string') env[k] = raw[k] as string
   return env
 }
 
 function configGetData(): { path: string; env: Record<string, string>; self: { name: string | null; aliases: string[] } } {
-  const speakers = loadSpeakers()
+  const current = loadConfigJson()
+  const speakers = normalizeSpeakers(current.speakers ?? DEFAULT_SPEAKERS)
   return {
     path: CONFIG_ENV_PATH,
-    env: configFileEnv(),
+    env: configFileEnv(current),
     self: { name: speakers.self.name, aliases: speakers.self.aliases },
   }
 }
@@ -1402,34 +1323,39 @@ function configGet(): void { console.log(JSON.stringify(configGetData(), null, 2
 
 type ConfigSetPayload = { env?: Record<string, unknown>; self?: { name?: string | null; aliases?: string[] } }
 
-async function configSetData(payload: ConfigSetPayload): Promise<{ ok: true; path: string; ignoredKeys?: string[] }> {
+async function writeConfigJson(value: Record<string, unknown>): Promise<void> {
   await mkdir(CONFIG_DIR, { recursive: true })
+  const tmp = `${CONFIG_ENV_PATH}.tmp-${process.pid}`
+  await writeFile(tmp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 })
+  await rename(tmp, CONFIG_ENV_PATH)
+}
 
-  // Merge env into config.json (only known ENV_KEYS; null deletes a key).
+async function configSetData(payload: ConfigSetPayload): Promise<{ ok: true; path: string; ignoredKeys?: string[] }> {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('Config payload must be a JSON object')
   const current = loadConfigJson()
   const known = ENV_KEYS as readonly string[]
   const ignored: string[] = []
   if (payload.env) {
-    for (const [k, v] of Object.entries(payload.env)) {
-      if (!known.includes(k)) { ignored.push(k); continue }
-      if (v === null) delete current[k]
-      else if (typeof v === 'string') current[k] = v
+    for (const [key, value] of Object.entries(payload.env)) {
+      if (!known.includes(key)) { ignored.push(key); continue }
+      if (value === null) delete current[key]
+      else if (typeof value === 'string') current[key] = value
+      else throw new Error(`Config value ${key} must be a string or null`)
     }
   }
-  const tmp = `${CONFIG_ENV_PATH}.tmp-${process.pid}`
-  await writeFile(tmp, JSON.stringify(current, null, 2) + '\n', { mode: 0o600 })
-  await rename(tmp, CONFIG_ENV_PATH)
-
-  // Identity lives in config.json too; speakers.json is read only as a legacy fallback.
   if (payload.self) {
-    const speakers = normalizeSpeakers(current.speakers ?? loadSpeakers())
-    if (payload.self.name !== undefined) speakers.self.name = payload.self.name
-    if (Array.isArray(payload.self.aliases)) speakers.self.aliases = payload.self.aliases
+    const speakers = normalizeSpeakers(current.speakers ?? DEFAULT_SPEAKERS)
+    if (payload.self.name !== undefined) {
+      if (payload.self.name !== null && typeof payload.self.name !== 'string') throw new Error('self.name must be a string or null')
+      speakers.self.name = payload.self.name
+    }
+    if (payload.self.aliases !== undefined) {
+      if (!Array.isArray(payload.self.aliases) || payload.self.aliases.some(alias => typeof alias !== 'string')) throw new Error('self.aliases must contain only strings')
+      speakers.self.aliases = payload.self.aliases
+    }
     current.speakers = speakers
-    await writeFile(tmp, JSON.stringify(current, null, 2) + '\n', { mode: 0o600 })
-    await rename(tmp, CONFIG_ENV_PATH)
   }
-
+  await writeConfigJson(current)
   return { ok: true, path: CONFIG_ENV_PATH, ...(ignored.length ? { ignoredKeys: ignored } : {}) }
 }
 
@@ -1537,7 +1463,7 @@ function isTransientPiError(e: any): boolean {
 }
 
 async function chatCompleteViaPi(opts: Parameters<typeof runPi>[0]): Promise<string> {
-  const maxAttempts = Math.max(1, Number(process.env.VOICENOTE_PI_RETRIES || 3))
+  const maxAttempts = Math.max(1, Math.floor(configNumber('VOICENOTE_PI_RETRIES', 3)))
   for (let attempt = 1; ; attempt++) {
     try {
       return await runPi(opts)
@@ -2138,47 +2064,24 @@ function xmlEscape(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;')
 }
 
-// Pulled in for `vn install-launch-agent`. launchd does NOT inherit your zsh
-// environment, so anything the pipeline needs that lives ONLY in the real
-// environment (e.g. exported from a non-zsh shell, or injected by the GUI)
-// has to be written into the plist's EnvironmentVariables. Values that came
-// from config.json/.zshrc are deliberately NOT embedded: vn run re-reads
-// those files at startup, and since plist env outranks config.json, embedding
-// them would freeze the values — later GUI edits would silently never reach
-// the background agent.
+// Scheduled runs read all business settings from config.json. The plist only
+// carries a fixed PATH and desktop-bundled runtime paths that do not exist in
+// that file.
 async function launchAgentEnv(): Promise<Record<string, string>> {
   loadEnvConfig()
   const env: Record<string, string> = {
     PATH: `${os.homedir()}/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
   }
-  // Embed only what is NOT recoverable from the config files at run time —
-  // see envConfig.ts (invariants 3+4) for the full matrix. A real-env value
-  // that differs from the file value is embedded as an override but warned
-  // about: it may equally be a stale shell session, and it will keep
-  // overriding config edits until the scheduler is reinstalled.
-  //
-  // no_proxy/NO_PROXY carry a volcano-hosts merge we added; substitute the
-  // pre-merge real-env original (or drop it entirely if we synthesized the
-  // whole value) so the scheduler never freezes our merge over config edits.
-  const embedEnv: Record<string, string | undefined> = { ...process.env }
-  for (const k of ['no_proxy', 'NO_PROXY'] as const) embedEnv[k] = premergeRealNoProxy[k]
-  const fileEnv = fileProvidedEnv()
-  const { embed, frozenOverrides } = envKeysToEmbed(ENV_KEYS, embedEnv, hydratedEnvKeys, fileEnv)
-  Object.assign(env, embed)
-  for (const k of frozenOverrides) {
-    console.error(`Warning: environment ${k} overrides the config file. Update or unset it, then re-run \`vn install-launch-agent --load\` to apply the intended value.`)
+  const fileEnv = configFileEnv()
+  for (const key of ['VOICENOTE_PI_CLI', 'VOICENOTE_FFPROBE_BIN'] as const) {
+    if (process.env[key] && process.env[key] !== fileEnv[key]) env[key] = process.env[key]!
   }
-  // Embed pi's ABSOLUTE path so launchd resolves it regardless of the fixed plist
-  // PATH (npm global bin can live outside it under nvm / custom prefixes). Resolve
-  // the configured name (including the documented relative `VOICENOTE_PI_BIN="pi"`
-  // and a file-sourced relative name); only an absolute override is left as-is.
-  // The resolved path is regenerated on every (re)install, so config edits that
-  // change VOICENOTE_PI_BIN take effect via ensure_agent's forced reinstall.
-  const configuredPi = env.VOICENOTE_PI_BIN ?? process.env.VOICENOTE_PI_BIN
-  if (!configuredPi?.startsWith('/')) {
-    const w = await runCommand(IS_WINDOWS ? 'where' : 'which', [configuredPi || 'pi'], 5000)
-    const p = w.code === 0 ? (w.stdout.trim().split(/\r?\n/)[0] || '') : ''
-    if (p && existsSync(p)) env.VOICENOTE_PI_BIN = p
+  const configuredPi = expandHome(process.env.VOICENOTE_PI_BIN || 'pi')
+  if (configuredPi.startsWith('/')) env.VOICENOTE_PI_BIN = configuredPi
+  else {
+    const found = await runCommand(IS_WINDOWS ? 'where' : 'which', [configuredPi], 5000)
+    const path = found.code === 0 ? (found.stdout.trim().split(/\r?\n/)[0] || '') : ''
+    if (path && existsSync(path)) env.VOICENOTE_PI_BIN = path
   }
   return env
 }
@@ -2223,9 +2126,7 @@ ${envEntries}
 </plist>
 `
   await writeFile(plist, content, 'utf8')
-  // The plist may embed real-env secrets (proxy credentials, exported keys);
-  // chmod explicitly — writeFile's mode only applies on creation, and existing
-  // plists from older installs are 0644.
+  // Keep scheduler details private and tighten permissions on older plists.
   await chmod(plist, 0o600)
   const summary = Object.keys(env).join(', ')
   console.log(`LaunchAgent written: ${plist}`)
@@ -2283,9 +2184,9 @@ async function installScheduledTask(opts: { load?: boolean } = {}): Promise<void
   }
   if (Object.keys(persist).length) {
     await mkdir(CONFIG_DIR, { recursive: true })
-    const current = loadJsonSync<Record<string, unknown>>(CONFIG_ENV_PATH, {})
+    const current = loadConfigJson()
     Object.assign(current, persist)
-    await writeFile(CONFIG_ENV_PATH, JSON.stringify(current, null, 2) + '\n')
+    await writeConfigJson(current)
   }
   const { command, argLine } = schedulerProgramArgs()
   // bun.exe / vn.exe are console-subsystem: an InteractiveToken task flashes a

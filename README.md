@@ -48,7 +48,7 @@ VOLCANO_TOS_SECRET_KEY="..." \
 bash <(curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install.sh)
 ```
 
-The first install creates `~/.config/voicenote/config.json`. A legacy `speakers.json` is still read for compatibility and migrated into `config.json.speakers`. Once configured, run `vn doctor` to check the environment, and `vn install-launch-agent` if you want background monitoring.
+The first install creates `~/.config/voicenote/config.json`. Once configured, run `vn doctor` to check it, and `vn install-launch-agent` if you want background monitoring.
 
 Manual install:
 
@@ -69,7 +69,7 @@ The CLI is cross-platform. Prerequisites: Bun, ffmpeg (provides `ffprobe.exe`), 
 bun remove -g @kid7st/voicenote 2>$null   # drop the pre-rebrand package if present (safe no-op otherwise)
 bun add -g @fastagent-sh/voicenote
 # Windows has no /Volumes mount points; set the recorder drive explicitly
-setx VOICENOTE_RECORD_DIR "E:\RECORD"
+'{"env":{"VOICENOTE_RECORD_DIR":"E:\\RECORD"}}' | vn config set
 ```
 
 - Config: `%APPDATA%\voicenote\config.json`; logs/locks: `%LOCALAPPDATA%\voicenote\`
@@ -201,9 +201,7 @@ The install script writes an editable template:
 }
 ```
 
-Changes take effect on the next `vn run`. Config values and unquoted/double-quoted `.zshrc` exports support simple `$VAR` / `${VAR}` references to other settings and `$HOME`. Single-quoted shell values stay literal. Shell commands are never executed. Runtime references honor inherited environment values; scheduler comparisons resolve from files alone.
-
-A legacy `~/.config/voicenote/speakers.json` is still read as a compatibility fallback.
+Changes take effect on the next `vn run`. `~`, `$HOME`, and `${HOME}` are accepted at the start of path settings. Environment variables override the file for the current CLI process; background runs use `config.json`, not shell startup files.
 
 ## Workflow
 
@@ -244,9 +242,7 @@ vn status
 
 The LaunchAgent invokes `vn run` every 60 seconds. It skips safely when no recorder is plugged in; once the VTR6500 is connected, new recordings are processed automatically.
 
-> Config changes (`config.json` or `~/.zshrc`) are picked up automatically by the background agent on its next run — no reinstall needed. The plist only snapshots real environment variables and pi's absolute path: **after changing `VOICENOTE_PI_BIN`, re-run `vn install-launch-agent` and reload** (`vn upgrade` regenerates the plist automatically). If pi is not signed in or ASR is not configured, the agent skips processing instead of burning ASR spend.
->
-> Proxy values that match the file configuration, including expanded variable references, are not embedded and produce no override warning. Values supplied only by the shell, or differing from the files, are embedded as explicit overrides. To clear an unwanted override, update or unset the shell variable, then run `vn install-launch-agent --load`. Prefer `LOCAL_PROXY_HOST`/`LOCAL_PROXY_PORT` in `config.json` for proxy configuration.
+> `config.json` changes are picked up by the background agent on its next run. The plist stores only a fixed PATH and executable paths: **after changing `VOICENOTE_PI_BIN`, re-run `vn install-launch-agent --load`** (`vn upgrade` does this automatically). Shell-only settings are deliberately not copied into the scheduler; persist them with `vn config set`. If pi or ASR is not configured, the agent skips before spending ASR.
 
 Logs:
 
@@ -265,7 +261,7 @@ bun run typecheck
 bun src/cli.ts doctor
 ```
 
-Distribution: vn ships as **source** with no build step — it only runs on bun (shebang + `bun:ffi` + `engines.bun`), and bun runs TypeScript natively, so `bin` points straight at `src/cli.ts` and the npm tarball only contains `src/{cli,envConfig,jobs,runLock}.ts`. The install script / `vn upgrade` install from the published npm package (`bun add -g @fastagent-sh/voicenote`); a `git+https` install also works directly (the git tree carries the source; no build or install script needed).
+Distribution: vn ships as **source** with no build step — it only runs on bun (shebang + `bun:ffi` + `engines.bun`), and bun runs TypeScript natively, so `bin` points straight at `src/cli.ts` and the npm tarball only contains `src/{cli,jobs,runLock}.ts`. The install script / `vn upgrade` install from the published npm package (`bun add -g @fastagent-sh/voicenote`); a `git+https` install also works directly (the git tree carries the source; no build or install script needed).
 
 Routine release (tag triggers CI):
 

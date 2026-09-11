@@ -46,7 +46,7 @@ append_once() {
 
 # Only PATH goes into the shell rc (so the interactive shell finds vn/bun/brew).
 # All app config lives in ~/.config/voicenote/config.json (see write_config_json),
-# which vn reads with precedence: process.env > config.json > ~/.zshrc.
+# which vn reads with precedence: process.env > config.json.
 configure_shell_env() {
   log "Configuring PATH"
   local shell_name="$(basename "${SHELL:-}")"
@@ -74,7 +74,7 @@ configure_shell_env() {
 }
 
 # Write the canonical config template to ~/.config/voicenote/config.json. Existing
-# values win; environment variables can preseed/override values during install.
+# values win; environment variables preseed missing values during install.
 write_config_json() {
   log "Preparing ~/.config/voicenote/config.json"
   VOICENOTE_WORKSPACE="$WORKSPACE" \
@@ -87,11 +87,10 @@ write_config_json() {
   VOLCANO_TOS_SECRET_KEY="${VOLCANO_TOS_SECRET_KEY:-}" \
   VOLCANO_TOS_KEEP="${VOLCANO_TOS_KEEP:-0}" \
   node <<'NODE'
-const { readFileSync, writeFileSync, mkdirSync } = require('node:fs')
+const { readFileSync, writeFileSync, mkdirSync, renameSync } = require('node:fs')
 const { join } = require('node:path')
 const configDir = join(process.env.HOME, '.config/voicenote')
 const path = join(configDir, 'config.json')
-const legacySpeakersPath = join(configDir, 'speakers.json')
 const keys = ['VOICENOTE_WORKSPACE','VOLCANO_ASR_KEY','VOLCANO_ASR_RESOURCE_ID','VOLCANO_TOS_REGION','VOLCANO_TOS_ENDPOINT','VOLCANO_TOS_BUCKET','VOLCANO_TOS_ACCESS_KEY','VOLCANO_TOS_SECRET_KEY','VOLCANO_TOS_KEEP']
 const defaults = {
   VOICENOTE_WORKSPACE: process.env.VOICENOTE_WORKSPACE,
@@ -104,31 +103,28 @@ const defaults = {
   VOLCANO_TOS_SECRET_KEY: '',
   VOLCANO_TOS_KEEP: process.env.VOLCANO_TOS_KEEP,
 }
-const normalizeSpeakers = (value) => {
-  const raw = value && typeof value === 'object' ? value : {}
-  return {
-    self: {
-      name: typeof raw.self?.name === 'string' ? raw.self.name : null,
-      aliases: Array.isArray(raw.self?.aliases) ? raw.self.aliases.filter((a) => typeof a === 'string') : [],
-    },
-    known: Array.isArray(raw.known) ? raw.known : [],
-  }
-}
 let cfg = {}
-try { cfg = JSON.parse(readFileSync(path, 'utf8')) } catch {}
-for (const k of keys) {
-  if (cfg[k] == null) cfg[k] = defaults[k] ?? ''
-  if (process.env[k]) cfg[k] = process.env[k]
+try {
+  cfg = JSON.parse(readFileSync(path, 'utf8'))
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error('config root must be an object')
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error
 }
-if (!cfg.speakers) {
-  let legacy = null
-  try { legacy = JSON.parse(readFileSync(legacySpeakersPath, 'utf8')) } catch {}
-  cfg.speakers = normalizeSpeakers(legacy)
+for (const k of keys) if (cfg[k] == null) cfg[k] = defaults[k] ?? ''
+const currentSelf = cfg.speakers?.self
+cfg.speakers = {
+  self: {
+    name: typeof currentSelf?.name === 'string' ? currentSelf.name : null,
+    aliases: Array.isArray(currentSelf?.aliases) ? currentSelf.aliases.filter((a) => typeof a === 'string') : [],
+  },
+  known: Array.isArray(cfg.speakers?.known) ? cfg.speakers.known : [],
 }
 if (process.env.VOICENOTE_NAME) cfg.speakers.self.name = process.env.VOICENOTE_NAME
 if (process.env.VOICENOTE_ALIAS) cfg.speakers.self.aliases = [process.env.VOICENOTE_ALIAS]
 mkdirSync(configDir, { recursive: true })
-writeFileSync(path, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 })
+const tmp = `${path}.tmp-${process.pid}`
+writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 })
+renameSync(tmp, path)
 NODE
 }
 
@@ -244,7 +240,7 @@ Next steps:
        vn run --latest
        vn list
 
-Config lives in ~/.config/voicenote/config.json. Env vars still override it.
+Config lives in ~/.config/voicenote/config.json. Env vars override it for the current CLI process only.
 Optional knobs (picked up automatically on the agent's next run; only
 VOICENOTE_PI_BIN changes need \`vn install-launch-agent\` re-run):
   VOICENOTE_PI_THINKING=high          # summary reasoning effort

@@ -48,7 +48,7 @@ VOLCANO_TOS_SECRET_KEY="..." \
 bash <(curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install.sh)
 ```
 
-首次安装会生成 `~/.config/voicenote/config.json`。旧版本的 `speakers.json` 会被自动兼容读取/迁移到 `config.json.speakers`。配置完成后再运行 `vn doctor` 检查,需要后台自动监控时再运行 `vn install-launch-agent`。
+首次安装会生成 `~/.config/voicenote/config.json`。配置完成后运行 `vn doctor` 检查,需要后台自动监控时再运行 `vn install-launch-agent`。
 
 手动安装:
 
@@ -69,7 +69,7 @@ CLI 已跨平台。前置:Bun、ffmpeg(提供 `ffprobe.exe`)、Node + pi。
 bun remove -g @kid7st/voicenote 2>$null   # 若装过改名前的旧包则清掉(没装则安全跳过)
 bun add -g @fastagent-sh/voicenote
 # Windows 无 /Volumes 挂载点,录音盘按盘符设置
-setx VOICENOTE_RECORD_DIR "E:\RECORD"
+'{"env":{"VOICENOTE_RECORD_DIR":"E:\\RECORD"}}' | vn config set
 ```
 
 - 配置:`%APPDATA%\voicenote\config.json`;日志/锁:`%LOCALAPPDATA%\voicenote\`
@@ -196,7 +196,7 @@ vn uninstall-launch-agent
 }
 ```
 
-修改后下一次 `vn run` 即生效。旧版 `~/.config/voicenote/speakers.json` 仍会作为兼容 fallback 读取。
+修改后下一次 `vn run` 即生效。路径配置开头支持 `~`、`$HOME`、`${HOME}`。环境变量只覆盖当前 CLI 进程；后台运行读取 `config.json`，不读取 shell 启动文件。
 
 ## 工作流程
 
@@ -237,9 +237,7 @@ vn status
 
 LaunchAgent 每 60 秒调用 `vn run`。没插录音笔时安全跳过;插上 VTR6500 后自动处理新录音。
 
-> 配置改动（`config.json` 或 `~/.zshrc`）会被后台 agent 在下一次运行时自动读取，无需重装。plist 只快照真实环境变量和 pi 的绝对路径：**改了 `VOICENOTE_PI_BIN` 后需重跑 `vn install-launch-agent` 并 reload**（`vn upgrade` 会自动重生成 plist）。未登录 pi / ASR 未配置时，agent 会跳过处理而不会白烧 ASR。
->
-> 例外：若你在 shell 里直接 `export http_proxy=...`（而非用 `LOCAL_PROXY_HOST`）后跑 `vn install-launch-agent`，这个真实环境值会被快照进 plist 并持续覆盖后续对 `LOCAL_PROXY_HOST` 的修改；需重跑 `vn install-launch-agent` 才能清除。推荐统一用 `LOCAL_PROXY_HOST`/`LOCAL_PROXY_PORT` 配置代理。
+> 后台 agent 会在下一次运行时读取 `config.json` 的改动。plist 只保存固定 PATH 和可执行文件路径：**改了 `VOICENOTE_PI_BIN` 后需重跑 `vn install-launch-agent --load`**（`vn upgrade` 会自动处理）。shell 中临时设置的值不会复制进 scheduler，请用 `vn config set` 持久化。未配置 pi / ASR 时，agent 会在支付 ASR 成本前跳过。
 
 日志:
 
@@ -258,7 +256,7 @@ bun run typecheck
 bun src/cli.ts doctor
 ```
 
-分发:vn 以**源码**分发,没有构建步骤 —— 它只在 bun 上运行(shebang + `bun:ffi` + `engines.bun`),而 bun 原生跑 TypeScript,所以 `bin` 直接指向 `src/cli.ts`,npm tarball 只带 `src/{cli,envConfig,jobs,runLock}.ts`。安装脚本 / `vn upgrade` 从已发布的 npm 包安装(`bun add -g @fastagent-sh/voicenote`);`git+https` 安装也能直接用(git 树自带源码,无需 build 或安装脚本)。
+分发:vn 以**源码**分发,没有构建步骤 —— 它只在 bun 上运行(shebang + `bun:ffi` + `engines.bun`),而 bun 原生跑 TypeScript,所以 `bin` 直接指向 `src/cli.ts`,npm tarball 只带 `src/{cli,jobs,runLock}.ts`。安装脚本 / `vn upgrade` 从已发布的 npm 包安装(`bun add -g @fastagent-sh/voicenote`);`git+https` 安装也能直接用(git 树自带源码,无需 build 或安装脚本)。
 
 日常发布(打 tag 触发 CI):
 

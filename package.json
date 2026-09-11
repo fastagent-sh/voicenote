@@ -28,7 +28,6 @@
   },
   "files": [
     "src/cli.ts",
-    "src/envConfig.ts",
     "src/jobs.ts",
     "src/runLock.ts",
     "README.md",
