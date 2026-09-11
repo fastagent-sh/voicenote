@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path'
 // The transcript is padded past the 64KB pipe buffer so the prompt write is
 // still in flight when the fake pi exits: without runPi's stdin error handler
 // the run dies on EPIPE instead of reading pi's output.
-async function runWithFakePi(config: Record<string, string>, expectModel: string | null) {
+async function runWithFakePi(config: Record<string, string>, expectModel: string | null, expectProxy: string | null = null) {
   const home = await mkdtemp(join(tmpdir(), 'voicenote-summary-'))
   const configDir = join(home, process.platform === 'win32' ? 'voicenote' : '.config/voicenote')
   const workspace = join(home, 'ws')
@@ -27,6 +27,7 @@ async function runWithFakePi(config: Record<string, string>, expectModel: string
       if (a.includes('--version')) console.log('fake-pi')
       else if (a.includes('--provider')) { console.error('voicenote must never pick a provider'); process.exit(1) }
       else if (model !== ${JSON.stringify(expectModel)}) { console.error('unexpected --model: ' + model); process.exit(1) }
+      else if (${JSON.stringify(expectProxy)} && process.env.http_proxy !== ${JSON.stringify(expectProxy)}) { console.error('pi did not inherit http_proxy: ' + process.env.http_proxy); process.exit(1) }
       else console.log(JSON.stringify({ title: 'Fake note', summary: 'ok' }))
     `)
     await writeFile(join(configDir, 'config.json'), JSON.stringify({
@@ -63,4 +64,12 @@ test('without VOICENOTE_PI_MODEL the summary leaves the model to pi', async () =
 
 test('VOICENOTE_PI_MODEL is passed straight to pi as --model', async () => {
   await runWithFakePi({ VOICENOTE_PI_MODEL: 'openai-codex/gpt-5.6-sol' }, 'openai-codex/gpt-5.6-sol')
+}, 30_000)
+
+// Bun does not hand a child the http_proxy/no_proxy variables this process set on
+// process.env, so pi must be spawned with them passed explicitly. Otherwise a run
+// whose proxy comes from config.json (every scheduler run) reaches pi with no
+// proxy and dies on `fetch failed`.
+test('pi inherits the proxy derived from config, not just the real environment', async () => {
+  await runWithFakePi({ LOCAL_PROXY_HOST: '127.0.0.1', LOCAL_PROXY_PORT: '7897' }, null, 'http://127.0.0.1:7897')
 }, 30_000)

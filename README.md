@@ -114,6 +114,7 @@ Optional settings:
   "VOICENOTE_MAX_AGE_HOURS": "48",
   "VOICENOTE_PI_BIN": "pi",
   "VOICENOTE_PI_MODEL": "openai-codex/gpt-5.6-sol",
+  "PI_CODING_AGENT_DIR": "$HOME/.config/voicenote/pi-agent",
   "VOICENOTE_PI_THINKING": "high",
   "VOICENOTE_PI_SUMMARY_TOOLS": "read,grep",
   "VOICENOTE_CONTEXT_DIR": "/Users/you/vault"
@@ -130,6 +131,21 @@ Credentials always belong to pi (`pi` → `/login <provider>`, or a provider API
 in the environment); voicenote never picks a provider and never falls back to a
 second one. If pi fails, the transcript is kept and the summary can be retried
 with `vn run --latest`.
+
+### Credentials of their own
+
+`PI_CODING_AGENT_DIR` relocates pi's config directory, which is where it keeps
+`auth.json`. Point it at a voicenote-owned directory and `vn login` writes there,
+pi refreshes the tokens there, and an interactive pi session cannot clobber
+them — it rewrites its own `auth.json` wholesale on exit, which has silently
+dropped providers before:
+
+```bash
+echo '{"env":{"PI_CODING_AGENT_DIR":"$HOME/.config/voicenote/pi-agent"}}' | vn config set
+vn login   # signs in and stores credentials in that directory
+```
+
+`vn doctor` prints the path it will read (`pi.auth=...`).
 
 `DEEPSEEK_API_KEY` and `OPENAI_API_KEY` in the config are only forwarded to pi's
 environment for providers that read them.

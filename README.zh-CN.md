@@ -114,6 +114,7 @@ brew install ffmpeg
   "VOICENOTE_MAX_AGE_HOURS": "48",
   "VOICENOTE_PI_BIN": "pi",
   "VOICENOTE_PI_MODEL": "openai-codex/gpt-5.6-sol",
+  "PI_CODING_AGENT_DIR": "$HOME/.config/voicenote/pi-agent",
   "VOICENOTE_PI_THINKING": "high",
   "VOICENOTE_PI_SUMMARY_TOOLS": "read,grep",
   "VOICENOTE_CONTEXT_DIR": "/Users/you/vault"
@@ -129,6 +130,19 @@ brew install ffmpeg
 凭证始终属于 pi(`pi` → `/login <provider>`, 或环境里的 provider API key); voicenote
 不选 provider, 也不会回退到第二个。pi 失败时 transcript 会保留, 用 `vn run --latest`
 重试纪要即可。
+
+### 给 voicenote 一份独立凭证
+
+`PI_CODING_AGENT_DIR` 可以改掉 pi 的配置目录, `auth.json` 就存在那里。指向一个
+voicenote 自己的目录后, `vn login` 写入这里, pi 也在这里刷新 token, 交互式 pi 会话
+碰不到它 —— 那边退出时会整份覆写自己的 `auth.json`, 之前就把 provider 条目悄悄弄丢过:
+
+```bash
+echo '{"env":{"PI_CODING_AGENT_DIR":"$HOME/.config/voicenote/pi-agent"}}' | vn config set
+vn login   # 登录后凭证就存在该目录
+```
+
+`vn doctor` 的 `pi.auth=` 一行会打印实际读取的路径。
 
 配置里的 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` 只是透传给 pi 的环境变量。
 

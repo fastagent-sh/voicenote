@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
 
-const VERSION = '0.20.0'
+const VERSION = '0.21.0'
 const LAUNCH_AGENT_LABEL = 'sh.fastagent.voicenote'
 const LAUNCH_AGENT_LABEL_LEGACY = 'com.kid7st.voicenote' // pre-fastagent installs; cleaned up on install
 const TASK_NAME = 'VoiceNote'   // Windows Task Scheduler name (mac uses LAUNCH_AGENT_LABEL)
@@ -31,7 +31,15 @@ const LOG_DIR = join(STATE_DIR, 'logs')
 const LOCK_PATH = join(STATE_DIR, 'run.lock')
 const SPEAKERS_PATH = join(CONFIG_DIR, 'speakers.json')
 const CONFIG_ENV_PATH = join(CONFIG_DIR, 'config.json')
-const PI_AUTH_PATH = join(os.homedir(), '.pi', 'agent', 'auth.json')
+// pi keeps credentials in its config dir, which PI_CODING_AGENT_DIR relocates.
+// Point it at a voicenote-owned directory to get an auth.json that only the
+// pipeline reads and refreshes: an interactive pi session rewrites its own
+// auth.json wholesale on exit and has already dropped entries that way.
+// Resolved per call — the env is hydrated from config.json after module load.
+function piAuthPath(): string {
+  const dir = process.env.PI_CODING_AGENT_DIR || join(os.homedir(), '.pi', 'agent')
+  return join(expandHome(dir), 'auth.json')
+}
 
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.wma', '.aac', '.flac'])
 
@@ -125,6 +133,7 @@ const ENV_KEYS = [
   'VOLCANO_TOS_KEEP',
   'VOICENOTE_PI_BIN',
   'VOICENOTE_PI_CLI',
+  'PI_CODING_AGENT_DIR',
   'VOICENOTE_FFPROBE_BIN',
   'VOICENOTE_PI_MODEL',
   'VOICENOTE_PI_THINKING',
@@ -175,6 +184,14 @@ function systemProxyUrl(): string | null {
   } catch { return null }
 }
 
+// Bun's child_process does NOT hand a child the proxy variables this process set
+// on process.env (http_proxy/https_proxy/no_proxy and their uppercase forms are
+// special-cased internally; only all_proxy survives). Every spawn that must reach
+// the network through the proxy has to pass them explicitly, so record them here.
+// Without this, a scheduler run whose proxy comes from config.json rather than a
+// real shell env leaves pi with no proxy at all — it fails with `fetch failed`.
+const childProxyEnv: Record<string, string> = {}
+
 function applyDerivedProxy(): void {
   const host = process.env.LOCAL_PROXY_HOST
   const port = process.env.LOCAL_PROXY_PORT
@@ -191,6 +208,7 @@ function applyDerivedProxy(): void {
     const needs = (k: string) => !process.env[k] || process.env[k]!.includes('${')
     for (const k of ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']) {
       if (needs(k)) { process.env[k] = url; hydratedEnvKeys.add(k) } // derived, not real env
+      childProxyEnv[k] = process.env[k]!
     }
   }
   // no_proxy/NO_PROXY: seed a base when a proxy is active, then always merge
@@ -201,6 +219,7 @@ function applyDerivedProxy(): void {
   for (const k of ['no_proxy', 'NO_PROXY'] as const) {
     const r = deriveNoProxy(process.env[k], premergeRealNoProxy[k], hydratedEnvKeys.has(k), !!url, baseNoProxy, VOLCANO_NO_PROXY_HOSTS)
     process.env[k] = r.runtime
+    childProxyEnv[k] = r.runtime
     if (r.hydrate) hydratedEnvKeys.add(k)
     if (r.capture !== undefined) premergeRealNoProxy[k] = r.capture
   }
@@ -1309,15 +1328,16 @@ function piInvocation(args: string[]): { bin: string; args: string[] } {
 // ───────────────────────────────────────────────────────────────────────
 
 async function persistPiOAuth(providerId: string, creds: Record<string, unknown>): Promise<void> {
-  await mkdir(dirname(PI_AUTH_PATH), { recursive: true })
+  const authPath = piAuthPath()
+  await mkdir(dirname(authPath), { recursive: true })
   let existing: Json = {}
-  if (existsSync(PI_AUTH_PATH)) {
-    try { existing = JSON.parse(await readFile(PI_AUTH_PATH, 'utf8')) as Json } catch (e) { warnSideEffect(`parse ${PI_AUTH_PATH}`, e) }
+  if (existsSync(authPath)) {
+    try { existing = JSON.parse(await readFile(authPath, 'utf8')) as Json } catch (e) { warnSideEffect(`parse ${authPath}`, e) }
   }
   existing[providerId] = { type: 'oauth', ...creds }
-  const tmp = `${PI_AUTH_PATH}.tmp-${process.pid}`
+  const tmp = `${authPath}.tmp-${process.pid}`
   await writeFile(tmp, JSON.stringify(existing, null, 2) + '\n', { mode: 0o600 })
-  await rename(tmp, PI_AUTH_PATH)
+  await rename(tmp, authPath)
 }
 
 async function loginChatGPT(opts: { json?: boolean; deviceCode?: boolean; emit?: (o: Record<string, unknown>) => void }): Promise<void> {
@@ -1367,7 +1387,7 @@ async function loginChatGPT(opts: { json?: boolean; deviceCode?: boolean; emit?:
     }
     await persistPiOAuth(oauth.openaiCodexOAuthProvider.id, creds)
     if (json) emit({ event: 'success', provider: oauth.openaiCodexOAuthProvider.id })
-    else console.log(`\n✓ Signed in. Credentials saved to ${PI_AUTH_PATH}. Verify with: vn doctor`)
+    else console.log(`\n✓ Signed in. Credentials saved to ${piAuthPath()}. Verify with: vn doctor`)
   } catch (e: any) {
     let message = String(e?.message || e)
     if (/unsupported_country_region_territory|\b403\b/.test(message)) {
@@ -1520,7 +1540,7 @@ async function runPi(opts: {
   if (opts.appendSystemPrompt) args.push('--append-system-prompt', opts.appendSystemPrompt)
   return new Promise<string>((resolve, reject) => {
     const inv = piInvocation(args)
-    const child = spawn(inv.bin, inv.args, { stdio: ['pipe', 'pipe', 'pipe'], cwd: opts.cwd, windowsHide: true })
+    const child = spawn(inv.bin, inv.args, { stdio: ['pipe', 'pipe', 'pipe'], cwd: opts.cwd, windowsHide: true, env: { ...process.env, ...childProxyEnv } })
     let stdout = '', stderr = ''
     const timer = opts.timeoutMs ? setTimeout(() => child.kill('SIGKILL'), opts.timeoutMs) : null
     child.stdout.on('data', d => stdout += String(d))
@@ -2699,7 +2719,7 @@ async function collectDoctor() {
     // Provider/model/credentials are pi's own configuration; `pi.available` is
     // all we can honestly report about whether a summary can run.
     summary: { backend: 'pi', model: piSummaryModel() || null, thinking: piThinkingLevel(), tools: tools || null, contextDir: tools ? summaryContextDir(config) : null },
-    pi: { bin: piCodexBin(), version: piCheck.code === 0 ? (piCheck.stdout.trim() || piCheck.stderr.trim() || null) : null, available: piCheck.code === 0, auth: existsSync(PI_AUTH_PATH) },
+    pi: { bin: piCodexBin(), version: piCheck.code === 0 ? (piCheck.stdout.trim() || piCheck.stderr.trim() || null) : null, available: piCheck.code === 0, auth: existsSync(piAuthPath()), authPath: piAuthPath() },
     // Outbound proxy for HTTPS endpoints (updater/GitHub): honor the standard
     // env chain, not just lowercase http_proxy — an https_proxy-only setup must
     // still route the updater.
@@ -2773,7 +2793,7 @@ async function doctor(opts: { json?: boolean } = {}): Promise<void> {
   console.log(`pi.version=${s.pi.version || 'missing'}`)
   // Neutral fact, not an instruction: an API-key user has no auth.json and needs
   // nothing fixed.
-  console.log(`pi.auth=${s.pi.auth ? 'logged-in (auth.json present)' : 'no ~/.pi/agent/auth.json (fine if a provider API key is set)'}`)
+  console.log(`pi.auth=${s.pi.authPath} ${s.pi.auth ? '(present)' : '(missing — fine if a provider API key is set)'}`)
   console.log(`defaultMode=notes`)
   console.log(`proxy=${s.proxy.url || '<unset>'}`)
   console.log(`speakers.self=${s.identity.self || '<unset>'}`)
