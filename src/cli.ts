@@ -782,8 +782,6 @@ async function scanRecordings(config: Config): Promise<{ recordings: Recording[]
   return { recordings, complete }
 }
 
-const limitsOf = (config: Config) => ({ maxAgeHours: config.maxAgeHours, minBytes: config.minBytes, minDurationSeconds: config.minDurationSeconds })
-
 // ────────────────────────────────────────────────────────────────────────────
 // File path planning
 // ────────────────────────────────────────────────────────────────────────────
@@ -805,24 +803,19 @@ function layout(config: Config, rec: Recording, title?: string | null): LocalFil
   }
 }
 
-function localFilesFromState(config: Config, rec: Recording, entry: JobRecord | undefined): LocalFiles {
-  const fallback = layout(config, rec)
-  const paths = entry?.paths || {}
-  return {
-    audio: typeof paths.audio === 'string' ? paths.audio : fallback.audio,
-    transcript: typeof paths.transcript === 'string' ? paths.transcript : fallback.transcript,
-    notes: typeof paths.notes === 'string' ? paths.notes : fallback.notes,
-    metadata: typeof paths.metadata === 'string' ? paths.metadata : fallback.metadata,
-  }
-}
-
 // Resume on the evidence, not on a state label: if the transcript is on disk,
 // re-running ASR is money spent for nothing. Keying this off `notes_failed`
 // instead meant `vn forget` (which drops the record) silently re-paid for ASR,
 // even though the transcript was still sitting there.
 function resumableTranscriptFiles(config: Config, rec: Recording, store: StateFile, mode: RunMode, force: boolean): LocalFiles | null {
   if (force || mode !== 'notes') return null
-  const files = localFilesFromState(config, rec, store.jobs[rec.sourceId])
+  // Paths recorded by an earlier attempt win: that attempt may already have
+  // moved its outputs to titled names.
+  const fallback = layout(config, rec)
+  const recorded = store.jobs[rec.sourceId]?.paths || {}
+  const files = Object.fromEntries(
+    Object.entries(fallback).map(([key, path]) => [key, typeof recorded[key] === 'string' ? recorded[key] : path]),
+  ) as LocalFiles
   return existsSync(files.transcript) ? files : null
 }
 
@@ -1325,15 +1318,10 @@ async function configSet(): Promise<void> {
   }
 }
 
-function stripJsonFences(text: string): string {
-  const trimmed = text.trim()
-  const fence = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```\s*$/i)
-  if (fence) return fence[1]!.trim()
-  return trimmed
-}
-
 function extractFirstJsonObject(text: string): string {
-  const trimmed = stripJsonFences(text)
+  const raw = text.trim()
+  // Models often wrap JSON in a ```json fence; strip it before looking inside.
+  const trimmed = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```\s*$/i)?.[1]?.trim() ?? raw
   if (trimmed.startsWith('{') && trimmed.endsWith('}')) return trimmed
   // Find the first balanced {...}
   let depth = 0, start = -1, inString = false, escape = false
@@ -1861,7 +1849,9 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   // idle-suppressed silence meant for the 60s scheduler tick.
   const verboseSkips = Boolean(opts.verbose || opts.dryRun || single)
   const seen = new Set<string>()
-  const limits = single ? { maxAgeHours: 0, minBytes: 0, minDurationSeconds: 0 } : limitsOf(config)
+  const limits = single
+    ? { maxAgeHours: 0, minBytes: 0, minDurationSeconds: 0 }
+    : { maxAgeHours: config.maxAgeHours, minBytes: config.minBytes, minDurationSeconds: config.minDurationSeconds }
   for (const rec of recordings) {
     seen.add(rec.sourceId)
     const entry = recordFor(store, rec)
