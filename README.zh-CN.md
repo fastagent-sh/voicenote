@@ -263,13 +263,13 @@ bun src/cli.ts doctor
 日常发布(打 tag 触发 CI):
 
 ```bash
-npm version patch   # 然后把 src/cli.ts 里的 `VERSION` 同步成一样
+npm version patch
 git push --follow-tags
 ```
 
-`src/cli.ts` 里硬编码了 `VERSION`(供 `vn --version` 用),而 `npm version` 不会改它 —— 请在同一个 commit 里一起更新,否则 CLI 会报一个它并不是的版本号。
+`package.json` 是 CLI 的版本来源；`vn --version` 直接读取它，CI 会拒绝版本不匹配的 `v*` tag。
 
-workflow 位于 `.github/workflows/release.yml`:CI 显式跑 typecheck/test/build + 产物冒烟,再 `npm publish --ignore-scripts`(确定发布,不依赖 lifecycle)。发布走 **npm trusted publishing(OIDC)**:免长期 token(`id-token: write` + npmjs.com 上配好 Trusted Publisher),自动带 provenance。本地裸 `npm publish` 则由 `prepublishOnly`(typecheck+test+build)兼底。
+workflow 位于 `.github/workflows/release.yml`:CI 显式跑 typecheck、测试和入口冒烟,再 `npm publish --ignore-scripts`(确定发布,不依赖 lifecycle)。发布走 **npm trusted publishing(OIDC)**:免长期 token(`id-token: write` + npmjs.com 上配好 Trusted Publisher),自动带 provenance。本地裸 `npm publish` 则由 `prepublishOnly`(typecheck + 测试)兜底。
 
 > 本包这两步都已完成(Trusted Publisher 已配置,自 0.18.0 起由 CI 发布并带 provenance),常规发版只需打 tag。以下保留给 fork 者:npm 无 pending-publisher,trusted publishing 发不了包的**第一个**版本 —— 先本机 `npm login` 后手动 `npm publish --ignore-scripts` 发一次,再到 npmjs.com 包设置页加 Trusted Publisher(repo、workflow `release.yml`),之后 CI 自动接管(需 npm 账号开 2FA)。
 

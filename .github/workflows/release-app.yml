@@ -32,6 +32,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Verify tag version
+        if: github.ref_type == 'tag'
+        run: test "${GITHUB_REF_NAME#app-v}" = "$(jq -r .version app/package.json)"
       - name: Reject placeholder updater pubkey
         run: |
           if grep -q REPLACE_WITH_PUBLIC_KEY app/src-tauri/tauri.conf.json; then
