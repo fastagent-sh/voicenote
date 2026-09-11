@@ -15,6 +15,9 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      - name: Verify tag version
+        run: test "${GITHUB_REF_NAME#v}" = "$(jq -r .version package.json)"
+
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: latest
@@ -30,7 +33,7 @@ jobs:
         run: bun run typecheck
 
       - name: Test
-        run: bun test src/   # CLI tests only; app/ has its own CI
+        run: bun test ./src   # CLI tests only (`src/` would also match app/src); app/ has its own CI
 
       # Smoke the published entry point (bin -> src/cli.ts): a bad shebang or a
       # runtime dep that's a devDep by mistake passes typecheck+test yet fails

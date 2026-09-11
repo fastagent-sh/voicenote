@@ -48,7 +48,7 @@ VOLCANO_TOS_SECRET_KEY="..." \
 bash <(curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install.sh)
 ```
 
-首次安装会生成 `~/.config/voicenote/config.json`。旧版本的 `speakers.json` 会被自动兼容读取/迁移到 `config.json.speakers`。配置完成后再运行 `vn doctor` 检查,需要后台自动监控时再运行 `vn install-launch-agent`。
+首次安装会生成 `~/.config/voicenote/config.json`。配置完成后运行 `vn doctor` 检查,需要后台自动监控时再运行 `vn install-launch-agent`。
 
 手动安装:
 
@@ -69,7 +69,7 @@ CLI 已跨平台。前置:Bun、ffmpeg(提供 `ffprobe.exe`)、Node + pi。
 bun remove -g @kid7st/voicenote 2>$null   # 若装过改名前的旧包则清掉(没装则安全跳过)
 bun add -g @fastagent-sh/voicenote
 # Windows 无 /Volumes 挂载点,录音盘按盘符设置
-setx VOICENOTE_RECORD_DIR "E:\RECORD"
+'{"env":{"VOICENOTE_RECORD_DIR":"E:\\RECORD"}}' | vn config set
 ```
 
 - 配置:`%APPDATA%\voicenote\config.json`;日志/锁:`%LOCALAPPDATA%\voicenote\`
@@ -104,6 +104,8 @@ brew install ffmpeg
   }
 }
 ```
+
+留空或不写的键 = 用内置默认值；这些默认值只定义在 `src/cli.ts`，所以安装脚本和 GUI 都把这类字段留空。
 
 可选配置:
 
@@ -196,7 +198,7 @@ vn uninstall-launch-agent
 }
 ```
 
-修改后下一次 `vn run` 即生效。旧版 `~/.config/voicenote/speakers.json` 仍会作为兼容 fallback 读取。
+修改后下一次 `vn run` 即生效。路径配置开头支持 `~`、`$HOME`、`${HOME}`。环境变量只覆盖当前 CLI 进程；后台运行读取 `config.json`，不读取 shell 启动文件。
 
 ## 工作流程
 
@@ -214,7 +216,7 @@ vn uninstall-launch-agent
 
 ## 输出位置
 
-installer 默认设置:`VOICENOTE_WORKSPACE=~/Documents/meetings`。
+`VOICENOTE_WORKSPACE` 默认为 `~/Documents/meetings`。
 
 - 笔记入口:`${VOICENOTE_WORKSPACE}/YYYY-MM/`
 - 原始音频:`${VOICENOTE_WORKSPACE}/_audio/YYYY-MM/`
@@ -237,9 +239,7 @@ vn status
 
 LaunchAgent 每 60 秒调用 `vn run`。没插录音笔时安全跳过;插上 VTR6500 后自动处理新录音。
 
-> 配置改动（`config.json` 或 `~/.zshrc`）会被后台 agent 在下一次运行时自动读取，无需重装。plist 只快照真实环境变量和 pi 的绝对路径：**改了 `VOICENOTE_PI_BIN` 后需重跑 `vn install-launch-agent` 并 reload**（`vn upgrade` 会自动重生成 plist）。未登录 pi / ASR 未配置时，agent 会跳过处理而不会白烧 ASR。
->
-> 例外：若你在 shell 里直接 `export http_proxy=...`（而非用 `LOCAL_PROXY_HOST`）后跑 `vn install-launch-agent`，这个真实环境值会被快照进 plist 并持续覆盖后续对 `LOCAL_PROXY_HOST` 的修改；需重跑 `vn install-launch-agent` 才能清除。推荐统一用 `LOCAL_PROXY_HOST`/`LOCAL_PROXY_PORT` 配置代理。
+> 后台 agent 会在下一次运行时读取 `config.json` 的改动。plist 只保存固定 PATH 和可执行文件路径：**改了 `VOICENOTE_PI_BIN` 后需重跑 `vn install-launch-agent --load`**（`vn upgrade` 会自动处理）。shell 中临时设置的值不会复制进 scheduler，请用 `vn config set` 持久化。未配置 pi / ASR 时，agent 会在支付 ASR 成本前跳过。
 
 日志:
 
@@ -258,18 +258,18 @@ bun run typecheck
 bun src/cli.ts doctor
 ```
 
-分发:vn 以**源码**分发,没有构建步骤 —— 它只在 bun 上运行(shebang + `bun:ffi` + `engines.bun`),而 bun 原生跑 TypeScript,所以 `bin` 直接指向 `src/cli.ts`,npm tarball 只带 `src/{cli,envConfig,jobs,runLock}.ts`。安装脚本 / `vn upgrade` 从已发布的 npm 包安装(`bun add -g @fastagent-sh/voicenote`);`git+https` 安装也能直接用(git 树自带源码,无需 build 或安装脚本)。
+分发:vn 以**源码**分发,没有构建步骤 —— 它只在 bun 上运行(shebang + `bun:ffi` + `engines.bun`),而 bun 原生跑 TypeScript,所以 `bin` 直接指向 `src/cli.ts`,npm tarball 只带 `src/{cli,jobs,runLock,tos}.ts`。安装脚本 / `vn upgrade` 从已发布的 npm 包安装(`bun add -g @fastagent-sh/voicenote`);`git+https` 安装也能直接用(git 树自带源码,无需 build 或安装脚本)。
 
 日常发布(打 tag 触发 CI):
 
 ```bash
-npm version patch   # 然后把 src/cli.ts 里的 `VERSION` 同步成一样
+npm version patch
 git push --follow-tags
 ```
 
-`src/cli.ts` 里硬编码了 `VERSION`(供 `vn --version` 用),而 `npm version` 不会改它 —— 请在同一个 commit 里一起更新,否则 CLI 会报一个它并不是的版本号。
+`package.json` 是 CLI 的版本来源；`vn --version` 直接读取它，CI 会拒绝版本不匹配的 `v*` tag。
 
-workflow 位于 `.github/workflows/release.yml`:CI 显式跑 typecheck/test/build + 产物冒烟,再 `npm publish --ignore-scripts`(确定发布,不依赖 lifecycle)。发布走 **npm trusted publishing(OIDC)**:免长期 token(`id-token: write` + npmjs.com 上配好 Trusted Publisher),自动带 provenance。本地裸 `npm publish` 则由 `prepublishOnly`(typecheck+test+build)兼底。
+workflow 位于 `.github/workflows/release.yml`:CI 显式跑 typecheck、测试和入口冒烟,再 `npm publish --ignore-scripts`(确定发布,不依赖 lifecycle)。发布走 **npm trusted publishing(OIDC)**:免长期 token(`id-token: write` + npmjs.com 上配好 Trusted Publisher),自动带 provenance。本地裸 `npm publish` 则由 `prepublishOnly`(typecheck + 测试)兜底。
 
 > 本包这两步都已完成(Trusted Publisher 已配置,自 0.18.0 起由 CI 发布并带 provenance),常规发版只需打 tag。以下保留给 fork 者:npm 无 pending-publisher,trusted publishing 发不了包的**第一个**版本 —— 先本机 `npm login` 后手动 `npm publish --ignore-scripts` 发一次,再到 npmjs.com 包设置页加 Trusted Publisher(repo、workflow `release.yml`),之后 CI 自动接管(需 npm 账号开 2FA)。
 
@@ -277,23 +277,23 @@ workflow 位于 `.github/workflows/release.yml`:CI 显式跑 typecheck/test/buil
 
 面向**非终端用户**:一个自包含的 macOS `.app`(Tauri v2),目标机器无需预装 bun / pi / ffprobe / 全局 `vn`。
 
-**定位**:GUI 只是「工作状态 dashboard + 产出快捷入口」,**不驱动处理**。真正的全流程由后台 LaunchAgent 用包内引擎每 60s 自主运行(关掉 GUI 也跑)。
+**定位**:GUI 只是「工作状态 dashboard + 产出快捷入口」,**不驱动处理**。真正的全流程由后台 LaunchAgent 用包内 CLI 每 60s 自主运行(关掉 GUI 也跑)。
 
 - 首次:配置向导(身份 / Volcano keys / 代理)→ ChatGPT 登录(设备无终端,走 `vn login` 的浏览器回调流)
 - 之后:主界面显示 agent 活动 + 最近纪要(点开 / 打开文件夹)
 
 ### 打包内容
 
-`bun build --compile` 把 `vn` 引擎(含 bun 运行时 + pi-ai)编成单文件 sidecar;pi 不能 compile(运行时读磁盘数据文件),故整包随行,用一个随包的 `bun` 运行:
+`bun build --compile` 把 `vn` CLI(含 bun 运行时 + pi-ai)编成单文件 sidecar;pi 不能 compile(运行时读磁盘数据文件),故整包随行,用一个随包的 `bun` 运行:
 
 | 组件 | 形式 | 用途 |
 |------|------|------|
 | `vn`(编译版) | externalBin | pipeline + ChatGPT 登录 |
 | `bun` | externalBin | 跑 pi |
-| `ffprobe`(原生 arm64 静态) | externalBin | 音频时长(pi 只用 ffprobe,不用整个 ffmpeg) |
+| `ffprobe`(macOS 原生 universal) | externalBin | 音频时长(pi 只用 ffprobe,不用整个 ffmpeg) |
 | `pi` + node_modules | resource | 纪要后端(ChatGPT Codex agent) |
 
-运行时 Rust 生成一个 wrapper（`exec <包内bun> <包内pi/cli.js> "$@"`）并给 `vn` 注入 `VOICENOTE_PI_BIN` / `VOICENOTE_FFPROBE_BIN`。发布构建为 **universal**（x86_64 + arm64，vn/bun/ffprobe 各自 `lipo` 合并；pi 是 JS 无需）。
+运行时 Rust 直接调用包内 `vn`，并注入 `VOICENOTE_PI_BIN`、`VOICENOTE_PI_CLI`、`VOICENOTE_FFPROBE_BIN`；`vn` 无 wrapper 地运行 `<包内bun> <包内pi/cli.js>`。发布构建为 **universal**（x86_64 + arm64，vn/bun/ffprobe 各自 `lipo` 合并；pi 是 JS 无需）。
 
 ### 构建
 
@@ -337,7 +337,7 @@ irm https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/instal
 
 `install-app.sh` 会:从 GitHub Releases 下载已打包的 `.app` → 装到 `/Applications` → **替用户去掉隔离标记**(未公证时绕过 Gatekeeper)→ 打开。目标机器无需 bun/pi/ffprobe/全局 vn(全内置)。
 
-**首次打开**:应用落在「设置」页 → 填身份 + 自己的火山 ASR/TOS 密钥 + 代理(BYOK)→ 保存 → 「状态」面板点「登录 ChatGPT」(浏览器授权一次)。完成后 GUI 自动安装并加载后台 LaunchAgent(指向包内引擎),插上录音笔即自动转写+生成纪要。
+**首次打开**:应用落在「设置」页 → 填身份 + 自己的火山 ASR/TOS 密钥 + 代理(BYOK)→ 保存 → 「状态」面板点「登录 ChatGPT」(浏览器授权一次)。完成后 GUI 自动安装并加载后台 LaunchAgent(指向包内 CLI),插上录音笔即自动转写+生成纪要。
 
 > 后台 agent label 是 `sh.fastagent.voicenote`(与 CLI 版同名,机器上只保留一个)。`.app` 换位置后再打开一次即可重新校准 plist。
 

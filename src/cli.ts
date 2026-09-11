@@ -1,10 +1,11 @@
 #!/usr/bin/env bun
 import { cac } from 'cac'
-import { deriveNoProxy, envKeysToEmbed, hydrateFromFileEnv, parseFileEnv } from './envConfig'
+import packageJson from '../package.json' with { type: 'json' }
 import { parseLockOwner } from './runLock'
+import { tosObject, type TosConfig as VolcanoTosConfig } from './tos'
 import { applyOutcome, buildJobsView, classify, emptyState, localIso, MAX_ATTEMPTS, migrateLegacyState, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs'
-import { createHash, createHmac, randomUUID } from 'node:crypto'
-import { appendFile, chmod, mkdir, readFile, writeFile, copyFile, rename, unlink, stat, readdir, rm } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { appendFile, chmod, mkdir, readFile, writeFile, copyFile, rename, unlink, stat, readdir } from 'node:fs/promises'
 import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, appendFileSync, openSync, closeSync, statSync, readSync, unlinkSync, renameSync } from 'node:fs'
 import { dlopen, FFIType, suffix } from 'bun:ffi'
 import { basename, dirname, extname, join, resolve } from 'node:path'
@@ -12,7 +13,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
 
-const VERSION = '0.21.0'
+const VERSION = packageJson.version
 const LAUNCH_AGENT_LABEL = 'sh.fastagent.voicenote'
 const LAUNCH_AGENT_LABEL_LEGACY = 'com.kid7st.voicenote' // pre-fastagent installs; cleaned up on install
 const TASK_NAME = 'VoiceNote'   // Windows Task Scheduler name (mac uses LAUNCH_AGENT_LABEL)
@@ -29,17 +30,7 @@ const CONFIG_DIR = appConfigDir()
 const STATE_DIR = appStateDir()
 const LOG_DIR = join(STATE_DIR, 'logs')
 const LOCK_PATH = join(STATE_DIR, 'run.lock')
-const SPEAKERS_PATH = join(CONFIG_DIR, 'speakers.json')
 const CONFIG_ENV_PATH = join(CONFIG_DIR, 'config.json')
-// pi keeps credentials in its config dir, which PI_CODING_AGENT_DIR relocates.
-// Point it at a voicenote-owned directory to get an auth.json that only the
-// pipeline reads and refreshes: an interactive pi session rewrites its own
-// auth.json wholesale on exit and has already dropped entries that way.
-// Resolved per call — the env is hydrated from config.json after module load.
-function piAuthPath(): string {
-  const dir = process.env.PI_CODING_AGENT_DIR || join(os.homedir(), '.pi', 'agent')
-  return join(expandHome(dir), 'auth.json')
-}
 
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.wma', '.aac', '.flac'])
 
@@ -76,15 +67,6 @@ type SpeakerKnown = { name: string; aliases: string[]; relationship?: string | n
 type SpeakersConfig = { self: SpeakerSelf; known: SpeakerKnown[] }
 
 
-type VolcanoTosConfig = {
-  endpoint: string
-  region: string
-  bucket: string
-  accessKey: string
-  secretKey: string
-  keep: boolean
-}
-
 type VolcanoConfig = {
   apiKey: string              // X-Api-Key (new Volcano console)
   resourceId: string
@@ -92,8 +74,21 @@ type VolcanoConfig = {
   tos: VolcanoTosConfig
 }
 
+/** How this install runs pi: which binary, which model, what it may read. */
+type PiConfig = {
+  bin: string
+  /** Set when pi ships as plain JS next to a bundled bun: `<bin> <cli> <args>`. */
+  cli: string | null
+  model: string | null
+  thinking: string
+  /** Comma-separated tool list; empty = run the summary without tools. */
+  tools: string
+  contextDir: string
+  retries: number
+  authPath: string
+}
+
 type Config = {
-  deviceVolume: string
   recordDir: string
   workspace: string
   minBytes: number
@@ -101,20 +96,24 @@ type Config = {
   maxAgeHours: number
   speakers: SpeakersConfig
   volcano: VolcanoConfig | null
+  ffprobeBin: string
+  pi: PiConfig
+  /** Added to the environment of every process vn spawns. */
+  childEnv: Record<string, string>
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Env loading
+// Settings → Config
+//
+// config.json is the only persisted source; the inherited environment overrides
+// it for this process only. Everything the program needs is resolved once, in
+// getConfig(), and passed down as a frozen Config — no code below reads a
+// business setting out of process.env, so behaviour can never depend on whether
+// some earlier call happened to hydrate it.
 // ────────────────────────────────────────────────────────────────────────────
 
-// Single source of truth for every env var the pipeline reads. Both consumers
-// derive from this list so they can never drift:
-//   - loadEnvConfig() hydrates these from config.json / ~/.zshrc for non-interactive runs
-//   - launchAgentEnv() embeds the REAL-environment subset into the LaunchAgent
-//     plist (file-sourced values are skipped — vn run re-reads the files at
-//     startup, and plist env overrides config.json, so embedding a file value
-//     would freeze it: later GUI edits would silently never reach the agent)
-// Anything documented in the README as a configurable knob MUST live here.
+// Config keys accepted by `vn config set` and loaded from config.json when the
+// inherited environment does not already define them.
 const ENV_KEYS = [
   'VOICENOTE_DEVICE_VOLUME',
   'VOICENOTE_RECORD_DIR',
@@ -136,6 +135,7 @@ const ENV_KEYS = [
   'PI_CODING_AGENT_DIR',
   'VOICENOTE_FFPROBE_BIN',
   'VOICENOTE_PI_MODEL',
+  'VOICENOTE_PI_RETRIES',
   'VOICENOTE_PI_THINKING',
   'VOICENOTE_PI_SUMMARY_TOOLS',
   'VOICENOTE_CONTEXT_DIR',
@@ -152,26 +152,6 @@ const ENV_KEYS = [
 //   2) routing China-mainland Volcano APIs through an overseas proxy is slower / unreliable
 const VOLCANO_NO_PROXY_HOSTS = ['.volces.com', '.volcengineapi.com', 'openspeech.bytedance.com']
 
-// Provenance: ENV_KEYS this process synthesized — hydrated from config.json /
-// .zshrc, or derived (http_proxy from LOCAL_PROXY_HOST or the macOS system
-// proxy; no_proxy seeded/merged below) — as opposed to inherited from the
-// real environment. Two consumers:
-//   - reloadEnvConfig() deletes exactly these before re-hydrating, so the
-//     long-lived `vn serve` picks up GUI config edits immediately;
-//   - launchAgentEnv() skips them when embedding env into the scheduler
-//     (they are recoverable at run time; real env values are not).
-const hydratedEnvKeys = new Set<string>()
-
-// Real-environment no_proxy/NO_PROXY values captured BEFORE the volcano-hosts
-// merge below. The merged value is partly synthesized and must never be
-// embedded into the scheduler (vn run re-merges at startup); launchAgentEnv
-// substitutes these originals when deciding what to embed.
-const premergeRealNoProxy: Record<string, string> = {}
-
-// Node/Bun fetch doesn't read the macOS system proxy — only http_proxy env. Read
-// the active SCDynamicStore proxy so users whose proxy app sets the system proxy
-// (Clash/Surge “system proxy” mode) don't have to type host/port. Prefer HTTPS
-// (OpenAI is https); ignore PAC/auth setups. Returns http://host:port or null.
 function systemProxyUrl(): string | null {
   if (process.platform !== 'darwin') return null
   try {
@@ -184,105 +164,52 @@ function systemProxyUrl(): string | null {
   } catch { return null }
 }
 
-// Bun's child_process does NOT hand a child the proxy variables this process set
-// on process.env (http_proxy/https_proxy/no_proxy and their uppercase forms are
-// special-cased internally; only all_proxy survives). Every spawn that must reach
-// the network through the proxy has to pass them explicitly, so record them here.
-// Without this, a scheduler run whose proxy comes from config.json rather than a
-// real shell env leaves pi with no proxy at all — it fails with `fetch failed`.
-const childProxyEnv: Record<string, string> = {}
+type Settings = Record<string, string>
 
-function applyDerivedProxy(): void {
-  const host = process.env.LOCAL_PROXY_HOST
-  const port = process.env.LOCAL_PROXY_PORT
-  // Source precedence: explicit http_proxy > LOCAL_PROXY_HOST/PORT > macOS system
-  // proxy. (Volcano always bypasses, below.)
-  let url: string | null = host && port ? `http://${host}:${port}` : null
-  if (!url) {
-    const cur = process.env.http_proxy || process.env.HTTP_PROXY
-    if (!cur || cur.includes('${')) url = systemProxyUrl()
+/** This run's settings: config.json, overridden by the inherited environment. */
+function readSettings(file: Record<string, unknown>): Settings {
+  const settings: Settings = {}
+  for (const key of ENV_KEYS) {
+    const inherited = process.env[key]
+    if (inherited !== undefined) settings[key] = inherited
+    else if (typeof file[key] === 'string') settings[key] = file[key] as string
   }
-  if (url) {
-    // Set when unset, OR when a config/.zshrc value came in with unexpanded shell
-    // vars (e.g. "http://${LOCAL_PROXY_HOST}:...") — those are never valid as-is.
-    const needs = (k: string) => !process.env[k] || process.env[k]!.includes('${')
-    for (const k of ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']) {
-      if (needs(k)) { process.env[k] = url; hydratedEnvKeys.add(k) } // derived, not real env
-      childProxyEnv[k] = process.env[k]!
-    }
-  }
-  // no_proxy/NO_PROXY: seed a base when a proxy is active, then always merge
-  // the Volcano bypass hosts. Provenance bookkeeping (capture pre-merge real
-  // original vs mark synthesized-hydrated) lives in deriveNoProxy — pure and
-  // tested; see envConfig.ts.
-  const baseNoProxy = process.env.LOCAL_NO_PROXY || 'localhost,127.0.0.1,::1'
-  for (const k of ['no_proxy', 'NO_PROXY'] as const) {
-    const r = deriveNoProxy(process.env[k], premergeRealNoProxy[k], hydratedEnvKeys.has(k), !!url, baseNoProxy, VOLCANO_NO_PROXY_HOSTS)
-    process.env[k] = r.runtime
-    childProxyEnv[k] = r.runtime
-    if (r.hydrate) hydratedEnvKeys.add(k)
-    if (r.capture !== undefined) premergeRealNoProxy[k] = r.capture
-  }
+  return settings
 }
 
-// File values for each ENV_KEY. Hydration passes the current environment for
-// variable references; scheduler comparison uses files alone. Primary source is
-// ~/.config/voicenote/config.json
-// (ENV-style runtime keys at the top level; identity under `speakers`); the
-// legacy fallback is `export KEY=...` lines in ~/.zshrc, for CLI installs
-// that predate config.json. Precedence/expansion logic lives in envConfig.ts
-// (pure + tested). Two consumers: loadEnvConfig() hydrates these into
-// process.env for keys the real environment doesn't set, and launchAgentEnv()
-// uses them to decide which values are recoverable at run time.
-function fileProvidedEnv(environment: Record<string, string | undefined> = {}): Record<string, string> {
-  const data = loadJsonSync<Record<string, unknown>>(CONFIG_ENV_PATH, {})
-  let zshrc: string | null = null
-  const zshrcPath = join(os.homedir(), '.zshrc')
-  if (existsSync(zshrcPath)) { try { zshrc = readFileSync(zshrcPath, 'utf8') } catch { zshrc = null } }
-  return parseFileEnv(ENV_KEYS, data, zshrc, os.homedir(), environment)
+/**
+ * Proxy variables, resolved from settings or the macOS system proxy. Returned as
+ * a map instead of being pushed onto process.env alone because Bun does not hand
+ * a child the variables this process added after startup — every spawn site
+ * passes them explicitly (covered by summary.test.ts).
+ */
+function proxyEnv(s: Settings): Record<string, string> {
+  const url = s.https_proxy || s.HTTPS_PROXY || s.http_proxy || s.HTTP_PROXY || s.all_proxy || s.ALL_PROXY
+    || (s.LOCAL_PROXY_HOST && s.LOCAL_PROXY_PORT ? `http://${s.LOCAL_PROXY_HOST}:${s.LOCAL_PROXY_PORT}` : '')
+    || systemProxyUrl()
+  if (!url) return {}
+  const env: Record<string, string> = {}
+  for (const key of ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']) env[key] = s[key] || url
+  const base = s.LOCAL_NO_PROXY || s.no_proxy || s.NO_PROXY || 'localhost,127.0.0.1,::1'
+  const bypass = [...new Set([...base.split(',').map(v => v.trim()).filter(Boolean), ...VOLCANO_NO_PROXY_HOSTS])].join(',')
+  env.no_proxy = bypass
+  env.NO_PROXY = bypass
+  return env
 }
 
-let envConfigLoaded = false
-function loadEnvConfig(): void {
-  if (envConfigLoaded) return
-  envConfigLoaded = true
-  // Precedence: process.env > config.json (GUI) > ~/.zshrc (legacy); an
-  // explicit empty string in the environment is never overridden.
-  const toApply = hydrateFromFileEnv(ENV_KEYS, process.env, fileProvidedEnv(process.env))
-  for (const [key, v] of Object.entries(toApply)) { process.env[key] = v; hydratedEnvKeys.add(key) }
-  // Derive http_proxy etc. from LOCAL_PROXY_HOST/PORT regardless of source, and
-  // always keep Volcano hosts on NO_PROXY. (Runs even with no config files.)
-  applyDerivedProxy()
-}
-
-// Re-hydrate after config.json changes. Needed by the long-lived `vn serve`:
-// without this, a GUI config edit only reaches OTHER processes (vn run reads
-// the file fresh each start), while serve's own doctor kept reporting stale
-// values and ensure_agent re-embedded them into the scheduler env on
-// reinstall. Only hydrated/derived keys are dropped — real environment
-// variables keep their precedence (a real-env no_proxy stays merged in place;
-// its pre-merge original survives in premergeRealNoProxy, and the volcano
-// merge is idempotent on the next pass).
-function reloadEnvConfig(): void {
-  for (const k of hydratedEnvKeys) delete process.env[k]
-  hydratedEnvKeys.clear()
-  envConfigLoaded = false
-  loadEnvConfig()
-}
-
-function getVolcanoConfigFromEnv(): VolcanoConfig | null {
-  const apiKey = process.env.VOLCANO_ASR_KEY || ''
-  const tosAccess = process.env.VOLCANO_TOS_ACCESS_KEY
-  const tosSecret = process.env.VOLCANO_TOS_SECRET_KEY
-  const bucket = process.env.VOLCANO_TOS_BUCKET
+function volcanoFrom(s: Settings): VolcanoConfig | null {
+  const apiKey = s.VOLCANO_ASR_KEY || ''
+  const tosAccess = s.VOLCANO_TOS_ACCESS_KEY
+  const tosSecret = s.VOLCANO_TOS_SECRET_KEY
+  const bucket = s.VOLCANO_TOS_BUCKET
   if (!apiKey || !tosAccess || !tosSecret || !bucket) return null
-  const region = process.env.VOLCANO_TOS_REGION || 'cn-hongkong'
-  const endpoint = process.env.VOLCANO_TOS_ENDPOINT || `tos-s3-${region}.volces.com`
-  const keep = ['1', 'true', 'yes'].includes((process.env.VOLCANO_TOS_KEEP || '0').toLowerCase())
+  const region = s.VOLCANO_TOS_REGION || 'cn-guangzhou'
+  const endpoint = s.VOLCANO_TOS_ENDPOINT || `tos-s3-${region}.volces.com`
+  const keep = ['1', 'true', 'yes'].includes((s.VOLCANO_TOS_KEEP || '0').toLowerCase())
   return {
     apiKey,
-    resourceId: process.env.VOLCANO_ASR_RESOURCE_ID || 'volc.seedasr.auc',
-    language: process.env.VOLCANO_ASR_LANGUAGE || undefined,
+    resourceId: s.VOLCANO_ASR_RESOURCE_ID || 'volc.seedasr.auc',
+    language: s.VOLCANO_ASR_LANGUAGE || undefined,
     tos: { endpoint, region, bucket, accessKey: tosAccess, secretKey: tosSecret, keep },
   }
 }
@@ -298,22 +225,67 @@ function volcanoAuthHeaders(volc: VolcanoConfig, taskId: string, includeSequence
   return base
 }
 
+function settingNumber(s: Settings, key: string, fallback: number): number {
+  const raw = s[key]
+  const value = raw === undefined || raw === '' ? fallback : Number(raw)
+  if (!Number.isFinite(value) || value < 0) throw new Error(`Invalid ${key}: expected a non-negative number, got '${raw}'`)
+  return value
+}
+
+let configCache: Config | null = null
+
 function getConfig(): Config {
-  loadEnvConfig()
-  const deviceVolume = process.env.VOICENOTE_DEVICE_VOLUME || 'VTR6500'
-  const recordDir = process.env.VOICENOTE_RECORD_DIR || `/Volumes/${deviceVolume}/RECORD`
-  return {
-    deviceVolume,
-    recordDir,
-    workspace: expandHome(process.env.VOICENOTE_WORKSPACE || '~/Documents/meetings'),
-    minBytes: Number(process.env.VOICENOTE_MIN_BYTES || 100000),
-    minDurationSeconds: Number(process.env.VOICENOTE_MIN_DURATION_SECONDS || 60),
+  if (configCache) return configCache
+  const file = loadConfigJson()
+  const s = readSettings(file)
+  const proxy = proxyEnv(s)
+  // vn's own fetch (the ChatGPT OAuth flow) reads the proxy from the process
+  // environment, so the derived values have to land there as well.
+  for (const [key, value] of Object.entries(proxy)) process.env[key] = value
+  // Passed to every child: the proxy, plus the credentials and config dir that
+  // pi — not vn — resolves for itself.
+  const childEnv = { ...proxy }
+  for (const key of ['PI_CODING_AGENT_DIR', 'OPENAI_API_KEY', 'DEEPSEEK_API_KEY']) if (s[key]) childEnv[key] = s[key]!
+
+  const deviceVolume = s.VOICENOTE_DEVICE_VOLUME || 'VTR6500'
+  const workspace = expandHome(s.VOICENOTE_WORKSPACE || '~/Documents/meetings')
+  // pi keeps credentials in its config dir, which PI_CODING_AGENT_DIR relocates.
+  // Point it at a voicenote-owned directory to get an auth.json that only the
+  // pipeline reads and refreshes: an interactive pi session rewrites its own
+  // auth.json wholesale on exit and has already dropped entries that way.
+  const piAgentDir = expandHome(s.PI_CODING_AGENT_DIR || join(os.homedir(), '.pi', 'agent'))
+  configCache = Object.freeze({
+    recordDir: expandHome(s.VOICENOTE_RECORD_DIR || `/Volumes/${deviceVolume}/RECORD`),
+    workspace,
+    minBytes: settingNumber(s, 'VOICENOTE_MIN_BYTES', 100000),
+    minDurationSeconds: settingNumber(s, 'VOICENOTE_MIN_DURATION_SECONDS', 60),
     // Only recordings from the last N hours are picked up (0 = no limit), so a
     // fresh install doesn't drain the recorder's entire history.
-    maxAgeHours: Number(process.env.VOICENOTE_MAX_AGE_HOURS || 48),
-    volcano: getVolcanoConfigFromEnv(),
-    speakers: loadSpeakers(),
-  }
+    maxAgeHours: settingNumber(s, 'VOICENOTE_MAX_AGE_HOURS', 48),
+    volcano: volcanoFrom(s),
+    speakers: normalizeSpeakers(file.speakers ?? DEFAULT_SPEAKERS),
+    // ffprobe is the only ffmpeg-suite binary the pipeline uses (duration
+    // detection); a configurable path lets the GUI point at its bundled copy.
+    ffprobeBin: expandHome(s.VOICENOTE_FFPROBE_BIN || 'ffprobe'),
+    pi: {
+      bin: expandHome(s.VOICENOTE_PI_BIN || 'pi'),
+      cli: s.VOICENOTE_PI_CLI ? expandHome(s.VOICENOTE_PI_CLI) : null,
+      // pi's --model accepts "provider/id" (e.g. openai-codex/gpt-5.6-sol), so
+      // this one setting pins both. Null = whatever pi is configured to use.
+      model: (s.VOICENOTE_PI_MODEL || '').trim() || null,
+      thinking: s.VOICENOTE_PI_THINKING || 'high',
+      // Default ON: let the summary model read/grep prior notes for cross-reference
+      // consistency. Set VOICENOTE_PI_SUMMARY_TOOLS='' to disable.
+      tools: s.VOICENOTE_PI_SUMMARY_TOOLS === undefined ? 'read,grep' : s.VOICENOTE_PI_SUMMARY_TOOLS.trim(),
+      // Directory the summary model may read/grep. The published default must not
+      // reach outside the configured workspace.
+      contextDir: expandHome(s.VOICENOTE_CONTEXT_DIR || workspace),
+      retries: Math.max(1, Math.floor(settingNumber(s, 'VOICENOTE_PI_RETRIES', 3))),
+      authPath: join(piAgentDir, 'auth.json'),
+    },
+    childEnv,
+  })
+  return configCache
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -321,12 +293,6 @@ function getConfig(): Config {
 // ────────────────────────────────────────────────────────────────────────────
 
 const DEFAULT_SPEAKERS: SpeakersConfig = { self: { name: null, aliases: [] }, known: [] }
-
-
-function loadJsonSync<T>(path: string, fallback: T): T {
-  if (!existsSync(path)) return fallback
-  try { return JSON.parse(readFileSync(path, 'utf8')) as T } catch (e) { warnSideEffect(`parse ${path}`, e); return fallback }
-}
 
 function normalizeSpeakers(data: unknown): SpeakersConfig {
   const raw = (data && typeof data === 'object') ? data as Partial<SpeakersConfig> : {}
@@ -344,34 +310,13 @@ function normalizeSpeakers(data: unknown): SpeakersConfig {
 }
 
 function loadConfigJson(): Record<string, unknown> {
-  return loadJsonSync<Record<string, unknown>>(CONFIG_ENV_PATH, {})
-}
-
-function loadSpeakers(): SpeakersConfig {
-  ensureConfigSeed()
-  const config = loadConfigJson()
-  if (config.speakers) return normalizeSpeakers(config.speakers)
-  // Backward compatibility for installs created before speakers moved into config.json.
-  return normalizeSpeakers(loadJsonSync<unknown>(SPEAKERS_PATH, DEFAULT_SPEAKERS))
-}
-
-
-let configSeeded = false
-function ensureConfigSeed(): void {
-  if (configSeeded) return
-  configSeeded = true
-  try {
-    if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true })
-
-    const current = loadConfigJson()
-    if (!current.speakers) {
-      const legacy = existsSync(SPEAKERS_PATH) ? loadJsonSync<unknown>(SPEAKERS_PATH, DEFAULT_SPEAKERS) : DEFAULT_SPEAKERS
-      current.speakers = normalizeSpeakers(legacy)
-      writeFileSync(CONFIG_ENV_PATH, JSON.stringify(current, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 })
-    }
-  } catch {
-    // Don't crash if we can't seed; commands still work with defaults in memory.
+  if (!existsSync(CONFIG_ENV_PATH)) return {}
+  let value: unknown
+  try { value = JSON.parse(readFileSync(CONFIG_ENV_PATH, 'utf8')) } catch (e: any) {
+    throw new Error(`${CONFIG_ENV_PATH} is invalid JSON: ${e?.message || e}`)
   }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${CONFIG_ENV_PATH} must contain a JSON object`)
+  return value as Record<string, unknown>
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -379,9 +324,7 @@ function ensureConfigSeed(): void {
 // ────────────────────────────────────────────────────────────────────────────
 
 function expandHome(path: string): string {
-  if (path === '~') return os.homedir()
-  if (path.startsWith('~/')) return join(os.homedir(), path.slice(2))
-  return path
+  return path.replace(/^(?:~|\$\{?HOME\}?)(?=\/|$)/, os.homedir())
 }
 
 function nowIso(): string { return new Date().toISOString() }
@@ -415,11 +358,6 @@ async function ensureDirs(config: Config): Promise<void> {
   for (const dir of ['_state', '_index', '_audio', '_transcripts', '_metadata']) {
     await mkdir(join(config.workspace, dir), { recursive: true })
   }
-}
-
-async function readJson<T>(path: string, fallback: T): Promise<T> {
-  if (!existsSync(path)) return fallback
-  try { return JSON.parse(await readFile(path, 'utf8')) as T } catch (e) { warnSideEffect(`parse ${path}`, e); return fallback }
 }
 
 // Write via tmp+rename so readers only ever see a complete file. Anything whose
@@ -554,9 +492,8 @@ function normalizeRunMode(opts: any): RunMode {
 // Single-instance mutual exclusion via an OS advisory lock (flock) held on an open
 // fd. The kernel releases it automatically when the process exits — including
 // SIGKILL/crash — so there is NO pid / mtime / heartbeat / stale-steal logic to
-// race on. flock is loaded from libSystem (macOS). On Windows we instead use a
-// pid+timestamp lockfile (acquireRunLockWindows); on Linux flock is unavailable
-// via this path and we degrade to no cross-process lock with a warning.
+// race on. flock is loaded from libSystem, so it is macOS-only; every other
+// platform uses the pid+timestamp lockfile below.
 const flockFn = (() => {
   try {
     const lib = dlopen(`libSystem.${suffix}`, { flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } })
@@ -566,9 +503,9 @@ const flockFn = (() => {
 const FLOCK_EX_NB = 2 | 4  // LOCK_EX | LOCK_NB
 const FLOCK_UN = 8
 
-// Windows lock: no flock here. A pid+timestamp lockfile, created atomically with
-// 'wx'. We only reclaim an existing lock when its owner pid is dead OR the lock is
-// stale (older than STALE_MS). The holder refreshes its timestamp every 5 minutes
+// Lockfile used wherever flock is not available (Windows, Linux). A pid+timestamp
+// file, created atomically with 'wx'. We only reclaim an existing lock when its
+// owner pid is dead OR the lock is stale (older than STALE_MS). The holder refreshes its timestamp every 5 minutes
 // (heartbeat below), so a legitimately long RUNNING job — ASR on a multi-hour
 // recording — never looks stale. The staleness escape exists for the pid-reuse
 // false positive (owner died, an unrelated process now has its pid, the aliveness
@@ -580,7 +517,7 @@ const FLOCK_UN = 8
 // to cover a manual `vn run` racing the scheduled one. The tiny create/reclaim
 // window is acceptable: its failure mode is conservatively skipping one run (same
 // as mac when flock is already held).
-async function acquireRunLockWindows(): Promise<{ release: () => Promise<void> } | null> {
+async function acquireRunLockFile(): Promise<{ release: () => Promise<void> } | null> {
   await mkdir(dirname(LOCK_PATH), { recursive: true })
   const STALE_MS = 30 * 60 * 1000
   const tryCreate = (): number | null => {
@@ -593,7 +530,7 @@ async function acquireRunLockWindows(): Promise<{ release: () => Promise<void> }
     try {
       const data = JSON.parse(readFileSync(LOCK_PATH, 'utf8'))
       const pid = Number(data.pid), ts = Number(data.ts)
-      const alive = pid > 0 && (() => { try { process.kill(pid, 0); return true } catch (e: any) { return e?.code === 'EPERM' } })()
+      const alive = pidAlive(pid)
       const fresh = Number.isFinite(ts) && (Date.now() - ts) < STALE_MS
       reclaim = !alive || !fresh
     } catch { reclaim = true }  // unreadable/corrupt lock -> reclaim
@@ -625,12 +562,12 @@ async function acquireRunLockWindows(): Promise<{ release: () => Promise<void> }
       console.error('Run lock was reclaimed by another process (machine slept >30min?); this run continues but is no longer protected against overlap.')
       return
     }
-    if (owner === 'unknown') { warnSideEffect('windows lock heartbeat read', new Error('lock unreadable this tick; will retry')); return }
+    if (owner === 'unknown') { warnSideEffect('run lock heartbeat read', new Error('lock unreadable this tick; will retry')); return }
     try {
       const tmp = `${LOCK_PATH}.hb-${process.pid}`
       writeFileSync(tmp, JSON.stringify({ pid: process.pid, ts: Date.now() }))
       renameSync(tmp, LOCK_PATH) // atomic replace, also on Windows
-    } catch (e) { warnSideEffect('windows lock heartbeat', e) }
+    } catch (e) { warnSideEffect('run lock heartbeat', e) }
   }, 5 * 60 * 1000)
   ;(heartbeat as any).unref?.()
   let released = false
@@ -653,12 +590,8 @@ async function acquireRunLockWindows(): Promise<{ release: () => Promise<void> }
 }
 
 async function acquireRunLock(): Promise<{ release: () => Promise<void> } | null> {
-  if (IS_WINDOWS) return acquireRunLockWindows()
+  if (!flockFn) return acquireRunLockFile()
   await mkdir(dirname(LOCK_PATH), { recursive: true })
-  if (!flockFn) {
-    console.error('Warning: flock unavailable on this runtime; proceeding without cross-process locking.')
-    return { release: async () => {} }
-  }
   // The lock is a regular file we keep open. Builds ≤ 0.15.2 used a *directory*
   // here, held purely by its existence, with no pid or refreshed mtime inside — so
   // a leftover legacy dir carries NO reliable signal about whether an old `vn run`
@@ -780,7 +713,7 @@ async function tailFiles(files: string[], lines: number, follow: boolean): Promi
           } else if (size < prev) {
             sizes.set(f, size) // rotated/truncated
           }
-        } catch {}
+        } catch (e) { warnSideEffect(`follow ${f}`, e) }
       }
       if (!stop) setTimeout(poll, 1000)
     }
@@ -788,13 +721,8 @@ async function tailFiles(files: string[], lines: number, follow: boolean): Promi
   })
 }
 
-// ffprobe is the only ffmpeg-suite binary the pipeline actually uses (duration
-// detection). Resolve a configurable path so a bundled binary (GUI .app sidecar)
-// can be used without relying on PATH — mirrors the VOICENOTE_PI_BIN convention.
-function ffprobeBin(): string { return process.env.VOICENOTE_FFPROBE_BIN || 'ffprobe' }
-
-async function ffprobeDuration(path: string): Promise<number | null> {
-  const result = await runCommand(ffprobeBin(), ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', path])
+async function ffprobeDuration(config: Config, path: string): Promise<number | null> {
+  const result = await runCommand(config.ffprobeBin, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', path])
   if (result.code !== 0) return null
   const v = Number(result.stdout.trim())
   return Number.isFinite(v) ? v : null
@@ -816,13 +744,13 @@ function isCandidateFile(path: string): boolean {
  * treating a half-read device as authoritative would delete live queue entries
  * along with their retry counters.
  */
-async function toRecording(file: string): Promise<Recording> {
+async function toRecording(config: Config, file: string): Promise<Recording> {
   const st = await stat(file)
   return {
     sourcePath: file,
     sizeBytes: st.size,
     modifiedAt: st.mtime.toISOString(),
-    durationSeconds: await ffprobeDuration(file),
+    durationSeconds: await ffprobeDuration(config, file),
     sourceId: await sourceIdFor(file),
     recordedAt: parseRecordedAt(file),
   }
@@ -841,7 +769,7 @@ async function scanRecordings(config: Config): Promise<{ recordings: Recording[]
       if (!st) { complete = false; continue }
       if (!st.isFile()) continue
       try {
-        recordings.push(await toRecording(file))
+        recordings.push(await toRecording(config, file))
       } catch (e) { complete = false; warnSideEffect(`read ${basename(file)} during scan`, e) }
     }
   } catch (e) {
@@ -854,30 +782,24 @@ async function scanRecordings(config: Config): Promise<{ recordings: Recording[]
   return { recordings, complete }
 }
 
-const limitsOf = (config: Config) => ({ maxAgeHours: config.maxAgeHours, minBytes: config.minBytes, minDurationSeconds: config.minDurationSeconds })
-
 // ────────────────────────────────────────────────────────────────────────────
 // File path planning
 // ────────────────────────────────────────────────────────────────────────────
 
-function initialLocalFiles(config: Config, rec: Recording): LocalFiles {
+/**
+ * The one place the output layout is written down. A job starts out untitled
+ * (timestamp only) and moves to its titled names once the summary produces a
+ * title; pass `title` — including a null/empty one — for the titled form.
+ */
+function layout(config: Config, rec: Recording, title?: string | null): LocalFiles {
   const { month, prefix } = dateParts(rec.recordedAt)
+  const untitled = title === undefined
+  const base = untitled ? prefix : `${prefix}-${safeSlug(title || 'note')}`
   return {
-    audio: join(config.workspace, '_audio', month, `${prefix}-original${extname(rec.sourcePath).toLowerCase()}`),
-    transcript: join(config.workspace, '_transcripts', month, `${prefix}-transcript.md`),
-    notes: join(config.workspace, month, `${prefix}-note.md`),
-    metadata: join(config.workspace, '_metadata', month, `${prefix}-metadata.json`),
-  }
-}
-
-function localFilesFromState(config: Config, rec: Recording, entry: JobRecord | undefined): LocalFiles {
-  const fallback = initialLocalFiles(config, rec)
-  const paths = entry?.paths || {}
-  return {
-    audio: typeof paths.audio === 'string' ? paths.audio : fallback.audio,
-    transcript: typeof paths.transcript === 'string' ? paths.transcript : fallback.transcript,
-    notes: typeof paths.notes === 'string' ? paths.notes : fallback.notes,
-    metadata: typeof paths.metadata === 'string' ? paths.metadata : fallback.metadata,
+    audio: join(config.workspace, '_audio', month, `${base}-original${extname(rec.sourcePath).toLowerCase()}`),
+    transcript: join(config.workspace, '_transcripts', month, `${base}-transcript.md`),
+    notes: join(config.workspace, month, untitled ? `${base}-note.md` : `${base}.md`),
+    metadata: join(config.workspace, '_metadata', month, `${base}-metadata.json`),
   }
 }
 
@@ -887,7 +809,13 @@ function localFilesFromState(config: Config, rec: Recording, entry: JobRecord | 
 // even though the transcript was still sitting there.
 function resumableTranscriptFiles(config: Config, rec: Recording, store: StateFile, mode: RunMode, force: boolean): LocalFiles | null {
   if (force || mode !== 'notes') return null
-  const files = localFilesFromState(config, rec, store.jobs[rec.sourceId])
+  // Paths recorded by an earlier attempt win: that attempt may already have
+  // moved its outputs to titled names.
+  const fallback = layout(config, rec)
+  const recorded = store.jobs[rec.sourceId]?.paths || {}
+  const files = Object.fromEntries(
+    Object.entries(fallback).map(([key, path]) => [key, typeof recorded[key] === 'string' ? recorded[key] : path]),
+  ) as LocalFiles
   return existsSync(files.transcript) ? files : null
 }
 
@@ -908,120 +836,28 @@ async function removeFailedSummaryStub(path: string): Promise<void> {
   } catch (e) { warnSideEffect(`remove failed-summary stub ${path}`, e) }
 }
 
-async function titledLocalFiles(config: Config, rec: Recording, meta: Json, files: LocalFiles): Promise<LocalFiles> {
-  const { month, prefix } = dateParts(rec.recordedAt)
-  const base = `${prefix}-${safeSlug(meta.title || 'note')}`
-  const targets: LocalFiles = {
-    audio: join(config.workspace, '_audio', month, `${base}-original${extname(rec.sourcePath).toLowerCase()}`),
-    transcript: join(config.workspace, '_transcripts', month, `${base}-transcript.md`),
-    notes: join(config.workspace, month, `${base}.md`),
-    metadata: join(config.workspace, '_metadata', month, `${base}-metadata.json`),
+/**
+ * Move a job's existing outputs onto their titled paths. Audio and the
+ * transcript written before the summary ran move together — they used to be
+ * renamed in two different places, and the one left behind became an orphan.
+ * Notes and metadata are rewritten by the caller, so their stale copies from a
+ * failed attempt are dropped instead of moved.
+ */
+async function promoteOutputs(from: LocalFiles, to: LocalFiles): Promise<void> {
+  for (const key of ['audio', 'transcript'] as const) {
+    if (from[key] === to[key] || !existsSync(from[key])) continue
+    await mkdir(dirname(to[key]), { recursive: true })
+    if (existsSync(to[key])) await unlink(to[key])
+    await rename(from[key], to[key])
   }
-  for (const p of Object.values(targets)) await mkdir(dirname(p), { recursive: true })
-  if (existsSync(files.audio) && files.audio !== targets.audio) {
-    if (existsSync(targets.audio)) await unlink(targets.audio)
-    await rename(files.audio, targets.audio)
+  if (from.metadata !== to.metadata && existsSync(from.metadata)) {
+    await unlink(from.metadata).catch(e => warnSideEffect(`remove orphaned metadata ${from.metadata}`, e))
   }
-  return targets
 }
 
 // ───────────────────────────────────────────────────────────────────────
 // Volcano (Doubao ASR + TOS upload)
 // ───────────────────────────────────────────────────────────────────────
-
-function sha256Hex(data: Buffer | string): string {
-  return createHash('sha256').update(data).digest('hex')
-}
-
-function hmacSha256(key: Buffer | string, data: string): Buffer {
-  return createHmac('sha256', key).update(data).digest()
-}
-
-function tosCanonicalUri(key: string): string {
-  // S3 SigV4: encode each path segment, keep '/' as separator.
-  return '/' + key.split('/').map(s => encodeURIComponent(s)).join('/')
-}
-
-function tosAmzDate(now: Date = new Date()): { amzDate: string; dateStamp: string } {
-  const amzDate = now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')
-  return { amzDate, dateStamp: amzDate.slice(0, 8) }
-}
-
-function tosSigningKey(secretKey: string, dateStamp: string, region: string): Buffer {
-  const kDate = hmacSha256('AWS4' + secretKey, dateStamp)
-  const kRegion = hmacSha256(kDate, region)
-  const kService = hmacSha256(kRegion, 's3')
-  return hmacSha256(kService, 'aws4_request')
-}
-
-function tosSignRequest(tos: VolcanoTosConfig, method: 'PUT' | 'DELETE', key: string, payloadHash: string, contentType?: string): { url: string; headers: Record<string, string> } {
-  const host = `${tos.bucket}.${tos.endpoint}`
-  const { amzDate, dateStamp } = tosAmzDate()
-  const canonicalUri = tosCanonicalUri(key)
-  const headers: Record<string, string> = {
-    host,
-    'x-amz-content-sha256': payloadHash,
-    'x-amz-date': amzDate,
-  }
-  if (contentType) headers['content-type'] = contentType
-  const sortedNames = Object.keys(headers).sort()
-  const canonicalHeaders = sortedNames.map(h => `${h}:${headers[h]}\n`).join('')
-  const signedHeaders = sortedNames.join(';')
-  const canonicalRequest = [method, canonicalUri, '', canonicalHeaders, signedHeaders, payloadHash].join('\n')
-  const credentialScope = `${dateStamp}/${tos.region}/s3/aws4_request`
-  const stringToSign = ['AWS4-HMAC-SHA256', amzDate, credentialScope, sha256Hex(canonicalRequest)].join('\n')
-  const signingKey = tosSigningKey(tos.secretKey, dateStamp, tos.region)
-  const signature = hmacSha256(signingKey, stringToSign).toString('hex')
-  const authorization = `AWS4-HMAC-SHA256 Credential=${tos.accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`
-  return { url: `https://${host}${canonicalUri}`, headers: { ...headers, Authorization: authorization } }
-}
-
-function tosPresignedGet(tos: VolcanoTosConfig, key: string, expiresSeconds = 3600): string {
-  const host = `${tos.bucket}.${tos.endpoint}`
-  const { amzDate, dateStamp } = tosAmzDate()
-  const canonicalUri = tosCanonicalUri(key)
-  const credentialScope = `${dateStamp}/${tos.region}/s3/aws4_request`
-  const params: Record<string, string> = {
-    'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
-    'X-Amz-Credential': `${tos.accessKey}/${credentialScope}`,
-    'X-Amz-Date': amzDate,
-    'X-Amz-Expires': String(expiresSeconds),
-    'X-Amz-SignedHeaders': 'host',
-  }
-  const canonicalQuery = Object.keys(params).sort().map(k => `${encodeURIComponent(k)}=${encodeURIComponent(params[k]!)}`).join('&')
-  const canonicalHeaders = `host:${host}\n`
-  const canonicalRequest = ['GET', canonicalUri, canonicalQuery, canonicalHeaders, 'host', 'UNSIGNED-PAYLOAD'].join('\n')
-  const stringToSign = ['AWS4-HMAC-SHA256', amzDate, credentialScope, sha256Hex(canonicalRequest)].join('\n')
-  const signature = hmacSha256(tosSigningKey(tos.secretKey, dateStamp, tos.region), stringToSign).toString('hex')
-  return `https://${host}${canonicalUri}?${canonicalQuery}&X-Amz-Signature=${signature}`
-}
-
-async function tosUploadObject(tos: VolcanoTosConfig, localPath: string, key: string, contentType: string): Promise<void> {
-  const body = await readFile(localPath)
-  const payloadHash = sha256Hex(body)
-  const { url, headers } = tosSignRequest(tos, 'PUT', key, payloadHash, contentType)
-  const res = await fetch(url, { method: 'PUT', body, headers })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`TOS upload failed: ${res.status} ${text.slice(0, 500)}`)
-  }
-}
-
-async function tosDeleteObject(tos: VolcanoTosConfig, key: string): Promise<void> {
-  const { url, headers } = tosSignRequest(tos, 'DELETE', key, sha256Hex(''))
-  const res = await fetch(url, { method: 'DELETE', headers })
-  if (!res.ok && res.status !== 204 && res.status !== 404) {
-    const text = await res.text().catch(() => '')
-    console.log(`Warn: TOS delete returned ${res.status}: ${text.slice(0, 200)}`)
-  }
-}
-
-function volcanoFormatFromExt(ext: string): string {
-  const e = ext.replace(/^\./, '').toLowerCase()
-  if (e === 'mp3') return 'mp3'
-  if (e === 'wav') return 'wav'
-  return e || 'mp3'
-}
 
 function volcanoContentTypeFromExt(ext: string): string {
   const e = ext.replace(/^\./, '').toLowerCase()
@@ -1117,20 +953,21 @@ function volcanoFormatTranscript(result: { text?: string; utterances?: VolcanoUt
 
 async function volcanoTranscribeAudio(volc: VolcanoConfig, audioPath: string, rec: Recording): Promise<string> {
   const ext = extname(audioPath).toLowerCase() || '.mp3'
-  const format = volcanoFormatFromExt(ext)
+  const format = ext.replace(/^\./, '')
   const contentType = volcanoContentTypeFromExt(ext)
   const { month } = dateParts(rec.recordedAt)
   const key = `voicenote/${month}/${rec.sourceId}-${Date.now()}${ext}`
+  const object = tosObject(volc.tos, key)
   console.log(`Volcano: upload audio to TOS as ${key}`)
-  await withHeartbeat('upload audio to TOS', () => tosUploadObject(volc.tos, audioPath, key, contentType), 30)
+  await withHeartbeat('upload audio to TOS', () => object.write(Bun.file(audioPath), { type: contentType }), 30)
   let cleanedUp = false
   const cleanup = async () => {
     if (cleanedUp || volc.tos.keep) return
     cleanedUp = true
-    await tosDeleteObject(volc.tos, key).catch(() => {})
+    await object.delete().catch(e => warnSideEffect(`delete TOS object ${key}`, e))
   }
   try {
-    const audioUrl = tosPresignedGet(volc.tos, key, 6 * 3600)
+    const audioUrl = object.presign({ method: 'GET', expiresIn: 6 * 3600 })
     const taskId = randomUUID()
     console.log(`Volcano: submit ASR task ${taskId} (resource=${volc.resourceId}, format=${format})`)
     await volcanoSubmitTask(volc, taskId, audioUrl, format)
@@ -1192,7 +1029,7 @@ async function volcanoTranscribeAudio(volc: VolcanoConfig, audioPath: string, re
 }
 
 async function transcribeAudio(config: Config, audioPath: string, rec: Recording): Promise<string> {
-  if (!config.volcano) throw new Error('Volcano ASR not configured. Set VOLCANO_ASR_KEY / VOLCANO_TOS_* in ~/.zshrc.')
+  if (!config.volcano) throw new Error('Volcano ASR not configured. Set VOLCANO_ASR_KEY / VOLCANO_TOS_* in config.json.')
   return volcanoTranscribeAudio(config.volcano, audioPath, rec)
 }
 
@@ -1296,39 +1133,30 @@ ${transcript}`
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// Summary via pi. Provider, model and credentials are pi's own configuration:
-// we invoke `pi -p` with no --provider/--model and never fall back elsewhere,
-// so whatever the user selected in pi is what writes the notes.
+// Summary via pi. Provider and credentials are pi's own configuration. The
+// optional VOICENOTE_PI_MODEL pins a model; otherwise pi's selected model writes
+// the notes. VoiceNote does not implement a provider fallback chain.
 // ───────────────────────────────────────────────────────────────────────
-
-function piCodexBin(): string {
-  return process.env.VOICENOTE_PI_BIN || 'pi'
-}
 
 // pi can't be `bun build --compile`'d (it reads data files from disk), so the
 // bundled GUI ships pi as plain JS and runs it under a bundled bun. When
-// VOICENOTE_PI_CLI is set, piCodexBin() is the runtime (bun) and the cli.js is
-// prepended to pi's args — `<bun> <cli.js> <args>`, no wrapper script and no
-// shell (critical on Windows, where pi args include a huge --system-prompt that
-// a .cmd/%* wrapper would mangle). CLI users with a real `pi` on PATH leave
-// PI_CLI unset and pi is invoked directly.
-function piInvocation(args: string[]): { bin: string; args: string[] } {
-  const cli = process.env.VOICENOTE_PI_CLI
-  const bin = piCodexBin()
-  return cli ? { bin, args: [cli, ...args] } : { bin, args }
+// `pi.cli` is set, `pi.bin` is the runtime (bun) and the cli.js is prepended to
+// pi's args — `<bun> <cli.js> <args>`, no wrapper script and no shell (critical
+// on Windows, where pi args include a huge --system-prompt that a .cmd/%*
+// wrapper would mangle). CLI users with a real `pi` on PATH leave it unset.
+function piInvocation(pi: PiConfig, args: string[]): { bin: string; args: string[] } {
+  return pi.cli ? { bin: pi.bin, args: [pi.cli, ...args] } : { bin: pi.bin, args }
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// ChatGPT (OpenAI Codex) OAuth login — headless device-code flow.
-// Today the only way to authenticate the pi summary backend is to open pi's
-// interactive TUI and run `/login`. This exposes the same flow as a plain
-// command so non-TUI users (and the GUI client, via --json) can sign in.
+// ChatGPT (OpenAI Codex) OAuth login. The browser callback is the default;
+// --device-code is available for accounts that opted into that flow. This
+// exposes pi's login as a plain command for non-TUI and GUI users.
 // We reuse pi's own OAuth implementation (@earendil-works/pi-ai) and persist
 // to pi's auth.json in the exact shape it reads: { type: 'oauth', ...creds }.
 // ───────────────────────────────────────────────────────────────────────
 
-async function persistPiOAuth(providerId: string, creds: Record<string, unknown>): Promise<void> {
-  const authPath = piAuthPath()
+async function persistPiOAuth(authPath: string, providerId: string, creds: Record<string, unknown>): Promise<void> {
   await mkdir(dirname(authPath), { recursive: true })
   let existing: Json = {}
   if (existsSync(authPath)) {
@@ -1341,9 +1169,9 @@ async function persistPiOAuth(providerId: string, creds: Record<string, unknown>
 }
 
 async function loginChatGPT(opts: { json?: boolean; deviceCode?: boolean; emit?: (o: Record<string, unknown>) => void }): Promise<void> {
-  // OpenAI's OAuth endpoint is geo-blocked in some regions; hydrate the proxy
-  // env (LOCAL_PROXY_HOST/PORT -> http_proxy) before any request goes out.
-  loadEnvConfig()
+  // OpenAI's OAuth endpoint is geo-blocked in some regions; getConfig() resolves
+  // the proxy into this process's env before any request goes out.
+  const authPath = getConfig().pi.authPath
   const json = !!opts.json
   const emit = opts.emit ?? ((o: Record<string, unknown>) => { if (json) console.log(JSON.stringify(o)) })
   try {
@@ -1385,9 +1213,9 @@ async function loginChatGPT(opts: { json?: boolean; deviceCode?: boolean; emit?:
         },
       }) as Record<string, unknown>
     }
-    await persistPiOAuth(oauth.openaiCodexOAuthProvider.id, creds)
+    await persistPiOAuth(authPath, oauth.openaiCodexOAuthProvider.id, creds)
     if (json) emit({ event: 'success', provider: oauth.openaiCodexOAuthProvider.id })
-    else console.log(`\n✓ Signed in. Credentials saved to ${piAuthPath()}. Verify with: vn doctor`)
+    else console.log(`\n✓ Signed in. Credentials saved to ${authPath}. Verify with: vn doctor`)
   } catch (e: any) {
     let message = String(e?.message || e)
     if (/unsupported_country_region_territory|\b403\b/.test(message)) {
@@ -1415,18 +1243,18 @@ function readStdin(): Promise<string> {
   })
 }
 
-function configFileEnv(): Record<string, string> {
-  const raw = loadConfigJson()
+function configFileEnv(raw = loadConfigJson()): Record<string, string> {
   const env: Record<string, string> = {}
   for (const k of ENV_KEYS) if (typeof raw[k] === 'string') env[k] = raw[k] as string
   return env
 }
 
 function configGetData(): { path: string; env: Record<string, string>; self: { name: string | null; aliases: string[] } } {
-  const speakers = loadSpeakers()
+  const current = loadConfigJson()
+  const speakers = normalizeSpeakers(current.speakers ?? DEFAULT_SPEAKERS)
   return {
     path: CONFIG_ENV_PATH,
-    env: configFileEnv(),
+    env: configFileEnv(current),
     self: { name: speakers.self.name, aliases: speakers.self.aliases },
   }
 }
@@ -1435,37 +1263,39 @@ function configGet(): void { console.log(JSON.stringify(configGetData(), null, 2
 
 type ConfigSetPayload = { env?: Record<string, unknown>; self?: { name?: string | null; aliases?: string[] } }
 
-async function configSetData(payload: ConfigSetPayload): Promise<{ ok: true; path: string; ignoredKeys?: string[] }> {
+async function writeConfigJson(value: Record<string, unknown>): Promise<void> {
   await mkdir(CONFIG_DIR, { recursive: true })
+  const tmp = `${CONFIG_ENV_PATH}.tmp-${process.pid}`
+  await writeFile(tmp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 })
+  await rename(tmp, CONFIG_ENV_PATH)
+}
 
-  // Merge env into config.json (only known ENV_KEYS; null deletes a key).
+async function configSetData(payload: ConfigSetPayload): Promise<{ ok: true; path: string; ignoredKeys?: string[] }> {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('Config payload must be a JSON object')
   const current = loadConfigJson()
   const known = ENV_KEYS as readonly string[]
   const ignored: string[] = []
   if (payload.env) {
-    for (const [k, v] of Object.entries(payload.env)) {
-      if (!known.includes(k)) { ignored.push(k); continue }
-      if (v === null) delete current[k]
-      else if (typeof v === 'string') current[k] = v
+    for (const [key, value] of Object.entries(payload.env)) {
+      if (!known.includes(key)) { ignored.push(key); continue }
+      if (value === null) delete current[key]
+      else if (typeof value === 'string') current[key] = value
+      else throw new Error(`Config value ${key} must be a string or null`)
     }
   }
-  const tmp = `${CONFIG_ENV_PATH}.tmp-${process.pid}`
-  await writeFile(tmp, JSON.stringify(current, null, 2) + '\n', { mode: 0o600 })
-  await rename(tmp, CONFIG_ENV_PATH)
-
-  // Identity lives in config.json too; speakers.json is read only as a legacy fallback.
   if (payload.self) {
-    const speakers = normalizeSpeakers(current.speakers ?? loadSpeakers())
-    if (payload.self.name !== undefined) speakers.self.name = payload.self.name
-    if (Array.isArray(payload.self.aliases)) speakers.self.aliases = payload.self.aliases
+    const speakers = normalizeSpeakers(current.speakers ?? DEFAULT_SPEAKERS)
+    if (payload.self.name !== undefined) {
+      if (payload.self.name !== null && typeof payload.self.name !== 'string') throw new Error('self.name must be a string or null')
+      speakers.self.name = payload.self.name
+    }
+    if (payload.self.aliases !== undefined) {
+      if (!Array.isArray(payload.self.aliases) || payload.self.aliases.some(alias => typeof alias !== 'string')) throw new Error('self.aliases must contain only strings')
+      speakers.self.aliases = payload.self.aliases
+    }
     current.speakers = speakers
-    await writeFile(tmp, JSON.stringify(current, null, 2) + '\n', { mode: 0o600 })
-    await rename(tmp, CONFIG_ENV_PATH)
   }
-
-  // Make the new values visible to THIS process immediately (see reloadEnvConfig).
-  reloadEnvConfig()
-
+  await writeConfigJson(current)
   return { ok: true, path: CONFIG_ENV_PATH, ...(ignored.length ? { ignoredKeys: ignored } : {}) }
 }
 
@@ -1488,15 +1318,10 @@ async function configSet(): Promise<void> {
   }
 }
 
-function stripJsonFences(text: string): string {
-  const trimmed = text.trim()
-  const fence = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```\s*$/i)
-  if (fence) return fence[1]!.trim()
-  return trimmed
-}
-
 function extractFirstJsonObject(text: string): string {
-  const trimmed = stripJsonFences(text)
+  const raw = text.trim()
+  // Models often wrap JSON in a ```json fence; strip it before looking inside.
+  const trimmed = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```\s*$/i)?.[1]?.trim() ?? raw
   if (trimmed.startsWith('{') && trimmed.endsWith('}')) return trimmed
   // Find the first balanced {...}
   let depth = 0, start = -1, inString = false, escape = false
@@ -1515,7 +1340,7 @@ function extractFirstJsonObject(text: string): string {
   return trimmed
 }
 
-async function runPi(opts: {
+type PiRunOptions = {
   systemPrompt: string
   userPrompt: string
   timeoutMs?: number
@@ -1523,7 +1348,9 @@ async function runPi(opts: {
   tools?: string  // e.g. 'read,grep'; empty/undefined = --no-tools
   appendSystemPrompt?: string
   cwd?: string  // agent working dir: the knowledge base, so read/grep/find default there
-}): Promise<string> {
+}
+
+async function runPi(config: Config, opts: PiRunOptions): Promise<string> {
   const args = [
     '-p',
     '--mode', 'text',
@@ -1532,15 +1359,14 @@ async function runPi(opts: {
   ]
   // Unset means pi's own default model and provider. There is no second
   // provider to fall back to either way.
-  const model = piSummaryModel()
-  if (model) args.push('--model', model)
+  if (config.pi.model) args.push('--model', config.pi.model)
   if (opts.thinking) args.push('--thinking', opts.thinking)
   if (opts.tools && opts.tools.trim()) args.push('--tools', opts.tools.trim())
   else args.push('--no-tools')
   if (opts.appendSystemPrompt) args.push('--append-system-prompt', opts.appendSystemPrompt)
   return new Promise<string>((resolve, reject) => {
-    const inv = piInvocation(args)
-    const child = spawn(inv.bin, inv.args, { stdio: ['pipe', 'pipe', 'pipe'], cwd: opts.cwd, windowsHide: true, env: { ...process.env, ...childProxyEnv } })
+    const inv = piInvocation(config.pi, args)
+    const child = spawn(inv.bin, inv.args, { stdio: ['pipe', 'pipe', 'pipe'], cwd: opts.cwd, windowsHide: true, env: { ...process.env, ...config.childEnv } })
     let stdout = '', stderr = ''
     const timer = opts.timeoutMs ? setTimeout(() => child.kill('SIGKILL'), opts.timeoutMs) : null
     child.stdout.on('data', d => stdout += String(d))
@@ -1572,11 +1398,11 @@ function isTransientPiError(e: any): boolean {
   return /socket connection was closed|socket hang up|econnreset|etimedout|esockettimedout|enetunreach|econnrefused|eai_again|fetch failed|network error|timed ?out|temporarily|overloaded|\b(429|500|502|503|504)\b/.test(msg)
 }
 
-async function chatCompleteViaPi(opts: Parameters<typeof runPi>[0]): Promise<string> {
-  const maxAttempts = Math.max(1, Number(process.env.VOICENOTE_PI_RETRIES || 3))
+async function chatCompleteViaPi(config: Config, opts: PiRunOptions): Promise<string> {
+  const maxAttempts = config.pi.retries
   for (let attempt = 1; ; attempt++) {
     try {
-      return await runPi(opts)
+      return await runPi(config, opts)
     } catch (e: any) {
       if (attempt >= maxAttempts || !isTransientPiError(e)) throw e
       const backoffMs = Math.min(30000, 2000 * 2 ** (attempt - 1))
@@ -1584,32 +1410,6 @@ async function chatCompleteViaPi(opts: Parameters<typeof runPi>[0]): Promise<str
       await new Promise(res => setTimeout(res, backoffMs))
     }
   }
-}
-
-// pi's --model accepts "provider/id" (e.g. openai-codex/gpt-5.6-sol), so this one
-// setting pins both. Empty/unset = whatever pi is configured to use.
-function piSummaryModel(): string {
-  return (process.env.VOICENOTE_PI_MODEL || '').trim()
-}
-
-function piThinkingLevel(): string {
-  return process.env.VOICENOTE_PI_THINKING || 'high'
-}
-
-function piSummaryTools(): string {
-  // Default ON: let the summary model read/grep prior notes for cross-reference consistency.
-  // Set VOICENOTE_PI_SUMMARY_TOOLS='' (empty) to disable.
-  const v = process.env.VOICENOTE_PI_SUMMARY_TOOLS
-  if (v === undefined) return 'read,grep'
-  return v.trim()
-}
-
-function summaryContextDir(config: Config): string {
-  // Directory the summary model may read/grep for cross-reference consistency.
-  // Defaults to the workspace itself. Users can opt into a wider notes/vault
-  // directory with VOICENOTE_CONTEXT_DIR, but the published default must not
-  // read outside the configured workspace.
-  return expandHome(process.env.VOICENOTE_CONTEXT_DIR || config.workspace)
 }
 
 function piSummaryToolsHint(contextDir: string): string {
@@ -1621,17 +1421,17 @@ function piSummaryToolsHint(contextDir: string): string {
 // missing, say so loudly and run without tools rather than searching the wrong
 // tree (tools, the cwd hint, and the spawn cwd move together).
 async function chatComplete(opts: { systemPrompt: string; userPrompt: string; config: Config }): Promise<string> {
-  const wantTools = !!piSummaryTools()
-  const ctx = wantTools ? summaryContextDir(opts.config) : undefined
+  const { pi } = opts.config
+  const ctx = pi.tools ? pi.contextDir : undefined
   const ctxExists = ctx ? existsSync(ctx) : false
   if (ctx && !ctxExists) console.error(`Warning: context dir ${ctx} does not exist; summary agent runs WITHOUT read/grep cross-reference.`)
-  const toolsActive = wantTools && ctxExists
-  return chatCompleteViaPi({
+  const toolsActive = !!ctx && ctxExists
+  return chatCompleteViaPi(opts.config, {
     systemPrompt: opts.systemPrompt,
     userPrompt: opts.userPrompt,
     timeoutMs: 60 * 60 * 1000,
-    thinking: piThinkingLevel(),
-    tools: toolsActive ? piSummaryTools() : undefined,
+    thinking: pi.thinking,
+    tools: toolsActive ? pi.tools : undefined,
     appendSystemPrompt: toolsActive ? piSummaryToolsHint(ctx!) : undefined,
     cwd: toolsActive ? ctx : undefined,
   })
@@ -1671,14 +1471,14 @@ function normalizeMetadata(meta: Json, rec: Recording): Json {
 }
 
 const SOURCE_MARKER = '<!-- voicenote:source -->'
-function sourceDetails(meta: Json, audioPath: string, transcriptPath: string): string {
+function sourceDetails(audioPath: string, transcriptPath: string): string {
   return `${SOURCE_MARKER}\n<details>\n<summary>Source</summary>\n\n- Generated by: voicenote automatic transcription\n- Original audio: \`${audioPath}\`\n- Full transcript: \`${transcriptPath}\`\n\n</details>`
 }
 
 function markdownNotes(meta: Json, audioPath: string, transcriptPath: string): string {
   let body = typeof meta.markdown === 'string' && meta.markdown.trim() ? meta.markdown.trim() : `# ${meta.title || 'Untitled recording notes'}\n`
   if (!body.startsWith('#')) body = `# ${meta.title || 'Untitled recording notes'}\n\n${body}`
-  if (!body.includes(SOURCE_MARKER)) body = `${body.trim()}\n\n${sourceDetails(meta, audioPath, transcriptPath)}`
+  if (!body.includes(SOURCE_MARKER)) body = `${body.trim()}\n\n${sourceDetails(audioPath, transcriptPath)}`
   return `${body.trim()}\n`
 }
 
@@ -1730,7 +1530,7 @@ function transcriptMarkdown(config: Config, rec: Recording, transcript: string, 
 
 async function processRecording(config: Config, rec: Recording, opts: any): Promise<Json> {
   const jobStarted = Date.now()
-  let files = (opts.resumeFromTranscriptFiles as LocalFiles | null) || initialLocalFiles(config, rec)
+  let files = (opts.resumeFromTranscriptFiles as LocalFiles | null) || layout(config, rec)
   const mode = normalizeRunMode(opts)
   const needsNotes = mode === 'notes'
   const resumeSummary = needsNotes && Boolean(opts.resumeFromTranscriptFiles)
@@ -1788,7 +1588,7 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
 
   let summaryError: any = null
   if (needsNotes) {
-    progressStep(nextStep(), totalSteps, 'Generate integrated semantic notes', `via pi, model=${piSummaryModel() || "pi's own default"}`)
+    progressStep(nextStep(), totalSteps, 'Generate integrated semantic notes', `via pi, model=${config.pi.model || "pi's own default"}`)
     try {
       meta = await withHeartbeat('generate integrated semantic notes', () => summarizeTranscript(config, transcript, rec, files.audio), 60)
     } catch (e: any) {
@@ -1816,22 +1616,13 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
   progressStep(nextStep(), totalSteps, 'Write outputs and index')
   let failedStubPathToRemove: string | null = null
   if (needsNotes && !summaryError) {
-    const previousNotes = files.notes
-    const previousMetadata = files.metadata
-    const titled = await titledLocalFiles(config, rec, meta, files)
-    // titledLocalFiles renames the audio; manually move our already-written transcript too.
-    if (titled.transcript !== files.transcript && existsSync(files.transcript)) {
-      await mkdir(dirname(titled.transcript), { recursive: true })
-      if (existsSync(titled.transcript)) await unlink(titled.transcript)
-      await rename(files.transcript, titled.transcript)
-    }
+    const titled = layout(config, rec, meta.title)
+    await promoteOutputs(files, titled)
+    // The stub note of a failed attempt is removed only after the real note is
+    // written, so a failure in between still leaves the user a pointer to the
+    // saved transcript.
+    if (files.notes !== titled.notes) failedStubPathToRemove = files.notes
     files = titled
-    if (previousNotes !== files.notes) failedStubPathToRemove = previousNotes
-    // Resuming a failed run whose title changed leaves the old untitled metadata
-    // from the failed attempt orphaned (note stub is handled above; metadata was not).
-    if (previousMetadata !== files.metadata && existsSync(previousMetadata)) {
-      await unlink(previousMetadata).catch(e => warnSideEffect(`remove orphaned metadata ${previousMetadata}`, e))
-    }
   }
   await mkdir(dirname(files.notes), { recursive: true })
   await mkdir(dirname(files.metadata), { recursive: true })
@@ -1911,7 +1702,7 @@ async function loadState(config: Config): Promise<StateFile> {
     return migrateLegacyState(await readLegacyState(config), nowIso())
   }
   const store = existsSync(path) ? parseStateFile(await readFile(path, 'utf8'), path) : emptyState()
-  lastSavedState.set(path, JSON.stringify(store))
+  lastSavedState = JSON.stringify(store)
   return store
 }
 
@@ -1925,23 +1716,19 @@ async function migrateStateOnDisk(config: Config): Promise<void> {
   if (existsSync(path) || !existsSync(legacy)) return
   const store = migrateLegacyState(await readLegacyState(config), nowIso())
   await writeJson(path, store)
-  lastSavedState.set(path, JSON.stringify(store))
+  lastSavedState = JSON.stringify(store)
   await rename(legacy, `${legacy}.v1.bak`).catch(e => warnSideEffect('archive pre-0.18 state', e))
   console.log(`Converted ${basename(legacy)} → ${basename(path)} (${Object.keys(store.jobs).length} records; old file kept as .v1.bak)`)
 }
 
-// The scheduler ticks every 60s and the workspace is often a synced folder
-// (iCloud/Dropbox). Rewriting an unchanged state file on every tick would be
-// pure sync noise, so writes are content-gated. Keyed by path, not a single
-// value: `vn serve` handles config.set (which can move the workspace) and runs
-// in one process, and a shared key could skip the first write to a new path.
-const lastSavedState = new Map<string, string>()
+// Workspaces are often synced folders; skip writes when a run did not change
+// the state.
+let lastSavedState = ''
 async function saveState(config: Config, store: StateFile): Promise<void> {
-  const path = statePathFor(config)
   const serialized = JSON.stringify(store)
-  if (serialized === lastSavedState.get(path)) return
-  await writeJson(path, store)
-  lastSavedState.set(path, serialized)
+  if (serialized === lastSavedState) return
+  await writeJson(statePathFor(config), store)
+  lastSavedState = serialized
 }
 
 /** Upsert the scan-time facts; never touches lifecycle fields. */
@@ -1957,11 +1744,6 @@ function recordFor(store: StateFile, rec: Recording): JobRecord {
   next.duration_seconds = rec.durationSeconds
   store.jobs[rec.sourceId] = next
   return next
-}
-
-function setJobState(store: StateFile, id: string, patch: Partial<JobRecord>): void {
-  const entry = store.jobs[id]
-  if (entry) patchJob(entry, patch, nowIso())
 }
 
 // The live job, declared by the run itself. Lives next to run.lock (machine
@@ -1995,10 +1777,19 @@ function reportStep(step: string): void {
 }
 
 function readCurrent(): CurrentJob | null {
+  let raw: string
+  try { raw = readFileSync(CURRENT_PATH, 'utf8') } catch (e: any) {
+    if (e?.code !== 'ENOENT') warnSideEffect('read current job', e)
+    return null
+  }
+  // A damaged file means a live job shows up as queued; treating it as "no job"
+  // is the safe read, but it must not be silent.
   try {
-    const c = JSON.parse(readFileSync(CURRENT_PATH, 'utf8'))
-    return Number.isFinite(c?.pid) && typeof c?.source_id === 'string' ? c : null
-  } catch { return null }
+    const c = JSON.parse(raw)
+    if (Number.isFinite(c?.pid) && typeof c?.source_id === 'string') return c
+    warnSideEffect('read current job', new Error(`${CURRENT_PATH} has no pid/source_id`))
+  } catch (e) { warnSideEffect('read current job', e) }
+  return null
 }
 
 function pidAlive(pid: number): boolean {
@@ -2047,7 +1838,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
     return
   }
   const { recordings, complete: scanComplete } = single
-    ? { recordings: [await toRecording(single)], complete: false }
+    ? { recordings: [await toRecording(config, single)], complete: false }
     : await scanRecordings(config)
   const mode = normalizeRunMode(opts)
   const force = Boolean(opts.force)
@@ -2058,7 +1849,9 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   // idle-suppressed silence meant for the 60s scheduler tick.
   const verboseSkips = Boolean(opts.verbose || opts.dryRun || single)
   const seen = new Set<string>()
-  const limits = single ? { maxAgeHours: 0, minBytes: 0, minDurationSeconds: 0 } : limitsOf(config)
+  const limits = single
+    ? { maxAgeHours: 0, minBytes: 0, minDurationSeconds: 0 }
+    : { maxAgeHours: config.maxAgeHours, minBytes: config.minBytes, minDurationSeconds: config.minDurationSeconds }
   for (const rec of recordings) {
     seen.add(rec.sourceId)
     const entry = recordFor(store, rec)
@@ -2066,7 +1859,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
     if (verdict.run) { eligible.push(rec); continue }
     skipCounts[verdict.code] = (skipCounts[verdict.code] || 0) + 1
     ;(skipSamples[verdict.code] ||= []).push(entry.name)
-    if (verdict.persist) setJobState(store, rec.sourceId, { state: 'filtered', code: verdict.code, detail: verdict.detail })
+    if (verdict.persist) patchJob(entry, { state: 'filtered', code: verdict.code, detail: verdict.detail }, nowIso())
     if (verboseSkips) console.log(`  Skip: ${entry.name} (${verdict.code}${verdict.detail ? `: ${verdict.detail}` : ''})`)
   }
   // Only prune against a listing we believe to be complete: if the recorder went
@@ -2167,7 +1960,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
 // Bun standalone executables embed source in a virtual FS, so import.meta.url is
 // NOT a real on-disk path: "/$bunfs/..." on mac/Linux, "B:\~BUN\root\..." on
 // Windows. Either marker means we're the compiled exe (run it directly via
-// process.execPath); otherwise we're bun + cli.mjs on disk. NOTE: matching only
+// process.execPath); otherwise we're bun + cli.ts on disk. NOTE: matching only
 // $bunfs (the old check) misfired on Windows and leaked the virtual path into the
 // scheduled task's arguments.
 function resolveCli(): { cliPath: string; compiled: boolean } {
@@ -2183,47 +1976,26 @@ function xmlEscape(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;')
 }
 
-// Pulled in for `vn install-launch-agent`. launchd does NOT inherit your zsh
-// environment, so anything the pipeline needs that lives ONLY in the real
-// environment (e.g. exported from a non-zsh shell, or injected by the GUI)
-// has to be written into the plist's EnvironmentVariables. Values that came
-// from config.json/.zshrc are deliberately NOT embedded: vn run re-reads
-// those files at startup, and since plist env outranks config.json, embedding
-// them would freeze the values — later GUI edits would silently never reach
-// the background agent.
-async function launchAgentEnv(): Promise<Record<string, string>> {
-  loadEnvConfig()
+// Scheduled runs read all business settings from config.json. The plist only
+// carries a fixed PATH and desktop-bundled runtime paths that do not exist in
+// that file.
+async function launchAgentEnv(config: Config): Promise<Record<string, string>> {
   const env: Record<string, string> = {
     PATH: `${os.homedir()}/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
   }
-  // Embed only what is NOT recoverable from the config files at run time —
-  // see envConfig.ts (invariants 3+4) for the full matrix. A real-env value
-  // that differs from the file value is embedded as an override but warned
-  // about: it may equally be a stale shell session, and it will keep
-  // overriding config edits until the scheduler is reinstalled.
-  //
-  // no_proxy/NO_PROXY carry a volcano-hosts merge we added; substitute the
-  // pre-merge real-env original (or drop it entirely if we synthesized the
-  // whole value) so the scheduler never freezes our merge over config edits.
-  const embedEnv: Record<string, string | undefined> = { ...process.env }
-  for (const k of ['no_proxy', 'NO_PROXY'] as const) embedEnv[k] = premergeRealNoProxy[k]
-  const fileEnv = fileProvidedEnv()
-  const { embed, frozenOverrides } = envKeysToEmbed(ENV_KEYS, embedEnv, hydratedEnvKeys, fileEnv)
-  Object.assign(env, embed)
-  for (const k of frozenOverrides) {
-    console.error(`Warning: environment ${k} overrides the config file. Update or unset it, then re-run \`vn install-launch-agent --load\` to apply the intended value.`)
+  // Provenance matters here, so this reads the raw sources rather than Config:
+  // only paths the GUI injected into our environment (and that config.json does
+  // not already carry) have to be written into the plist.
+  const fileEnv = configFileEnv()
+  for (const key of ['VOICENOTE_PI_CLI', 'VOICENOTE_FFPROBE_BIN'] as const) {
+    if (process.env[key] && process.env[key] !== fileEnv[key]) env[key] = process.env[key]!
   }
-  // Embed pi's ABSOLUTE path so launchd resolves it regardless of the fixed plist
-  // PATH (npm global bin can live outside it under nvm / custom prefixes). Resolve
-  // the configured name (including the documented relative `VOICENOTE_PI_BIN="pi"`
-  // and a file-sourced relative name); only an absolute override is left as-is.
-  // The resolved path is regenerated on every (re)install, so config edits that
-  // change VOICENOTE_PI_BIN take effect via ensure_agent's forced reinstall.
-  const configuredPi = env.VOICENOTE_PI_BIN ?? process.env.VOICENOTE_PI_BIN
-  if (!configuredPi?.startsWith('/')) {
-    const w = await runCommand(IS_WINDOWS ? 'where' : 'which', [configuredPi || 'pi'], 5000)
-    const p = w.code === 0 ? (w.stdout.trim().split(/\r?\n/)[0] || '') : ''
-    if (p && existsSync(p)) env.VOICENOTE_PI_BIN = p
+  const configuredPi = config.pi.bin
+  if (configuredPi.startsWith('/')) env.VOICENOTE_PI_BIN = configuredPi
+  else {
+    const found = await runCommand(IS_WINDOWS ? 'where' : 'which', [configuredPi], 5000)
+    const path = found.code === 0 ? (found.stdout.trim().split(/\r?\n/)[0] || '') : ''
+    if (path && existsSync(path)) env.VOICENOTE_PI_BIN = path
   }
   return env
 }
@@ -2237,7 +2009,7 @@ async function installLaunchAgent(opts: { load?: boolean } = {}): Promise<void> 
   const plist = plistPath()
   await mkdir(dirname(plist), { recursive: true })
   await mkdir(LOG_DIR, { recursive: true })
-  const env = await launchAgentEnv()
+  const env = await launchAgentEnv(getConfig())
   const envEntries = Object.entries(env)
     .map(([k, v]) => `    <key>${xmlEscape(k)}</key>\n    <string>${xmlEscape(v)}</string>`).join('\n')
   const content = `<?xml version="1.0" encoding="UTF-8"?>
@@ -2268,9 +2040,7 @@ ${envEntries}
 </plist>
 `
   await writeFile(plist, content, 'utf8')
-  // The plist may embed real-env secrets (proxy credentials, exported keys);
-  // chmod explicitly — writeFile's mode only applies on creation, and existing
-  // plists from older installs are 0644.
+  // Keep scheduler details private and tighten permissions on older plists.
   await chmod(plist, 0o600)
   const summary = Object.keys(env).join(', ')
   console.log(`LaunchAgent written: ${plist}`)
@@ -2319,7 +2089,7 @@ async function installScheduledTask(opts: { load?: boolean } = {}): Promise<void
   await mkdir(STATE_DIR, { recursive: true })
   await mkdir(LOG_DIR, { recursive: true })
   // The task carries no env (Task Scheduler has no per-task env block), so the
-  // bundled-engine paths the GUI injected via process env (pi runtime + cli.js +
+  // bundled CLI paths the GUI injected via process env (pi runtime + cli.js +
   // ffprobe) must be persisted to config.json, which `vn run` reads on startup.
   // (On mac these ride in the LaunchAgent plist instead.)
   const persist: Record<string, string> = {}
@@ -2328,9 +2098,9 @@ async function installScheduledTask(opts: { load?: boolean } = {}): Promise<void
   }
   if (Object.keys(persist).length) {
     await mkdir(CONFIG_DIR, { recursive: true })
-    const current = loadJsonSync<Record<string, unknown>>(CONFIG_ENV_PATH, {})
+    const current = loadConfigJson()
     Object.assign(current, persist)
-    await writeFile(CONFIG_ENV_PATH, JSON.stringify(current, null, 2) + '\n')
+    await writeConfigJson(current)
   }
   const { command, argLine } = schedulerProgramArgs()
   // bun.exe / vn.exe are console-subsystem: an InteractiveToken task flashes a
@@ -2418,7 +2188,11 @@ async function uninstallScheduledTask(): Promise<void> {
   // leftover copy could make schedulerIsCurrent misjudge a future install.
   // Only when the task is actually gone — deleting the VBS while the task is
   // still registered would turn every tick into a silent wscript failure.
-  if (r.code === 0) for (const p of [taskVbsPath(), taskXmlPath()]) { try { unlinkSync(p) } catch {} }
+  if (r.code === 0) {
+    for (const p of [taskVbsPath(), taskXmlPath()]) {
+      try { unlinkSync(p) } catch (e: any) { if (e?.code !== 'ENOENT') warnSideEffect(`remove scheduler artifact ${p}`, e) }
+    }
+  }
   console.log(r.code === 0 ? `Scheduled task '${TASK_NAME}' removed.` : `schtasks /delete: ${(r.stderr || r.stdout).trim()}`)
 }
 
@@ -2466,7 +2240,7 @@ async function listMeetings(opts: { month?: string }): Promise<void> {
 async function notesIndexPath(config: Config): Promise<string> {
   const p = join(config.workspace, '_index', 'notes.jsonl')
   const legacy = join(config.workspace, '_index', 'meetings.jsonl')
-  if (!existsSync(p) && existsSync(legacy)) await rename(legacy, p).catch(() => {})
+  if (!existsSync(p) && existsSync(legacy)) await rename(legacy, p).catch(e => warnSideEffect(`rename ${legacy}`, e))
   return p
 }
 
@@ -2575,16 +2349,22 @@ async function showErrors(opts: { lines?: number }): Promise<void> {
 }
 
 async function upgradeSelf(): Promise<void> {
-  const cmd = IS_WINDOWS ? 'bun' : (existsSync('/opt/homebrew/bin/bun') ? '/opt/homebrew/bin/bun' : 'bun')
+  // The registry fetch needs the configured proxy: `bun add -g` only sees it if
+  // we pass it, because the proxy lives in config.json, not in the shell.
+  const env = { ...process.env, ...getConfig().childEnv }
+  // Plain `bun` from PATH: vn is started by bun (`#!/usr/bin/env bun`), so an
+  // interactive upgrade always has it. If it is somehow missing, the spawn error
+  // below says so instead of the command silently "failing".
   // `bun add -g` upgrades in place: verified no dependency loop on npm→npm re-add
   // (the steady-state upgrade path) nor on replacing an old git-ref install. No
   // remove-first, so a failed add leaves the running vn intact.
-  console.log(`$ ${cmd} add -g @fastagent-sh/voicenote`)
+  console.log('$ bun add -g @fastagent-sh/voicenote')
   const addCode = await new Promise<number>(res =>
-    spawn(cmd, ['add', '-g', '@fastagent-sh/voicenote'], { stdio: 'inherit', shell: IS_WINDOWS })
-      .on('close', c => res(c ?? 1)).on('error', () => res(1)))
+    spawn('bun', ['add', '-g', '@fastagent-sh/voicenote'], { stdio: 'inherit', shell: IS_WINDOWS, env })
+      .on('close', c => res(c ?? 1))
+      .on('error', (e: Error) => { console.error(`Cannot run bun: ${e.message}`); res(1) }))
   if (addCode !== 0) {
-    console.error(`Upgrade failed: \`${cmd} add -g @fastagent-sh/voicenote\` exited ${addCode}. Your current install is unchanged; retry later.`)
+    console.error(`Upgrade failed: \`bun add -g @fastagent-sh/voicenote\` exited ${addCode}. Your current install is unchanged; retry later.`)
     process.exitCode = 1
     return
   }
@@ -2696,11 +2476,11 @@ async function collectDoctor() {
   const config = getConfig()
   // pi is a bun-based CLI; cold start (esp. behind a proxy) can take >5s, so
   // give --version a generous timeout to avoid a false 'missing' on a healthy pi.
-  const piInv = piInvocation(['--version'])
+  const piInv = piInvocation(config.pi, ['--version'])
   const piCheck = await runCommand(piInv.bin, piInv.args, 15000)
-  const ff = await runCommand(ffprobeBin(), ['-version'], 5000)
+  const ff = await runCommand(config.ffprobeBin, ['-version'], 5000)
   const v = config.volcano
-  const tools = piSummaryTools()
+  const { pi } = config
   return {
     version: VERSION,
     bun: process.versions.bun || null,
@@ -2718,12 +2498,11 @@ async function collectDoctor() {
       : { configured: false as const },
     // Provider/model/credentials are pi's own configuration; `pi.available` is
     // all we can honestly report about whether a summary can run.
-    summary: { backend: 'pi', model: piSummaryModel() || null, thinking: piThinkingLevel(), tools: tools || null, contextDir: tools ? summaryContextDir(config) : null },
-    pi: { bin: piCodexBin(), version: piCheck.code === 0 ? (piCheck.stdout.trim() || piCheck.stderr.trim() || null) : null, available: piCheck.code === 0, auth: existsSync(piAuthPath()), authPath: piAuthPath() },
-    // Outbound proxy for HTTPS endpoints (updater/GitHub): honor the standard
-    // env chain, not just lowercase http_proxy — an https_proxy-only setup must
-    // still route the updater.
-    proxy: { url: process.env.https_proxy || process.env.HTTPS_PROXY || process.env.http_proxy || process.env.HTTP_PROXY || null },
+    summary: { backend: 'pi', model: pi.model, thinking: pi.thinking, tools: pi.tools || null, contextDir: pi.tools ? pi.contextDir : null },
+    pi: { bin: pi.bin, version: piCheck.code === 0 ? (piCheck.stdout.trim() || piCheck.stderr.trim() || null) : null, available: piCheck.code === 0, auth: existsSync(pi.authPath), authPath: pi.authPath },
+    // Outbound proxy for HTTPS endpoints (updater/GitHub). The GUI reads this to
+    // route its own update check, so it reports the resolved value.
+    proxy: { url: config.childEnv.https_proxy ?? null },
     identity: { self: config.speakers.self.name || null, aliases: config.speakers.self.aliases, knownCount: config.speakers.known.length },
     // The thresholds that silently decide what never gets processed. Without
     // them here, confirming a change to VOICENOTE_MAX_AGE_HOURS meant planting
@@ -2802,24 +2581,12 @@ async function doctor(opts: { json?: boolean } = {}): Promise<void> {
   console.log(`ffprobe=${s.deps.ffprobe ? 'ok' : 'missing'}`)
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// serve — persistent JSON-RPC engine over stdio (the desktop GUI's client)
-// ────────────────────────────────────────────────────────────────────────────
-// One long-lived process the GUI talks to instead of spawning `vn` per call, so
-// Bun cold start (and on Windows the AV scan + console flash) is paid ONCE.
-// Protocol (newline-delimited JSON on stdio):
-//   client→: {"type":"req","id":N,"method":M,"params":P}
-//   →client: {"type":"res","id":N,"result":R} | {"type":"res","id":N,"error":E}
-//   →client: {"type":"event","event":"login-event","payload":{...}}  (login stream)
-
-// Is the background scheduler already installed AND pointing at THIS binary?
-// (Mirrors what the GUI's ensure_agent used to check in Rust; kept here so the
-// staleness logic lives in one place.)
+// Is the background scheduler installed and pointing at this binary?
 async function schedulerIsCurrent(): Promise<boolean> {
   const exe = process.execPath
   if (IS_WINDOWS) {
     if ((await runCommand('schtasks', ['/query', '/tn', TASK_NAME], 10000)).code !== 0) return false
-    // The task XML points at wscript; the actual engine path lives in the VBS.
+    // The task XML points at wscript; the actual CLI path lives in the VBS.
     try { return readFileSync(taskVbsPath(), 'utf16le').includes(exe) } catch { return false }
   }
   try { return readFileSync(plistPath(), 'utf8').includes(exe) } catch { return false }
@@ -2829,99 +2596,6 @@ async function ensureScheduler(force: boolean): Promise<{ ok: true; skipped?: bo
   if (!force && await schedulerIsCurrent()) return { ok: true, skipped: true }
   await installScheduler({ load: true })
   return { ok: true }
-}
-
-async function dispatchServe(req: any, send: (o: unknown) => void): Promise<void> {
-  const { id, method, params } = req || {}
-  try {
-    let result: unknown
-    switch (method) {
-      case 'config.get': result = configGetData(); break
-      case 'config.set': result = await configSetData(params || {}); break
-      case 'doctor': result = await collectDoctor(); break
-      case 'jobs': result = await jobsListData(parseJobsLimit(params?.limit, 40)); break
-      case 'ensure_agent': result = await ensureScheduler(!!params?.force); break
-      case 'run': {
-        // Long-running (minutes) like login: ack immediately so the GUI's 60s
-        // request timeout can't misread it as a wedged engine. Progress shows
-        // via the jobs poll; acquireRunLock inside runPipeline dedupes against
-        // the scheduler tick and a double-click.
-        void runPipeline(undefined, {}).catch(e => console.error('manual run failed:', e?.message || e))
-        result = { started: true }
-        break
-      }
-      case 'login': {
-        // Ack immediately: the OAuth round-trip takes minutes (user in browser),
-        // and the GUI client times requests out after 60s — a long-lived login
-        // response would be misread as a wedged engine. Progress and outcome
-        // ride entirely on login-event; the response carries nothing.
-        void (async () => {
-          let ok = false
-          // Attempt latch: once this attempt settles (timeout or completion),
-          // late events from a still-dangling OAuth flow must not reach the
-          // UI — a stale success/error would clobber a NEWER login attempt's
-          // state (the closed for this attempt has already been sent).
-          let settled = false
-          const sendEvent = (o: Record<string, unknown>) => { if (!settled) send({ type: 'event', event: 'login-event', payload: o }) }
-          try {
-            // Bound the OAuth wait: if the user closes the browser without
-            // authorizing, the callback never arrives and the flow would hang
-            // forever — with the GUI's login button locked until app restart.
-            // True cancellation is not available (the browser flow of
-            // @earendil-works/pi-ai takes no AbortSignal), so on timeout the
-            // abandoned flow keeps running muted (settled latch above). Two
-            // consequences, both surfaced in the timeout message: a LATE
-            // authorization still persists credentials silently (login may
-            // actually have succeeded — hence “refresh to confirm”), and the dangling
-            // localhost callback server may hold its port until serve exits,
-            // so an immediate retry can fail fast with a port-busy error.
-            const timeout = new Promise<never>((_, rej) => {
-              const t = setTimeout(() => rej(new Error('Login timed out: authorization was not completed within 10 minutes. If you just authorized in the browser, click Refresh to confirm login status; otherwise retry')), 10 * 60 * 1000)
-              ;(t as any).unref?.()
-            })
-            await Promise.race([
-              loginChatGPT({ json: true, deviceCode: !!params?.deviceCode, emit: (o) => { if (o.event === 'success') ok = true; sendEvent(o) } }),
-              timeout,
-            ])
-          } catch (e: any) {
-            // loginChatGPT handles its own errors; this catches the timeout
-            // above plus anything it lets escape (fail visibly).
-            sendEvent({ event: 'error', message: String(e?.message || e) })
-          }
-          sendEvent({ event: 'closed', code: ok ? 0 : 1 })
-          settled = true
-        })()
-        result = { started: true }
-        break
-      }
-      default: throw new Error(`unknown method: ${method}`)
-    }
-    send({ type: 'res', id, result })
-  } catch (e: any) {
-    send({ type: 'res', id, error: String(e?.message || e) })
-  }
-}
-
-async function serve(): Promise<void> {
-  loadEnvConfig()
-  // The protocol owns stdout; route any stray console.log from reused helpers
-  // (e.g. installScheduler) to stderr so it can't corrupt the JSONL stream.
-  console.log = (...args: any[]) => { console.error(...args) }
-  const send = (o: unknown) => process.stdout.write(JSON.stringify(o) + '\n')
-  let buf = ''
-  process.stdin.setEncoding('utf8')
-  process.stdin.on('data', (chunk: string) => {
-    buf += chunk
-    let nl: number
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1)
-      if (!line) continue
-      let req: any
-      try { req = JSON.parse(line) } catch { continue }
-      void dispatchServe(req, send)
-    }
-  })
-  await new Promise<void>((resolve) => { process.stdin.on('end', resolve); process.stdin.on('close', resolve) })
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -2968,7 +2642,6 @@ cli.command('upgrade', 'Upgrade to the latest published version via bun add -g')
 cli.command('doctor', 'Check environment')
   .option('--json', 'Output structured status as JSON (for the GUI)')
   .action((opts: { json?: boolean }) => doctor(opts))
-cli.command('serve', 'Run a persistent JSON-RPC engine over stdio (used by the desktop GUI)').action(serve)
 cli.command('login', 'Sign in to ChatGPT (Codex OAuth) for the pi summary backend')
   .option('--json', 'Emit machine-readable JSON events (for the GUI client)')
   .option('--device-code', 'Use the device-code flow instead of the browser callback (needs the ChatGPT security-settings opt-in)')
@@ -2983,9 +2656,27 @@ cli.command('config <action>', 'Read/write file-based config. action: get (print
 cli.command('install-launch-agent', 'Install background scheduler (mac LaunchAgent / Windows Task Scheduler)')
   .option('--load', 'Also (re)load/start it immediately')
   .action((opts: { load?: boolean }) => installScheduler(opts))
+cli.command('ensure-launch-agent', 'Install the background scheduler when missing or stale')
+  .option('--force', 'Reinstall even when the scheduler is current')
+  .action((opts: { force?: boolean }) => ensureScheduler(!!opts.force))
 cli.command('uninstall-launch-agent', 'Remove the background scheduler').action(uninstallScheduler)
 cli.command('status', 'Print background scheduler status').action(printSchedulerStatus)
 
 cli.help()
 cli.version(VERSION)
-cli.parse()
+// Run the command ourselves so a thrown error (bad config, unreadable state
+// file) reaches the user as the one line it is, not as a bun stack trace.
+const parsed = cli.parse(process.argv, { run: false })
+// cac prints --help/--version itself and then reports no matched command; any
+// OTHER unmatched invocation is a typo, which it would ignore in silence.
+if (!cli.matchedCommand && !parsed.options.help && !parsed.options.version) {
+  if (parsed.args.length) console.error(`vn: unknown command '${parsed.args[0]}'`)
+  cli.outputHelp()
+  process.exit(parsed.args.length ? 1 : 0)
+}
+try {
+  await cli.runMatchedCommand()
+} catch (e: any) {
+  console.error(`vn: ${e?.message || e}`)
+  process.exit(1)
+}

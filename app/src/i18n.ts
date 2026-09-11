@@ -33,6 +33,8 @@ export const ZH: Record<string, string> = {
   "Empty = auto (VTR6500 on macOS); on Windows use a drive path like E:\\RECORD":
     "留空 = 自动识别（macOS 上找 VTR6500）；Windows 请填盘符路径，如 E:\\RECORD",
   "Notes output directory": "纪要输出目录",
+  "Empty = ~/Documents/meetings": "留空 = ~/Documents/meetings",
+  "Empty = 48": "留空 = 48",
   "Only process recordings from the last N hours (0 = no limit)": "只处理最近 N 小时内的录音（0 = 不限）",
   "Transcription (Volcano / Doubao)": "转写（火山 / 豆包）",
   // Volcano console field names: left untranslated on purpose so they match the
@@ -44,6 +46,9 @@ export const ZH: Record<string, string> = {
   "ASR Resource ID": "ASR Resource ID",
   "TOS Region": "TOS Region",
   "TOS Endpoint": "TOS Endpoint",
+  "Empty = volc.seedasr.auc": "留空 = volc.seedasr.auc",
+  "Empty = cn-guangzhou": "留空 = cn-guangzhou",
+  "Empty = tos-s3-<region>.volces.com": "留空 = tos-s3-<region>.volces.com",
   "Notes generation": "纪要生成",
   "Notes generation (credentials come from pi)": "纪要生成（凭证来自 pi 的配置）",
   "Model": "模型",
@@ -137,7 +142,6 @@ export const ZH: Record<string, string> = {
   "Enter {0} at {1}": "在 {1} 输入 {0}",
   "✓ Signed in": "✓ 已登录",
   "Sign-in failed: {0}": "登录失败：{0}",
-  "Engine exited unexpectedly; sign-in aborted, please retry": "引擎意外退出，登录已中断，请重试",
   "Sign-in exited (code={0})": "登录已退出（code={0}）",
   "Failed to start: {0}": "启动失败：{0}",
 };

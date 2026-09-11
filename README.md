@@ -48,7 +48,7 @@ VOLCANO_TOS_SECRET_KEY="..." \
 bash <(curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install.sh)
 ```
 
-The first install creates `~/.config/voicenote/config.json`. A legacy `speakers.json` is still read for compatibility and migrated into `config.json.speakers`. Once configured, run `vn doctor` to check the environment, and `vn install-launch-agent` if you want background monitoring.
+The first install creates `~/.config/voicenote/config.json`. Once configured, run `vn doctor` to check it, and `vn install-launch-agent` if you want background monitoring.
 
 Manual install:
 
@@ -69,7 +69,7 @@ The CLI is cross-platform. Prerequisites: Bun, ffmpeg (provides `ffprobe.exe`), 
 bun remove -g @kid7st/voicenote 2>$null   # drop the pre-rebrand package if present (safe no-op otherwise)
 bun add -g @fastagent-sh/voicenote
 # Windows has no /Volumes mount points; set the recorder drive explicitly
-setx VOICENOTE_RECORD_DIR "E:\RECORD"
+'{"env":{"VOICENOTE_RECORD_DIR":"E:\\RECORD"}}' | vn config set
 ```
 
 - Config: `%APPDATA%\voicenote\config.json`; logs/locks: `%LOCALAPPDATA%\voicenote\`
@@ -104,6 +104,8 @@ The install script only writes `vn` / Bun / Homebrew PATH entries to your shell 
   }
 }
 ```
+
+An empty or missing key means "use the built-in default" — those defaults live in `src/cli.ts` and nowhere else, so the installer and the GUI leave such fields blank.
 
 Optional settings:
 
@@ -201,9 +203,7 @@ The install script writes an editable template:
 }
 ```
 
-Changes take effect on the next `vn run`. Config values and unquoted/double-quoted `.zshrc` exports support simple `$VAR` / `${VAR}` references to other settings and `$HOME`. Single-quoted shell values stay literal. Shell commands are never executed. Runtime references honor inherited environment values; scheduler comparisons resolve from files alone.
-
-A legacy `~/.config/voicenote/speakers.json` is still read as a compatibility fallback.
+Changes take effect on the next `vn run`. `~`, `$HOME`, and `${HOME}` are accepted at the start of path settings. Environment variables override the file for the current CLI process; background runs use `config.json`, not shell startup files.
 
 ## Workflow
 
@@ -221,7 +221,7 @@ Records whose source file is no longer on the recorder are forgotten on the next
 
 ## Output locations
 
-The installer defaults to `VOICENOTE_WORKSPACE=~/Documents/meetings`.
+`VOICENOTE_WORKSPACE` defaults to `~/Documents/meetings`.
 
 - Notes entry point: `${VOICENOTE_WORKSPACE}/YYYY-MM/`
 - Original audio: `${VOICENOTE_WORKSPACE}/_audio/YYYY-MM/`
@@ -244,9 +244,7 @@ vn status
 
 The LaunchAgent invokes `vn run` every 60 seconds. It skips safely when no recorder is plugged in; once the VTR6500 is connected, new recordings are processed automatically.
 
-> Config changes (`config.json` or `~/.zshrc`) are picked up automatically by the background agent on its next run — no reinstall needed. The plist only snapshots real environment variables and pi's absolute path: **after changing `VOICENOTE_PI_BIN`, re-run `vn install-launch-agent` and reload** (`vn upgrade` regenerates the plist automatically). If pi is not signed in or ASR is not configured, the agent skips processing instead of burning ASR spend.
->
-> Proxy values that match the file configuration, including expanded variable references, are not embedded and produce no override warning. Values supplied only by the shell, or differing from the files, are embedded as explicit overrides. To clear an unwanted override, update or unset the shell variable, then run `vn install-launch-agent --load`. Prefer `LOCAL_PROXY_HOST`/`LOCAL_PROXY_PORT` in `config.json` for proxy configuration.
+> `config.json` changes are picked up by the background agent on its next run. The plist stores only a fixed PATH and executable paths: **after changing `VOICENOTE_PI_BIN`, re-run `vn install-launch-agent --load`** (`vn upgrade` does this automatically). Shell-only settings are deliberately not copied into the scheduler; persist them with `vn config set`. If pi or ASR is not configured, the agent skips before spending ASR.
 
 Logs:
 
@@ -265,18 +263,18 @@ bun run typecheck
 bun src/cli.ts doctor
 ```
 
-Distribution: vn ships as **source** with no build step — it only runs on bun (shebang + `bun:ffi` + `engines.bun`), and bun runs TypeScript natively, so `bin` points straight at `src/cli.ts` and the npm tarball only contains `src/{cli,envConfig,jobs,runLock}.ts`. The install script / `vn upgrade` install from the published npm package (`bun add -g @fastagent-sh/voicenote`); a `git+https` install also works directly (the git tree carries the source; no build or install script needed).
+Distribution: vn ships as **source** with no build step — it only runs on bun (shebang + `bun:ffi` + `engines.bun`), and bun runs TypeScript natively, so `bin` points straight at `src/cli.ts` and the npm tarball only contains `src/{cli,jobs,runLock,tos}.ts`. The install script / `vn upgrade` install from the published npm package (`bun add -g @fastagent-sh/voicenote`); a `git+https` install also works directly (the git tree carries the source; no build or install script needed).
 
 Routine release (tag triggers CI):
 
 ```bash
-npm version patch   # then sync `VERSION` in src/cli.ts to match
+npm version patch
 git push --follow-tags
 ```
 
-`src/cli.ts` hardcodes `VERSION` for `vn --version`, and `npm version` does not touch it — update both in the same commit or the CLI will report a version it isn't.
+`package.json` is the CLI version source; `vn --version` reads it directly and CI rejects a mismatched `v*` tag.
 
-The workflow lives at `.github/workflows/release.yml`: CI explicitly runs typecheck/test/build + an artifact smoke test, then `npm publish --ignore-scripts` (deterministic publishing, no lifecycle dependence). Publishing uses **npm trusted publishing (OIDC)**: no long-lived token (`id-token: write` + a Trusted Publisher configured on npmjs.com), with provenance attached automatically. A bare local `npm publish` is still guarded by `prepublishOnly` (typecheck+test+build).
+The workflow lives at `.github/workflows/release.yml`: CI explicitly runs typecheck, tests, and an entry-point smoke test, then `npm publish --ignore-scripts` (deterministic publishing, no lifecycle dependence). Publishing uses **npm trusted publishing (OIDC)**: no long-lived token (`id-token: write` + a Trusted Publisher configured on npmjs.com), with provenance attached automatically. A bare local `npm publish` is still guarded by `prepublishOnly` (typecheck + tests).
 
 > Both are already done for this package (Trusted Publisher configured, CI publishing since 0.18.0 with provenance), so a routine release needs nothing but the tag. Kept for forks: npm has no pending-publisher, so trusted publishing cannot publish a package's *very first* version — publish once manually with `npm login` + `npm publish --ignore-scripts`, then add a Trusted Publisher on the package settings page at npmjs.com (repo, workflow `release.yml`); CI takes over afterwards (the npm account needs 2FA).
 
@@ -284,23 +282,23 @@ The workflow lives at `.github/workflows/release.yml`: CI explicitly runs typech
 
 A self-contained macOS `.app` (Tauri v2) for **non-terminal users**: the target machine needs no pre-installed bun / pi / ffprobe / global `vn`.
 
-**Positioning**: the GUI is only a "status dashboard + quick access to output" — it does **not** drive processing. The full pipeline runs autonomously every 60s via the background LaunchAgent using the bundled engine (it keeps running with the GUI closed).
+**Positioning**: the GUI is only a "status dashboard + quick access to output" — it does **not** drive processing. The full pipeline runs autonomously every 60s via the background LaunchAgent using the bundled CLI (it keeps running with the GUI closed).
 
 - First run: settings (identity / Volcano keys / proxy). The notes model comes from pi; ChatGPT users can sign in from the Status panel (`vn login`'s browser-callback flow).
 - After that: the main view shows agent activity + recent notes (open note / open folder)
 
 ### What's bundled
 
-`bun build --compile` compiles the `vn` engine (bun runtime + pi-ai included) into a single-file sidecar; pi cannot be compiled (it reads data files from disk at runtime), so the whole package ships alongside and runs with a bundled `bun`:
+`bun build --compile` compiles the `vn` CLI (bun runtime + pi-ai included) into a single-file sidecar; pi cannot be compiled (it reads data files from disk at runtime), so the whole package ships alongside and runs with a bundled `bun`:
 
 | Component | Form | Purpose |
 |------|------|------|
 | `vn` (compiled) | externalBin | pipeline + ChatGPT sign-in |
 | `bun` | externalBin | runs pi |
-| `ffprobe` (native arm64 static) | externalBin | audio duration (pi only needs ffprobe, not all of ffmpeg) |
+| `ffprobe` (native universal on macOS) | externalBin | audio duration (pi only needs ffprobe, not all of ffmpeg) |
 | `pi` + node_modules | resource | notes backend (ChatGPT, OpenAI API, or DeepSeek) |
 
-At runtime, Rust generates a wrapper (`exec <bundled bun> <bundled pi/cli.js> "$@"`) and injects `VOICENOTE_PI_BIN` / `VOICENOTE_FFPROBE_BIN` into `vn`. Release builds are **universal** (x86_64 + arm64; vn/bun/ffprobe each merged with `lipo`; pi is JS and needs none).
+At runtime, Rust invokes the bundled `vn` directly and injects `VOICENOTE_PI_BIN`, `VOICENOTE_PI_CLI`, and `VOICENOTE_FFPROBE_BIN`; `vn` then runs `<bundled bun> <bundled pi/cli.js>` without a wrapper script. Release builds are **universal** (x86_64 + arm64; vn/bun/ffprobe each merged with `lipo`; pi is JS and needs none).
 
 ### Build
 
@@ -344,7 +342,7 @@ irm https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/instal
 
 `install-app.sh` downloads the packaged `.app` from GitHub Releases → installs to `/Applications` → **removes the quarantine flag for the user** (Gatekeeper bypass for un-notarized builds) → opens it. The target machine needs no bun/pi/ffprobe/global vn (all bundled).
 
-**First launch**: the app lands on Settings. Fill in identity, your Volcano ASR/TOS keys, and proxy as needed. Notes are written by pi with pi's own provider and model; for ChatGPT, click "Sign in to ChatGPT" in the Status panel. Saving installs and loads the background LaunchAgent using the bundled engine. Once credentials are configured, plug in the recorder for automatic transcription and notes.
+**First launch**: the app lands on Settings. Fill in identity, your Volcano ASR/TOS keys, and proxy as needed. Notes are written by pi with pi's own provider and model; for ChatGPT, click "Sign in to ChatGPT" in the Status panel. Saving installs and loads the background LaunchAgent using the bundled CLI. Once credentials are configured, plug in the recorder for automatic transcription and notes.
 
 > The background agent label is `sh.fastagent.voicenote` (same as the CLI version; only one exists per machine). If the `.app` is moved, open it once to recalibrate the plist.
 

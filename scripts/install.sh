@@ -18,8 +18,10 @@ set -euo pipefail
 
 PACKAGE="@fastagent-sh/voicenote"
 LEGACY_PACKAGES=("@kid7st/voicenote")  # pre-rebrand names; same `vn` bin → must be removed to avoid a stale symlink
-WORKSPACE="${VOICENOTE_WORKSPACE:-$HOME/Documents/meetings}"
 INSTALL_LAUNCH_AGENT="${VOICENOTE_INSTALL_LAUNCH_AGENT:-}"
+# Keys the editable template lists. Their default VALUES live in src/cli.ts — an
+# empty entry here means "use vn's default", so defaults are defined once.
+TEMPLATE_KEYS='VOICENOTE_WORKSPACE VOLCANO_ASR_KEY VOLCANO_ASR_RESOURCE_ID VOLCANO_TOS_REGION VOLCANO_TOS_ENDPOINT VOLCANO_TOS_BUCKET VOLCANO_TOS_ACCESS_KEY VOLCANO_TOS_SECRET_KEY'
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 warn() { printf '\n\033[1;33mWARN: %s\033[0m\n' "$*"; }
@@ -46,7 +48,7 @@ append_once() {
 
 # Only PATH goes into the shell rc (so the interactive shell finds vn/bun/brew).
 # All app config lives in ~/.config/voicenote/config.json (see write_config_json),
-# which vn reads with precedence: process.env > config.json > ~/.zshrc.
+# which vn reads with precedence: process.env > config.json.
 configure_shell_env() {
   log "Configuring PATH"
   local shell_name="$(basename "${SHELL:-}")"
@@ -73,63 +75,35 @@ configure_shell_env() {
   export PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
 }
 
-# Write the canonical config template to ~/.config/voicenote/config.json. Existing
-# values win; environment variables can preseed/override values during install.
+# Seed ~/.config/voicenote/config.json through the CLI, so the accepted keys,
+# validation and atomic write stay in src/cli.ts. Existing values win;
+# environment variables fill the keys that are still empty.
 write_config_json() {
   log "Preparing ~/.config/voicenote/config.json"
-  VOICENOTE_WORKSPACE="$WORKSPACE" \
-  VOLCANO_ASR_KEY="${VOLCANO_ASR_KEY:-}" \
-  VOLCANO_ASR_RESOURCE_ID="${VOLCANO_ASR_RESOURCE_ID:-volc.seedasr.auc}" \
-  VOLCANO_TOS_REGION="${VOLCANO_TOS_REGION:-cn-guangzhou}" \
-  VOLCANO_TOS_ENDPOINT="${VOLCANO_TOS_ENDPOINT:-tos-s3-cn-guangzhou.volces.com}" \
-  VOLCANO_TOS_BUCKET="${VOLCANO_TOS_BUCKET:-}" \
-  VOLCANO_TOS_ACCESS_KEY="${VOLCANO_TOS_ACCESS_KEY:-}" \
-  VOLCANO_TOS_SECRET_KEY="${VOLCANO_TOS_SECRET_KEY:-}" \
-  VOLCANO_TOS_KEEP="${VOLCANO_TOS_KEEP:-0}" \
-  node <<'NODE'
-const { readFileSync, writeFileSync, mkdirSync } = require('node:fs')
-const { join } = require('node:path')
-const configDir = join(process.env.HOME, '.config/voicenote')
-const path = join(configDir, 'config.json')
-const legacySpeakersPath = join(configDir, 'speakers.json')
-const keys = ['VOICENOTE_WORKSPACE','VOLCANO_ASR_KEY','VOLCANO_ASR_RESOURCE_ID','VOLCANO_TOS_REGION','VOLCANO_TOS_ENDPOINT','VOLCANO_TOS_BUCKET','VOLCANO_TOS_ACCESS_KEY','VOLCANO_TOS_SECRET_KEY','VOLCANO_TOS_KEEP']
-const defaults = {
-  VOICENOTE_WORKSPACE: process.env.VOICENOTE_WORKSPACE,
-  VOLCANO_ASR_KEY: '',
-  VOLCANO_ASR_RESOURCE_ID: process.env.VOLCANO_ASR_RESOURCE_ID,
-  VOLCANO_TOS_REGION: process.env.VOLCANO_TOS_REGION,
-  VOLCANO_TOS_ENDPOINT: process.env.VOLCANO_TOS_ENDPOINT,
-  VOLCANO_TOS_BUCKET: '',
-  VOLCANO_TOS_ACCESS_KEY: '',
-  VOLCANO_TOS_SECRET_KEY: '',
-  VOLCANO_TOS_KEEP: process.env.VOLCANO_TOS_KEEP,
-}
-const normalizeSpeakers = (value) => {
-  const raw = value && typeof value === 'object' ? value : {}
-  return {
-    self: {
-      name: typeof raw.self?.name === 'string' ? raw.self.name : null,
-      aliases: Array.isArray(raw.self?.aliases) ? raw.self.aliases.filter((a) => typeof a === 'string') : [],
-    },
-    known: Array.isArray(raw.known) ? raw.known : [],
+  local current payload
+  if ! current="$(vn config get)"; then
+    err "Could not read ~/.config/voicenote/config.json (see the error above). Fix the file or move it aside, then re-run this installer; nothing was written."
+    exit 1
+  fi
+  payload="$(printf '%s' "$current" | TEMPLATE_KEYS="$TEMPLATE_KEYS" node -e '
+let input = ""
+process.stdin.on("data", (d) => { input += d })
+process.stdin.on("end", () => {
+  const current = JSON.parse(input).env ?? {}
+  const env = {}
+  for (const key of process.env.TEMPLATE_KEYS.split(" ")) {
+    if (!current[key]) env[key] = process.env[key] || ""
   }
-}
-let cfg = {}
-try { cfg = JSON.parse(readFileSync(path, 'utf8')) } catch {}
-for (const k of keys) {
-  if (cfg[k] == null) cfg[k] = defaults[k] ?? ''
-  if (process.env[k]) cfg[k] = process.env[k]
-}
-if (!cfg.speakers) {
-  let legacy = null
-  try { legacy = JSON.parse(readFileSync(legacySpeakersPath, 'utf8')) } catch {}
-  cfg.speakers = normalizeSpeakers(legacy)
-}
-if (process.env.VOICENOTE_NAME) cfg.speakers.self.name = process.env.VOICENOTE_NAME
-if (process.env.VOICENOTE_ALIAS) cfg.speakers.self.aliases = [process.env.VOICENOTE_ALIAS]
-mkdirSync(configDir, { recursive: true })
-writeFileSync(path, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 })
-NODE
+  const self = {}
+  if (process.env.VOICENOTE_NAME) self.name = process.env.VOICENOTE_NAME
+  if (process.env.VOICENOTE_ALIAS) self.aliases = [process.env.VOICENOTE_ALIAS]
+  process.stdout.write(JSON.stringify(Object.keys(self).length ? { env, self } : { env }))
+})
+')"
+  if ! printf '%s' "$payload" | vn config set >/dev/null; then
+    err "Writing ~/.config/voicenote/config.json failed (see the error above); your existing config is unchanged."
+    exit 1
+  fi
 }
 
 install_deps() {
@@ -199,7 +173,6 @@ run_doctor() {
     return
   fi
   log "Running vn doctor"
-  mkdir -p "$WORKSPACE"
   vn doctor || warn "vn doctor reported issues. Check output above."
 }
 
@@ -233,10 +206,10 @@ Next steps:
        open ~/.config/voicenote/config.json
        # or open the directory: vn open config
      Fill Volcano ASR/TOS keys and your name/aliases in config.json.
-  2. Log in to ChatGPT (REQUIRED for the default pi-codex summary backend —
-     without it transcription will run but note generation will fail):
-       vn login                 # device-code flow; or run \`pi\` and use /login
-     Then confirm: vn doctor   # expect pi.auth=logged-in and Volcano config present
+  2. Configure pi credentials for your chosen model. ChatGPT users can run:
+       vn login                 # browser callback; --device-code is optional
+     Other providers use pi's /login or their API-key environment variable.
+     Then confirm: vn doctor
   3. Optional: install background watcher after config is ready:
        vn install-launch-agent
   4. Insert PHILIPS VTR6500 and test:
@@ -244,7 +217,7 @@ Next steps:
        vn run --latest
        vn list
 
-Config lives in ~/.config/voicenote/config.json. Env vars still override it.
+Config lives in ~/.config/voicenote/config.json. Env vars override it for the current CLI process only.
 Optional knobs (picked up automatically on the agent's next run; only
 VOICENOTE_PI_BIN changes need \`vn install-launch-agent\` re-run):
   VOICENOTE_PI_THINKING=high          # summary reasoning effort
@@ -252,8 +225,8 @@ VOICENOTE_PI_BIN changes need \`vn install-launch-agent\` re-run):
   VOICENOTE_CONTEXT_DIR="\$HOME/vault" # read/grep root + agent cwd (default: workspace)
   See README for the full list.
 
-Output:
-  $WORKSPACE/YYYY-MM/
+Output (workspace shown by \`vn doctor\`):
+  \${VOICENOTE_WORKSPACE}/YYYY-MM/
 
 Logs:
   ~/.local/state/voicenote/logs/launchd.out.log
