@@ -18,7 +18,7 @@ RESOURCES="$APP/src-tauri/resources"
 mkdir -p "$RES" "$RESOURCES"
 
 cd "$REPO"
-[ -d node_modules/cac ] || bun install   # vn engine deps (cac/pi-ai)
+[ -d node_modules/cac ] || bun install   # vn deps (cac/pi-ai)
 
 # ── pi package (JS, same for both arches) ──
 stage_pi() {

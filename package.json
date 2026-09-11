@@ -39,7 +39,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "doctor": "bun src/cli.ts doctor",
-    "prepublishOnly": "bun run typecheck && bun test src/"
+    "prepublishOnly": "bun run typecheck && bun test ./src"
   },
   "publishConfig": {
     "access": "public"

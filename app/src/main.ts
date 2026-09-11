@@ -391,9 +391,7 @@ async function loadConfig() {
     if (f.key.startsWith("self_")) continue;
     const el = inputEl(f.key);
     if (el) {
-      const value = cfg.env?.[f.key] ?? f.default ?? "";
-      if (el instanceof HTMLSelectElement && !Array.from(el.options).some(o => o.value === value)) el.add(new Option(value, value));
-      el.value = value;
+      el.value = cfg.env?.[f.key] ?? f.default ?? "";
     }
   }
   const name = inputEl("self_name"); if (name) name.value = cfg.self?.name ?? "";

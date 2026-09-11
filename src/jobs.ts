@@ -275,7 +275,7 @@ export function patchJob(entry: JobRecord, patch: Partial<JobRecord>, now: strin
 export const emptyState = (): StateFile => ({ version: 2, jobs: {} })
 
 /**
- * One meaning of `limit` for both front doors (the CLI flag and the GUI's RPC):
+ * One meaning of `limit` for both front doors (the CLI flag and the GUI's call):
  * 0 = no limit, absent = `fallback`, anything else must be a non-negative
  * integer. Coercing garbage to a default is how a truncated list gets mistaken
  * for a complete one — the exact bug this module exists to remove.

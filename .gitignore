@@ -4,4 +4,3 @@ node_modules/
 .env
 *.log
 .*.bun-build
-vn.exe

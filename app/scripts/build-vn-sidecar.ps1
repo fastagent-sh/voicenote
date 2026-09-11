@@ -12,7 +12,7 @@ $Resources = Join-Path $App "src-tauri\resources"
 $Triple    = "x86_64-pc-windows-msvc"
 New-Item -ItemType Directory -Force -Path $Res, $Resources | Out-Null
 
-# --- vn engine: compile to a single Windows exe ---
+# --- vn CLI: compile to a single Windows exe ---
 Push-Location $Repo
 if (-not (Test-Path "node_modules\cac")) { bun install }
 # --windows-hide-console: build a GUI-subsystem exe so neither the GUI's sidecar
