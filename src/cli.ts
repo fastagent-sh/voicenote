@@ -189,7 +189,7 @@ function getVolcanoConfigFromEnv(): VolcanoConfig | null {
   const tosSecret = process.env.VOLCANO_TOS_SECRET_KEY
   const bucket = process.env.VOLCANO_TOS_BUCKET
   if (!apiKey || !tosAccess || !tosSecret || !bucket) return null
-  const region = process.env.VOLCANO_TOS_REGION || 'cn-hongkong'
+  const region = process.env.VOLCANO_TOS_REGION || 'cn-guangzhou'
   const endpoint = process.env.VOLCANO_TOS_ENDPOINT || `tos-s3-${region}.volces.com`
   const keep = ['1', 'true', 'yes'].includes((process.env.VOLCANO_TOS_KEEP || '0').toLowerCase())
   return {
@@ -442,9 +442,8 @@ function normalizeRunMode(opts: any): RunMode {
 // Single-instance mutual exclusion via an OS advisory lock (flock) held on an open
 // fd. The kernel releases it automatically when the process exits — including
 // SIGKILL/crash — so there is NO pid / mtime / heartbeat / stale-steal logic to
-// race on. flock is loaded from libSystem (macOS). On Windows we instead use a
-// pid+timestamp lockfile (acquireRunLockWindows); on Linux flock is unavailable
-// via this path and we degrade to no cross-process lock with a warning.
+// race on. flock is loaded from libSystem, so it is macOS-only; every other
+// platform uses the pid+timestamp lockfile below.
 const flockFn = (() => {
   try {
     const lib = dlopen(`libSystem.${suffix}`, { flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } })
@@ -454,9 +453,9 @@ const flockFn = (() => {
 const FLOCK_EX_NB = 2 | 4  // LOCK_EX | LOCK_NB
 const FLOCK_UN = 8
 
-// Windows lock: no flock here. A pid+timestamp lockfile, created atomically with
-// 'wx'. We only reclaim an existing lock when its owner pid is dead OR the lock is
-// stale (older than STALE_MS). The holder refreshes its timestamp every 5 minutes
+// Lockfile used wherever flock is not available (Windows, Linux). A pid+timestamp
+// file, created atomically with 'wx'. We only reclaim an existing lock when its
+// owner pid is dead OR the lock is stale (older than STALE_MS). The holder refreshes its timestamp every 5 minutes
 // (heartbeat below), so a legitimately long RUNNING job — ASR on a multi-hour
 // recording — never looks stale. The staleness escape exists for the pid-reuse
 // false positive (owner died, an unrelated process now has its pid, the aliveness
@@ -468,7 +467,7 @@ const FLOCK_UN = 8
 // to cover a manual `vn run` racing the scheduled one. The tiny create/reclaim
 // window is acceptable: its failure mode is conservatively skipping one run (same
 // as mac when flock is already held).
-async function acquireRunLockWindows(): Promise<{ release: () => Promise<void> } | null> {
+async function acquireRunLockFile(): Promise<{ release: () => Promise<void> } | null> {
   await mkdir(dirname(LOCK_PATH), { recursive: true })
   const STALE_MS = 30 * 60 * 1000
   const tryCreate = (): number | null => {
@@ -481,7 +480,7 @@ async function acquireRunLockWindows(): Promise<{ release: () => Promise<void> }
     try {
       const data = JSON.parse(readFileSync(LOCK_PATH, 'utf8'))
       const pid = Number(data.pid), ts = Number(data.ts)
-      const alive = pid > 0 && (() => { try { process.kill(pid, 0); return true } catch (e: any) { return e?.code === 'EPERM' } })()
+      const alive = pidAlive(pid)
       const fresh = Number.isFinite(ts) && (Date.now() - ts) < STALE_MS
       reclaim = !alive || !fresh
     } catch { reclaim = true }  // unreadable/corrupt lock -> reclaim
@@ -513,12 +512,12 @@ async function acquireRunLockWindows(): Promise<{ release: () => Promise<void> }
       console.error('Run lock was reclaimed by another process (machine slept >30min?); this run continues but is no longer protected against overlap.')
       return
     }
-    if (owner === 'unknown') { warnSideEffect('windows lock heartbeat read', new Error('lock unreadable this tick; will retry')); return }
+    if (owner === 'unknown') { warnSideEffect('run lock heartbeat read', new Error('lock unreadable this tick; will retry')); return }
     try {
       const tmp = `${LOCK_PATH}.hb-${process.pid}`
       writeFileSync(tmp, JSON.stringify({ pid: process.pid, ts: Date.now() }))
       renameSync(tmp, LOCK_PATH) // atomic replace, also on Windows
-    } catch (e) { warnSideEffect('windows lock heartbeat', e) }
+    } catch (e) { warnSideEffect('run lock heartbeat', e) }
   }, 5 * 60 * 1000)
   ;(heartbeat as any).unref?.()
   let released = false
@@ -541,12 +540,8 @@ async function acquireRunLockWindows(): Promise<{ release: () => Promise<void> }
 }
 
 async function acquireRunLock(): Promise<{ release: () => Promise<void> } | null> {
-  if (IS_WINDOWS) return acquireRunLockWindows()
+  if (!flockFn) return acquireRunLockFile()
   await mkdir(dirname(LOCK_PATH), { recursive: true })
-  if (!flockFn) {
-    console.error('Warning: flock unavailable on this runtime; proceeding without cross-process locking.')
-    return { release: async () => {} }
-  }
   // The lock is a regular file we keep open. Builds ≤ 0.15.2 used a *directory*
   // here, held purely by its existence, with no pid or refreshed mtime inside — so
   // a leftover legacy dir carries NO reliable signal about whether an old `vn run`
@@ -668,7 +663,7 @@ async function tailFiles(files: string[], lines: number, follow: boolean): Promi
           } else if (size < prev) {
             sizes.set(f, size) // rotated/truncated
           }
-        } catch {}
+        } catch (e) { warnSideEffect(`follow ${f}`, e) }
       }
       if (!stop) setTimeout(poll, 1000)
     }
@@ -1782,10 +1777,19 @@ function reportStep(step: string): void {
 }
 
 function readCurrent(): CurrentJob | null {
+  let raw: string
+  try { raw = readFileSync(CURRENT_PATH, 'utf8') } catch (e: any) {
+    if (e?.code !== 'ENOENT') warnSideEffect('read current job', e)
+    return null
+  }
+  // A damaged file means a live job shows up as queued; treating it as "no job"
+  // is the safe read, but it must not be silent.
   try {
-    const c = JSON.parse(readFileSync(CURRENT_PATH, 'utf8'))
-    return Number.isFinite(c?.pid) && typeof c?.source_id === 'string' ? c : null
-  } catch { return null }
+    const c = JSON.parse(raw)
+    if (Number.isFinite(c?.pid) && typeof c?.source_id === 'string') return c
+    warnSideEffect('read current job', new Error(`${CURRENT_PATH} has no pid/source_id`))
+  } catch (e) { warnSideEffect('read current job', e) }
+  return null
 }
 
 function pidAlive(pid: number): boolean {
@@ -2180,7 +2184,11 @@ async function uninstallScheduledTask(): Promise<void> {
   // leftover copy could make schedulerIsCurrent misjudge a future install.
   // Only when the task is actually gone — deleting the VBS while the task is
   // still registered would turn every tick into a silent wscript failure.
-  if (r.code === 0) for (const p of [taskVbsPath(), taskXmlPath()]) { try { unlinkSync(p) } catch {} }
+  if (r.code === 0) {
+    for (const p of [taskVbsPath(), taskXmlPath()]) {
+      try { unlinkSync(p) } catch (e: any) { if (e?.code !== 'ENOENT') warnSideEffect(`remove scheduler artifact ${p}`, e) }
+    }
+  }
   console.log(r.code === 0 ? `Scheduled task '${TASK_NAME}' removed.` : `schtasks /delete: ${(r.stderr || r.stdout).trim()}`)
 }
 

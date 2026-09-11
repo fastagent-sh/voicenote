@@ -221,8 +221,14 @@ async fn trigger_run(app: AppHandle) -> Result<(), String> {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        // Reap it on a thread: a dropped Child is never waited on, so every
+        // Sync would leave a zombie behind for the lifetime of the app.
         cmd.spawn()
-            .map(|_| ())
+            .map(|mut child| {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            })
             .map_err(|e| format!("failed to spawn `vn run`: {e}"))
     })
     .await
