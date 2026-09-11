@@ -105,6 +105,8 @@ brew install ffmpeg
 }
 ```
 
+留空或不写的键 = 用内置默认值；这些默认值只定义在 `src/cli.ts`，所以安装脚本和 GUI 都把这类字段留空。
+
 可选配置:
 
 ```json
@@ -214,7 +216,7 @@ vn uninstall-launch-agent
 
 ## 输出位置
 
-installer 默认设置:`VOICENOTE_WORKSPACE=~/Documents/meetings`。
+`VOICENOTE_WORKSPACE` 默认为 `~/Documents/meetings`。
 
 - 笔记入口:`${VOICENOTE_WORKSPACE}/YYYY-MM/`
 - 原始音频:`${VOICENOTE_WORKSPACE}/_audio/YYYY-MM/`

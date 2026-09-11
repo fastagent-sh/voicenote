@@ -18,8 +18,10 @@ set -euo pipefail
 
 PACKAGE="@fastagent-sh/voicenote"
 LEGACY_PACKAGES=("@kid7st/voicenote")  # pre-rebrand names; same `vn` bin → must be removed to avoid a stale symlink
-WORKSPACE="${VOICENOTE_WORKSPACE:-$HOME/Documents/meetings}"
 INSTALL_LAUNCH_AGENT="${VOICENOTE_INSTALL_LAUNCH_AGENT:-}"
+# Keys the editable template lists. Their default VALUES live in src/cli.ts — an
+# empty entry here means "use vn's default", so defaults are defined once.
+TEMPLATE_KEYS='VOICENOTE_WORKSPACE VOLCANO_ASR_KEY VOLCANO_ASR_RESOURCE_ID VOLCANO_TOS_REGION VOLCANO_TOS_ENDPOINT VOLCANO_TOS_BUCKET VOLCANO_TOS_ACCESS_KEY VOLCANO_TOS_SECRET_KEY'
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 warn() { printf '\n\033[1;33mWARN: %s\033[0m\n' "$*"; }
@@ -73,48 +75,28 @@ configure_shell_env() {
   export PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
 }
 
-# Write the canonical config template to ~/.config/voicenote/config.json. Existing
-# values win; environment variables preseed the ones still empty.
+# Seed ~/.config/voicenote/config.json through the CLI, so the accepted keys,
+# validation and atomic write stay in src/cli.ts. Existing values win;
+# environment variables fill the keys that are still empty.
 write_config_json() {
   log "Preparing ~/.config/voicenote/config.json"
-  VOICENOTE_WORKSPACE="$WORKSPACE" \
-  VOLCANO_ASR_KEY="${VOLCANO_ASR_KEY:-}" \
-  VOLCANO_ASR_RESOURCE_ID="${VOLCANO_ASR_RESOURCE_ID:-volc.seedasr.auc}" \
-  VOLCANO_TOS_REGION="${VOLCANO_TOS_REGION:-cn-guangzhou}" \
-  VOLCANO_TOS_ENDPOINT="${VOLCANO_TOS_ENDPOINT:-tos-s3-cn-guangzhou.volces.com}" \
-  VOLCANO_TOS_BUCKET="${VOLCANO_TOS_BUCKET:-}" \
-  VOLCANO_TOS_ACCESS_KEY="${VOLCANO_TOS_ACCESS_KEY:-}" \
-  VOLCANO_TOS_SECRET_KEY="${VOLCANO_TOS_SECRET_KEY:-}" \
-  VOLCANO_TOS_KEEP="${VOLCANO_TOS_KEEP:-0}" \
-  node <<'NODE'
-const { readFileSync, writeFileSync, mkdirSync, renameSync } = require('node:fs')
-const { join } = require('node:path')
-const configDir = join(process.env.HOME, '.config/voicenote')
-const path = join(configDir, 'config.json')
-const keys = ['VOICENOTE_WORKSPACE','VOLCANO_ASR_KEY','VOLCANO_ASR_RESOURCE_ID','VOLCANO_TOS_REGION','VOLCANO_TOS_ENDPOINT','VOLCANO_TOS_BUCKET','VOLCANO_TOS_ACCESS_KEY','VOLCANO_TOS_SECRET_KEY','VOLCANO_TOS_KEEP']
-let cfg = {}
-try {
-  cfg = JSON.parse(readFileSync(path, 'utf8'))
-  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error('config root must be an object')
-} catch (error) {
-  if (error.code !== 'ENOENT') throw error
-}
-for (const k of keys) if (!cfg[k]) cfg[k] = process.env[k] || ''
-const currentSelf = cfg.speakers?.self
-cfg.speakers = {
-  self: {
-    name: typeof currentSelf?.name === 'string' ? currentSelf.name : null,
-    aliases: Array.isArray(currentSelf?.aliases) ? currentSelf.aliases.filter((a) => typeof a === 'string') : [],
-  },
-  known: Array.isArray(cfg.speakers?.known) ? cfg.speakers.known : [],
-}
-if (process.env.VOICENOTE_NAME) cfg.speakers.self.name = process.env.VOICENOTE_NAME
-if (process.env.VOICENOTE_ALIAS) cfg.speakers.self.aliases = [process.env.VOICENOTE_ALIAS]
-mkdirSync(configDir, { recursive: true })
-const tmp = `${path}.tmp-${process.pid}`
-writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 })
-renameSync(tmp, path)
-NODE
+  local payload
+  payload="$(vn config get | TEMPLATE_KEYS="$TEMPLATE_KEYS" node -e '
+let input = ""
+process.stdin.on("data", (d) => { input += d })
+process.stdin.on("end", () => {
+  const current = JSON.parse(input).env ?? {}
+  const env = {}
+  for (const key of process.env.TEMPLATE_KEYS.split(" ")) {
+    if (!current[key]) env[key] = process.env[key] || ""
+  }
+  const self = {}
+  if (process.env.VOICENOTE_NAME) self.name = process.env.VOICENOTE_NAME
+  if (process.env.VOICENOTE_ALIAS) self.aliases = [process.env.VOICENOTE_ALIAS]
+  process.stdout.write(JSON.stringify(Object.keys(self).length ? { env, self } : { env }))
+})
+')"
+  printf '%s' "$payload" | vn config set >/dev/null
 }
 
 install_deps() {
@@ -184,7 +166,6 @@ run_doctor() {
     return
   fi
   log "Running vn doctor"
-  mkdir -p "$WORKSPACE"
   vn doctor || warn "vn doctor reported issues. Check output above."
 }
 
@@ -237,8 +218,8 @@ VOICENOTE_PI_BIN changes need \`vn install-launch-agent\` re-run):
   VOICENOTE_CONTEXT_DIR="\$HOME/vault" # read/grep root + agent cwd (default: workspace)
   See README for the full list.
 
-Output:
-  $WORKSPACE/YYYY-MM/
+Output (workspace shown by \`vn doctor\`):
+  \${VOICENOTE_WORKSPACE}/YYYY-MM/
 
 Logs:
   ~/.local/state/voicenote/logs/launchd.out.log

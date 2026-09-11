@@ -7,7 +7,10 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { t, applyStaticI18n, savedLang, setLang } from "./i18n";
 
 // ── Settings schema (flat, grouped; lives inline in the dashboard) ───────────
-type Field = { key: string; label: string; placeholder?: string; default?: string; secret?: boolean; required?: boolean };
+// No `default` here on purpose: an empty field is saved as null (key deleted) and
+// vn applies its own default, so default VALUES are defined once, in src/cli.ts.
+// Placeholders only tell the user what that default is.
+type Field = { key: string; label: string; placeholder?: string; secret?: boolean; required?: boolean };
 type Group = { label: string; fields: Field[] };
 
 const GROUPS: Group[] = [
@@ -17,8 +20,8 @@ const GROUPS: Group[] = [
   ]},
   { label: "Recording & output", fields: [
     { key: "VOICENOTE_RECORD_DIR", label: "Recording directory", placeholder: "Empty = auto (VTR6500 on macOS); on Windows use a drive path like E:\\RECORD" },
-    { key: "VOICENOTE_WORKSPACE", label: "Notes output directory", default: "$HOME/Documents/meetings" },
-    { key: "VOICENOTE_MAX_AGE_HOURS", label: "Only process recordings from the last N hours (0 = no limit)", default: "48" },
+    { key: "VOICENOTE_WORKSPACE", label: "Notes output directory", placeholder: "Empty = ~/Documents/meetings" },
+    { key: "VOICENOTE_MAX_AGE_HOURS", label: "Only process recordings from the last N hours (0 = no limit)", placeholder: "Empty = 48" },
   ]},
   { label: "Transcription (Volcano / Doubao)", fields: [
     { key: "VOLCANO_ASR_KEY", label: "ASR Key", secret: true, required: true },
@@ -37,9 +40,9 @@ const GROUPS: Group[] = [
     { key: "LOCAL_PROXY_PORT", label: "Proxy port (optional)", placeholder: "Empty = follow system proxy" },
   ]},
   { label: "Advanced (defaults are usually fine)", fields: [
-    { key: "VOLCANO_ASR_RESOURCE_ID", label: "ASR Resource ID", default: "volc.seedasr.auc" },
-    { key: "VOLCANO_TOS_REGION", label: "TOS Region", default: "cn-guangzhou" },
-    { key: "VOLCANO_TOS_ENDPOINT", label: "TOS Endpoint", default: "tos-s3-cn-guangzhou.volces.com" },
+    { key: "VOLCANO_ASR_RESOURCE_ID", label: "ASR Resource ID", placeholder: "Empty = volc.seedasr.auc" },
+    { key: "VOLCANO_TOS_REGION", label: "TOS Region", placeholder: "Empty = cn-guangzhou" },
+    { key: "VOLCANO_TOS_ENDPOINT", label: "TOS Endpoint", placeholder: "Empty = tos-s3-<region>.volces.com" },
   ]},
 ];
 const ALL_FIELDS = GROUPS.flatMap((g) => g.fields);
@@ -391,7 +394,7 @@ async function loadConfig() {
     if (f.key.startsWith("self_")) continue;
     const el = inputEl(f.key);
     if (el) {
-      el.value = cfg.env?.[f.key] ?? f.default ?? "";
+      el.value = cfg.env?.[f.key] ?? "";
     }
   }
   const name = inputEl("self_name"); if (name) name.value = cfg.self?.name ?? "";

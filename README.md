@@ -105,6 +105,8 @@ The install script only writes `vn` / Bun / Homebrew PATH entries to your shell 
 }
 ```
 
+An empty or missing key means "use the built-in default" — those defaults live in `src/cli.ts` and nowhere else, so the installer and the GUI leave such fields blank.
+
 Optional settings:
 
 ```json
@@ -219,7 +221,7 @@ Records whose source file is no longer on the recorder are forgotten on the next
 
 ## Output locations
 
-The installer defaults to `VOICENOTE_WORKSPACE=~/Documents/meetings`.
+`VOICENOTE_WORKSPACE` defaults to `~/Documents/meetings`.
 
 - Notes entry point: `${VOICENOTE_WORKSPACE}/YYYY-MM/`
 - Original audio: `${VOICENOTE_WORKSPACE}/_audio/YYYY-MM/`
