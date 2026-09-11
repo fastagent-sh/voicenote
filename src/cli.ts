@@ -788,18 +788,25 @@ const limitsOf = (config: Config) => ({ maxAgeHours: config.maxAgeHours, minByte
 // File path planning
 // ────────────────────────────────────────────────────────────────────────────
 
-function initialLocalFiles(config: Config, rec: Recording): LocalFiles {
+/**
+ * The one place the output layout is written down. A job starts out untitled
+ * (timestamp only) and moves to its titled names once the summary produces a
+ * title; pass `title` — including a null/empty one — for the titled form.
+ */
+function layout(config: Config, rec: Recording, title?: string | null): LocalFiles {
   const { month, prefix } = dateParts(rec.recordedAt)
+  const untitled = title === undefined
+  const base = untitled ? prefix : `${prefix}-${safeSlug(title || 'note')}`
   return {
-    audio: join(config.workspace, '_audio', month, `${prefix}-original${extname(rec.sourcePath).toLowerCase()}`),
-    transcript: join(config.workspace, '_transcripts', month, `${prefix}-transcript.md`),
-    notes: join(config.workspace, month, `${prefix}-note.md`),
-    metadata: join(config.workspace, '_metadata', month, `${prefix}-metadata.json`),
+    audio: join(config.workspace, '_audio', month, `${base}-original${extname(rec.sourcePath).toLowerCase()}`),
+    transcript: join(config.workspace, '_transcripts', month, `${base}-transcript.md`),
+    notes: join(config.workspace, month, untitled ? `${base}-note.md` : `${base}.md`),
+    metadata: join(config.workspace, '_metadata', month, `${base}-metadata.json`),
   }
 }
 
 function localFilesFromState(config: Config, rec: Recording, entry: JobRecord | undefined): LocalFiles {
-  const fallback = initialLocalFiles(config, rec)
+  const fallback = layout(config, rec)
   const paths = entry?.paths || {}
   return {
     audio: typeof paths.audio === 'string' ? paths.audio : fallback.audio,
@@ -836,21 +843,23 @@ async function removeFailedSummaryStub(path: string): Promise<void> {
   } catch (e) { warnSideEffect(`remove failed-summary stub ${path}`, e) }
 }
 
-async function titledLocalFiles(config: Config, rec: Recording, meta: Json, files: LocalFiles): Promise<LocalFiles> {
-  const { month, prefix } = dateParts(rec.recordedAt)
-  const base = `${prefix}-${safeSlug(meta.title || 'note')}`
-  const targets: LocalFiles = {
-    audio: join(config.workspace, '_audio', month, `${base}-original${extname(rec.sourcePath).toLowerCase()}`),
-    transcript: join(config.workspace, '_transcripts', month, `${base}-transcript.md`),
-    notes: join(config.workspace, month, `${base}.md`),
-    metadata: join(config.workspace, '_metadata', month, `${base}-metadata.json`),
+/**
+ * Move a job's existing outputs onto their titled paths. Audio and the
+ * transcript written before the summary ran move together — they used to be
+ * renamed in two different places, and the one left behind became an orphan.
+ * Notes and metadata are rewritten by the caller, so their stale copies from a
+ * failed attempt are dropped instead of moved.
+ */
+async function promoteOutputs(from: LocalFiles, to: LocalFiles): Promise<void> {
+  for (const key of ['audio', 'transcript'] as const) {
+    if (from[key] === to[key] || !existsSync(from[key])) continue
+    await mkdir(dirname(to[key]), { recursive: true })
+    if (existsSync(to[key])) await unlink(to[key])
+    await rename(from[key], to[key])
   }
-  for (const p of Object.values(targets)) await mkdir(dirname(p), { recursive: true })
-  if (existsSync(files.audio) && files.audio !== targets.audio) {
-    if (existsSync(targets.audio)) await unlink(targets.audio)
-    await rename(files.audio, targets.audio)
+  if (from.metadata !== to.metadata && existsSync(from.metadata)) {
+    await unlink(from.metadata).catch(e => warnSideEffect(`remove orphaned metadata ${from.metadata}`, e))
   }
-  return targets
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -1533,7 +1542,7 @@ function transcriptMarkdown(config: Config, rec: Recording, transcript: string, 
 
 async function processRecording(config: Config, rec: Recording, opts: any): Promise<Json> {
   const jobStarted = Date.now()
-  let files = (opts.resumeFromTranscriptFiles as LocalFiles | null) || initialLocalFiles(config, rec)
+  let files = (opts.resumeFromTranscriptFiles as LocalFiles | null) || layout(config, rec)
   const mode = normalizeRunMode(opts)
   const needsNotes = mode === 'notes'
   const resumeSummary = needsNotes && Boolean(opts.resumeFromTranscriptFiles)
@@ -1619,22 +1628,13 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
   progressStep(nextStep(), totalSteps, 'Write outputs and index')
   let failedStubPathToRemove: string | null = null
   if (needsNotes && !summaryError) {
-    const previousNotes = files.notes
-    const previousMetadata = files.metadata
-    const titled = await titledLocalFiles(config, rec, meta, files)
-    // titledLocalFiles renames the audio; manually move our already-written transcript too.
-    if (titled.transcript !== files.transcript && existsSync(files.transcript)) {
-      await mkdir(dirname(titled.transcript), { recursive: true })
-      if (existsSync(titled.transcript)) await unlink(titled.transcript)
-      await rename(files.transcript, titled.transcript)
-    }
+    const titled = layout(config, rec, meta.title)
+    await promoteOutputs(files, titled)
+    // The stub note of a failed attempt is removed only after the real note is
+    // written, so a failure in between still leaves the user a pointer to the
+    // saved transcript.
+    if (files.notes !== titled.notes) failedStubPathToRemove = files.notes
     files = titled
-    if (previousNotes !== files.notes) failedStubPathToRemove = previousNotes
-    // Resuming a failed run whose title changed leaves the old untitled metadata
-    // from the failed attempt orphaned (note stub is handled above; metadata was not).
-    if (previousMetadata !== files.metadata && existsSync(previousMetadata)) {
-      await unlink(previousMetadata).catch(e => warnSideEffect(`remove orphaned metadata ${previousMetadata}`, e))
-    }
   }
   await mkdir(dirname(files.notes), { recursive: true })
   await mkdir(dirname(files.metadata), { recursive: true })
