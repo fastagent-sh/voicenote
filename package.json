@@ -30,6 +30,7 @@
     "src/cli.ts",
     "src/jobs.ts",
     "src/runLock.ts",
+    "src/tos.ts",
     "README.md",
     "LICENSE"
   ],

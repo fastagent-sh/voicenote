@@ -256,7 +256,7 @@ bun run typecheck
 bun src/cli.ts doctor
 ```
 
-分发:vn 以**源码**分发,没有构建步骤 —— 它只在 bun 上运行(shebang + `bun:ffi` + `engines.bun`),而 bun 原生跑 TypeScript,所以 `bin` 直接指向 `src/cli.ts`,npm tarball 只带 `src/{cli,jobs,runLock}.ts`。安装脚本 / `vn upgrade` 从已发布的 npm 包安装(`bun add -g @fastagent-sh/voicenote`);`git+https` 安装也能直接用(git 树自带源码,无需 build 或安装脚本)。
+分发:vn 以**源码**分发,没有构建步骤 —— 它只在 bun 上运行(shebang + `bun:ffi` + `engines.bun`),而 bun 原生跑 TypeScript,所以 `bin` 直接指向 `src/cli.ts`,npm tarball 只带 `src/{cli,jobs,runLock,tos}.ts`。安装脚本 / `vn upgrade` 从已发布的 npm 包安装(`bun add -g @fastagent-sh/voicenote`);`git+https` 安装也能直接用(git 树自带源码,无需 build 或安装脚本)。
 
 日常发布(打 tag 触发 CI):
 

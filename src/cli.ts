@@ -2,8 +2,9 @@
 import { cac } from 'cac'
 import packageJson from '../package.json' with { type: 'json' }
 import { parseLockOwner } from './runLock'
+import { tosObject, type TosConfig as VolcanoTosConfig } from './tos'
 import { applyOutcome, buildJobsView, classify, emptyState, localIso, MAX_ATTEMPTS, migrateLegacyState, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs'
-import { createHash, createHmac, randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { appendFile, chmod, mkdir, readFile, writeFile, copyFile, rename, unlink, stat, readdir } from 'node:fs/promises'
 import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, appendFileSync, openSync, closeSync, statSync, readSync, unlinkSync, renameSync } from 'node:fs'
 import { dlopen, FFIType, suffix } from 'bun:ffi'
@@ -74,15 +75,6 @@ type SpeakerSelf = { name: string | null; aliases: string[] }
 type SpeakerKnown = { name: string; aliases: string[]; relationship?: string | null }
 type SpeakersConfig = { self: SpeakerSelf; known: SpeakerKnown[] }
 
-
-type VolcanoTosConfig = {
-  endpoint: string
-  region: string
-  bucket: string
-  accessKey: string
-  secretKey: string
-  keep: boolean
-}
 
 type VolcanoConfig = {
   apiKey: string              // X-Api-Key (new Volcano console)
@@ -825,93 +817,6 @@ async function titledLocalFiles(config: Config, rec: Recording, meta: Json, file
 // Volcano (Doubao ASR + TOS upload)
 // ───────────────────────────────────────────────────────────────────────
 
-function sha256Hex(data: Buffer | string): string {
-  return createHash('sha256').update(data).digest('hex')
-}
-
-function hmacSha256(key: Buffer | string, data: string): Buffer {
-  return createHmac('sha256', key).update(data).digest()
-}
-
-function tosCanonicalUri(key: string): string {
-  // S3 SigV4: encode each path segment, keep '/' as separator.
-  return '/' + key.split('/').map(s => encodeURIComponent(s)).join('/')
-}
-
-function tosAmzDate(now: Date = new Date()): { amzDate: string; dateStamp: string } {
-  const amzDate = now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')
-  return { amzDate, dateStamp: amzDate.slice(0, 8) }
-}
-
-function tosSigningKey(secretKey: string, dateStamp: string, region: string): Buffer {
-  const kDate = hmacSha256('AWS4' + secretKey, dateStamp)
-  const kRegion = hmacSha256(kDate, region)
-  const kService = hmacSha256(kRegion, 's3')
-  return hmacSha256(kService, 'aws4_request')
-}
-
-function tosSignRequest(tos: VolcanoTosConfig, method: 'PUT' | 'DELETE', key: string, payloadHash: string, contentType?: string): { url: string; headers: Record<string, string> } {
-  const host = `${tos.bucket}.${tos.endpoint}`
-  const { amzDate, dateStamp } = tosAmzDate()
-  const canonicalUri = tosCanonicalUri(key)
-  const headers: Record<string, string> = {
-    host,
-    'x-amz-content-sha256': payloadHash,
-    'x-amz-date': amzDate,
-  }
-  if (contentType) headers['content-type'] = contentType
-  const sortedNames = Object.keys(headers).sort()
-  const canonicalHeaders = sortedNames.map(h => `${h}:${headers[h]}\n`).join('')
-  const signedHeaders = sortedNames.join(';')
-  const canonicalRequest = [method, canonicalUri, '', canonicalHeaders, signedHeaders, payloadHash].join('\n')
-  const credentialScope = `${dateStamp}/${tos.region}/s3/aws4_request`
-  const stringToSign = ['AWS4-HMAC-SHA256', amzDate, credentialScope, sha256Hex(canonicalRequest)].join('\n')
-  const signingKey = tosSigningKey(tos.secretKey, dateStamp, tos.region)
-  const signature = hmacSha256(signingKey, stringToSign).toString('hex')
-  const authorization = `AWS4-HMAC-SHA256 Credential=${tos.accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`
-  return { url: `https://${host}${canonicalUri}`, headers: { ...headers, Authorization: authorization } }
-}
-
-function tosPresignedGet(tos: VolcanoTosConfig, key: string, expiresSeconds = 3600): string {
-  const host = `${tos.bucket}.${tos.endpoint}`
-  const { amzDate, dateStamp } = tosAmzDate()
-  const canonicalUri = tosCanonicalUri(key)
-  const credentialScope = `${dateStamp}/${tos.region}/s3/aws4_request`
-  const params: Record<string, string> = {
-    'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
-    'X-Amz-Credential': `${tos.accessKey}/${credentialScope}`,
-    'X-Amz-Date': amzDate,
-    'X-Amz-Expires': String(expiresSeconds),
-    'X-Amz-SignedHeaders': 'host',
-  }
-  const canonicalQuery = Object.keys(params).sort().map(k => `${encodeURIComponent(k)}=${encodeURIComponent(params[k]!)}`).join('&')
-  const canonicalHeaders = `host:${host}\n`
-  const canonicalRequest = ['GET', canonicalUri, canonicalQuery, canonicalHeaders, 'host', 'UNSIGNED-PAYLOAD'].join('\n')
-  const stringToSign = ['AWS4-HMAC-SHA256', amzDate, credentialScope, sha256Hex(canonicalRequest)].join('\n')
-  const signature = hmacSha256(tosSigningKey(tos.secretKey, dateStamp, tos.region), stringToSign).toString('hex')
-  return `https://${host}${canonicalUri}?${canonicalQuery}&X-Amz-Signature=${signature}`
-}
-
-async function tosUploadObject(tos: VolcanoTosConfig, localPath: string, key: string, contentType: string): Promise<void> {
-  const body = await readFile(localPath)
-  const payloadHash = sha256Hex(body)
-  const { url, headers } = tosSignRequest(tos, 'PUT', key, payloadHash, contentType)
-  const res = await fetch(url, { method: 'PUT', body, headers })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`TOS upload failed: ${res.status} ${text.slice(0, 500)}`)
-  }
-}
-
-async function tosDeleteObject(tos: VolcanoTosConfig, key: string): Promise<void> {
-  const { url, headers } = tosSignRequest(tos, 'DELETE', key, sha256Hex(''))
-  const res = await fetch(url, { method: 'DELETE', headers })
-  if (!res.ok && res.status !== 204 && res.status !== 404) {
-    const text = await res.text().catch(() => '')
-    console.log(`Warn: TOS delete returned ${res.status}: ${text.slice(0, 200)}`)
-  }
-}
-
 function volcanoContentTypeFromExt(ext: string): string {
   const e = ext.replace(/^\./, '').toLowerCase()
   switch (e) {
@@ -1010,16 +915,17 @@ async function volcanoTranscribeAudio(volc: VolcanoConfig, audioPath: string, re
   const contentType = volcanoContentTypeFromExt(ext)
   const { month } = dateParts(rec.recordedAt)
   const key = `voicenote/${month}/${rec.sourceId}-${Date.now()}${ext}`
+  const object = tosObject(volc.tos, key)
   console.log(`Volcano: upload audio to TOS as ${key}`)
-  await withHeartbeat('upload audio to TOS', () => tosUploadObject(volc.tos, audioPath, key, contentType), 30)
+  await withHeartbeat('upload audio to TOS', () => object.write(Bun.file(audioPath), { type: contentType }), 30)
   let cleanedUp = false
   const cleanup = async () => {
     if (cleanedUp || volc.tos.keep) return
     cleanedUp = true
-    await tosDeleteObject(volc.tos, key).catch(() => {})
+    await object.delete().catch(e => warnSideEffect(`delete TOS object ${key}`, e))
   }
   try {
-    const audioUrl = tosPresignedGet(volc.tos, key, 6 * 3600)
+    const audioUrl = object.presign({ method: 'GET', expiresIn: 6 * 3600 })
     const taskId = randomUUID()
     console.log(`Volcano: submit ASR task ${taskId} (resource=${volc.resourceId}, format=${format})`)
     await volcanoSubmitTask(volc, taskId, audioUrl, format)

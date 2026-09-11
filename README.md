@@ -261,7 +261,7 @@ bun run typecheck
 bun src/cli.ts doctor
 ```
 
-Distribution: vn ships as **source** with no build step — it only runs on bun (shebang + `bun:ffi` + `engines.bun`), and bun runs TypeScript natively, so `bin` points straight at `src/cli.ts` and the npm tarball only contains `src/{cli,jobs,runLock}.ts`. The install script / `vn upgrade` install from the published npm package (`bun add -g @fastagent-sh/voicenote`); a `git+https` install also works directly (the git tree carries the source; no build or install script needed).
+Distribution: vn ships as **source** with no build step — it only runs on bun (shebang + `bun:ffi` + `engines.bun`), and bun runs TypeScript natively, so `bin` points straight at `src/cli.ts` and the npm tarball only contains `src/{cli,jobs,runLock,tos}.ts`. The install script / `vn upgrade` install from the published npm package (`bun add -g @fastagent-sh/voicenote`); a `git+https` install also works directly (the git tree carries the source; no build or install script needed).
 
 Routine release (tag triggers CI):
 
