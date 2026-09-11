@@ -80,8 +80,12 @@ configure_shell_env() {
 # environment variables fill the keys that are still empty.
 write_config_json() {
   log "Preparing ~/.config/voicenote/config.json"
-  local payload
-  payload="$(vn config get | TEMPLATE_KEYS="$TEMPLATE_KEYS" node -e '
+  local current payload
+  if ! current="$(vn config get)"; then
+    err "Could not read ~/.config/voicenote/config.json (see the error above). Fix the file or move it aside, then re-run this installer; nothing was written."
+    exit 1
+  fi
+  payload="$(printf '%s' "$current" | TEMPLATE_KEYS="$TEMPLATE_KEYS" node -e '
 let input = ""
 process.stdin.on("data", (d) => { input += d })
 process.stdin.on("end", () => {
@@ -96,7 +100,10 @@ process.stdin.on("end", () => {
   process.stdout.write(JSON.stringify(Object.keys(self).length ? { env, self } : { env }))
 })
 ')"
-  printf '%s' "$payload" | vn config set >/dev/null
+  if ! printf '%s' "$payload" | vn config set >/dev/null; then
+    err "Writing ~/.config/voicenote/config.json failed (see the error above); your existing config is unchanged."
+    exit 1
+  fi
 }
 
 install_deps() {

@@ -2352,16 +2352,19 @@ async function upgradeSelf(): Promise<void> {
   // The registry fetch needs the configured proxy: `bun add -g` only sees it if
   // we pass it, because the proxy lives in config.json, not in the shell.
   const env = { ...process.env, ...getConfig().childEnv }
-  const cmd = IS_WINDOWS ? 'bun' : (existsSync('/opt/homebrew/bin/bun') ? '/opt/homebrew/bin/bun' : 'bun')
+  // Plain `bun` from PATH: vn is started by bun (`#!/usr/bin/env bun`), so an
+  // interactive upgrade always has it. If it is somehow missing, the spawn error
+  // below says so instead of the command silently "failing".
   // `bun add -g` upgrades in place: verified no dependency loop on npm→npm re-add
   // (the steady-state upgrade path) nor on replacing an old git-ref install. No
   // remove-first, so a failed add leaves the running vn intact.
-  console.log(`$ ${cmd} add -g @fastagent-sh/voicenote`)
+  console.log('$ bun add -g @fastagent-sh/voicenote')
   const addCode = await new Promise<number>(res =>
-    spawn(cmd, ['add', '-g', '@fastagent-sh/voicenote'], { stdio: 'inherit', shell: IS_WINDOWS, env })
-      .on('close', c => res(c ?? 1)).on('error', () => res(1)))
+    spawn('bun', ['add', '-g', '@fastagent-sh/voicenote'], { stdio: 'inherit', shell: IS_WINDOWS, env })
+      .on('close', c => res(c ?? 1))
+      .on('error', (e: Error) => { console.error(`Cannot run bun: ${e.message}`); res(1) }))
   if (addCode !== 0) {
-    console.error(`Upgrade failed: \`${cmd} add -g @fastagent-sh/voicenote\` exited ${addCode}. Your current install is unchanged; retry later.`)
+    console.error(`Upgrade failed: \`bun add -g @fastagent-sh/voicenote\` exited ${addCode}. Your current install is unchanged; retry later.`)
     process.exitCode = 1
     return
   }
@@ -2661,4 +2664,19 @@ cli.command('status', 'Print background scheduler status').action(printScheduler
 
 cli.help()
 cli.version(VERSION)
-cli.parse()
+// Run the command ourselves so a thrown error (bad config, unreadable state
+// file) reaches the user as the one line it is, not as a bun stack trace.
+const parsed = cli.parse(process.argv, { run: false })
+// cac prints --help/--version itself and then reports no matched command; any
+// OTHER unmatched invocation is a typo, which it would ignore in silence.
+if (!cli.matchedCommand && !parsed.options.help && !parsed.options.version) {
+  if (parsed.args.length) console.error(`vn: unknown command '${parsed.args[0]}'`)
+  cli.outputHelp()
+  process.exit(parsed.args.length ? 1 : 0)
+}
+try {
+  await cli.runMatchedCommand()
+} catch (e: any) {
+  console.error(`vn: ${e?.message || e}`)
+  process.exit(1)
+}
