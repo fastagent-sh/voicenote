@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { applyOutcome, buildJobsView, classify, emptyState, MAX_ATTEMPTS, migrateLegacyState, parseJobsLimit, parseStateFile, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, startAttempt, type JobRecord, type StateFile } from './jobs.ts'
+import { applyOutcome, buildJobsView, classify, emptyState, MAX_ATTEMPTS, MAX_INTERRUPTIONS, migrateLegacyState, parseJobsLimit, parseStateFile, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, startAttempt, type JobRecord, type StateFile } from './jobs.ts'
 
 const rec = (over: Partial<JobRecord> & { name: string; recorded_at: string; state: JobRecord['state'] }): JobRecord => ({
   source_path: `/Volumes/VTR6500/RECORD/A/${over.name}`,
@@ -232,16 +232,37 @@ test('classify: spent records are refused; everything else retries', () => {
 
 // ── the write side: transitions that cost real money ────────────────────────
 
-test('startAttempt counts the attempt up front, so crashes are not free', () => {
+test('startAttempt counts the attempt up front, so a failure is never free', () => {
   const j = rec({ name: 'a.mp3', recorded_at: '', state: 'queued', attempts: 0 })
   startAttempt(j, 'T1')
   expect(j).toMatchObject({ state: 'running', attempts: 1, code: null, detail: null })
 
-  // A run killed here (kill -9 / OOM / SIGTERM) never reports an outcome. The
-  // attempt is already counted, which is what makes the cap cover crashes.
-  reconcileInterrupted({ j }, 'T2')
-  expect(j).toMatchObject({ state: 'error', code: 'interrupted', attempts: 1 })
+  applyOutcome(j, { kind: 'failed', message: 'boom' }, 'T2')
+  expect(j).toMatchObject({ state: 'error', code: 'transcribe_failed', attempts: 1 })
   expect(j.detail).toContain('attempt 1/3')
+})
+
+// Quitting the app mid-run says nothing about the recording. Charging it to
+// the retry budget meant three restarts turned a healthy recording into
+// "gave up" — which is exactly what happened in the desktop app.
+test('an interrupted run is requeued and refunded, up to a cap', () => {
+  const j = rec({ name: 'a.mp3', recorded_at: '', state: 'queued', attempts: 0 })
+  for (let i = 1; i < MAX_INTERRUPTIONS; i++) {
+    startAttempt(j, 'T1')
+    reconcileInterrupted({ j }, 'T2')
+    expect(j).toMatchObject({ state: 'queued', code: null, detail: null, attempts: 0, interruptions: i })
+  }
+
+  // A recording that reliably kills the process must not loop forever.
+  startAttempt(j, 'T3')
+  reconcileInterrupted({ j }, 'T4')
+  expect(j).toMatchObject({ state: 'gave_up', code: 'interrupted', interruptions: MAX_INTERRUPTIONS })
+
+  // A clean finish clears the count, so occasional restarts never accumulate.
+  requeueFailed(j, 'T5')
+  startAttempt(j, 'T6')
+  applyOutcome(j, { kind: 'done', title: 't', paths: null }, 'T7')
+  expect(j).toMatchObject({ state: 'done', attempts: 0, interruptions: 0 })
 })
 
 test('manual retry resets the budget but keeps saved outputs', () => {

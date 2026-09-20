@@ -144,9 +144,26 @@ function registerIpc(): void {
     return result
   })
   ipcMain.handle('run', () => startRun('manual'))
+  // Retrying takes the run lock, so it cannot happen while a recording is
+  // being processed. Rejecting would be honest but useless — the user asked
+  // for this recording to be redone, so queue the intent and run it when the
+  // current job finishes.
   ipcMain.handle('retry', async (_e, id: string) => {
+    const active = running
+    if (active) {
+      void active.then(async () => {
+        try {
+          await retryRecording(id)
+          await startRun('retry')
+        } catch (error) {
+          broadcast('run:error', String((error as Error)?.message ?? error))
+        }
+      })
+      return { queued: true }
+    }
     await retryRecording(id)
     void startRun('retry')
+    return { queued: false }
   })
   ipcMain.handle('import', async (_e, path: string) => {
     await importRecording(path, { json: true })

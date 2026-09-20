@@ -37,6 +37,8 @@ export type JobRecord = {
   code: JobCode
   detail: string | null
   attempts: number
+  /** Runs that died before reporting back (app quit, sleep, power loss). */
+  interruptions?: number
   updated_at: string
   title: string | null
   paths: Record<string, string | null> | null
@@ -142,7 +144,7 @@ export function applyOutcome(entry: JobRecord, outcome: Outcome, now: string): v
   switch (outcome.kind) {
     case 'done':
       // Only a clean finish refunds the budget.
-      patchJob(entry, { state: 'done', code: null, detail: null, title: outcome.title, paths: outcome.paths, attempts: 0 }, now)
+      patchJob(entry, { state: 'done', code: null, detail: null, title: outcome.title, paths: outcome.paths, attempts: 0, interruptions: 0 }, now)
       return
     case 'summary_failed':
       // The expensive transcript is on disk; keep its paths so a retry resumes
@@ -153,14 +155,40 @@ export function applyOutcome(entry: JobRecord, outcome: Outcome, now: string): v
     case 'failed':
       giveUp('transcribe_failed', outcome.message)
       return
-    case 'interrupted':
-      giveUp('interrupted', 'Run was interrupted before this job reported back')
+    case 'interrupted': {
+      // An interrupted run says nothing about the recording: the process was
+      // killed (app quit, sleep, power loss) before it could report. Charging
+      // it to the retry budget meant three app restarts turned a healthy
+      // recording into "gave up". Refund the attempt and requeue instead, but
+      // count interruptions separately so a recording that reliably kills the
+      // process cannot loop forever.
+      const interruptions = (entry.interruptions ?? 0) + 1
+      if (interruptions >= MAX_INTERRUPTIONS) {
+        patchJob(entry, {
+          state: 'gave_up',
+          code: 'interrupted',
+          interruptions,
+          detail: `Interrupted ${interruptions} times before reporting back; \`vn forget ${entry.name}\` to retry`,
+        }, now)
+        return
+      }
+      patchJob(entry, {
+        state: 'queued',
+        code: null,
+        detail: null,
+        interruptions,
+        attempts: Math.max(0, entry.attempts - 1),
+      }, now)
       return
+    }
   }
 }
 
 /** Open an attempt. Counted here, not at the end: a run killed mid-job (kill -9,
  *  OOM, SIGTERM) never reaches an end, and an uncounted attempt retries forever. */
+/** How many interruptions before a recording is treated as poison. */
+export const MAX_INTERRUPTIONS = 5
+
 export function startAttempt(entry: JobRecord, now: string): void {
   patchJob(entry, { state: 'running', code: null, detail: null, attempts: entry.attempts + 1 }, now)
 }
@@ -339,6 +367,7 @@ export function parseStateFile(text: string, path: string): StateFile {
       source_path: typeof j.source_path === 'string' ? j.source_path : '',
       recorded_at: typeof j.recorded_at === 'string' ? j.recorded_at : '',
       attempts: Number.isInteger(j.attempts) && j.attempts >= 0 ? j.attempts : 0,
+      interruptions: Number.isInteger(j.interruptions) && j.interruptions >= 0 ? j.interruptions : 0,
       paths: j.paths && typeof j.paths === 'object' ? j.paths : null,
     }
   }

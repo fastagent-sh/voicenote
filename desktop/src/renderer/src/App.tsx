@@ -143,6 +143,18 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null)
   const [dropping, setDropping] = useState(false)
 
+  /** Every user action goes through here: a failure must be visible. */
+  const act = useCallback(async (work: () => Promise<unknown>, done?: string) => {
+    try {
+      const result = await work()
+      if (result && typeof result === 'object' && 'queued' in result && (result as { queued: boolean }).queued) {
+        setToast('已排队,当前这条处理完就开始')
+      } else if (done) setToast(done)
+    } catch (error) {
+      setToast(String((error as Error)?.message ?? error))
+    }
+  }, [])
+
   const refresh = useCallback(async () => {
     const [nextStatus, nextJobs] = await Promise.all([vn.status(), vn.jobs(200)])
     setStatus(nextStatus)
@@ -244,7 +256,7 @@ export function App() {
     const file = event.dataTransfer.files[0]
     if (!file) return
     const path = vn.pathForFile(file)
-    if (path) { await vn.importRecording(path); setToast(`已加入队列：${file.name}`) }
+    if (path) await act(() => vn.importRecording(path), `已加入队列：${file.name}`)
   }
 
   return (
@@ -329,8 +341,8 @@ export function App() {
         </nav>
 
         <div className="sidebar-foot">
-          <button className="primary" onClick={() => void vn.run()} disabled={running}>{running ? '处理中…' : '立即处理'}</button>
-          <button onClick={async () => { const path = await vn.pickAudio(); if (path) { await vn.importRecording(path); setToast('已加入队列') } }}>导入</button>
+          <button className="primary" onClick={() => void act(() => vn.run())} disabled={running}>{running ? '处理中…' : '立即处理'}</button>
+          <button onClick={() => void act(async () => { const path = await vn.pickAudio(); if (path) await vn.importRecording(path) }, '已加入队列')}>导入</button>
           <button onClick={() => setScreen('settings')} title="设置">⚙</button>
         </div>
       </aside>
@@ -340,7 +352,7 @@ export function App() {
         {problem && (
           <div className="callout callout-top">
             <span>{problem.message}</span>
-            {problem.action?.kind === 'login' && <button className="primary" onClick={() => void vn.login()}>{problem.action.label}</button>}
+            {problem.action?.kind === 'login' && <button className="primary" onClick={() => void act(() => vn.login())}>{problem.action.label}</button>}
             {problem.action?.kind === 'settings' && <button className="primary" onClick={() => setScreen('settings')}>{problem.action.label}</button>}
           </div>
         )}
@@ -349,10 +361,10 @@ export function App() {
         {selectedJob && ['error', 'notes_failed', 'gave_up'].includes(selectedJob.status) && (
           <FailureDetail
             job={selectedJob}
-            onRetry={() => { if (selectedJob.id) void vn.retry(selectedJob.id) }}
-            onLogin={() => void vn.login()}
+            onRetry={() => { if (selectedJob.id) void act(() => vn.retry(selectedJob.id!), '已加入重试队列') }}
+            onLogin={() => void act(() => vn.login())}
             onSettings={() => setScreen('settings')}
-            onOpen={(path) => void vn.openPath(path)}
+            onOpen={(path) => void act(() => vn.openPath(path))}
           />
         )}
         {selectedJob?.status === 'done' && selectedJob.notes && <NoteDetail job={selectedJob} onToast={setToast} />}

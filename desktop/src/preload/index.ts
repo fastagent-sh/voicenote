@@ -7,7 +7,7 @@ const api = {
   configGet: () => ipcRenderer.invoke('config:get'),
   configSet: (payload: unknown) => ipcRenderer.invoke('config:set', payload),
   run: () => ipcRenderer.invoke('run'),
-  retry: (id: string) => ipcRenderer.invoke('retry', id),
+  retry: (id: string) => ipcRenderer.invoke('retry', id) as Promise<{ queued: boolean }>,
   importRecording: (path: string) => ipcRenderer.invoke('import', path),
   // Electron removed File.path; this is the supported way to get the real path
   // of a dropped file.

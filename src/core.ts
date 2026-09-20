@@ -1698,7 +1698,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   // survive are debris from a killed run. Their attempt was already counted, so
   // this is what makes the retry cap cover crashes as well as thrown errors.
   const interrupted = reconcileInterrupted(store.jobs, nowIso())
-  if (interrupted.length) console.log(`Reclaimed ${interrupted.length} job(s) left running by an interrupted run: ${interrupted.slice(0, 3).map(j => j.name).join(', ')}`)
+  if (interrupted.length) console.log(`Requeued ${interrupted.length} job(s) left running by an interrupted run: ${interrupted.slice(0, 3).map(j => j.name).join(', ')}`)
 
   // Explicit file: process exactly that path, wherever it lives. Nothing is
   // scanned, so the listing is never "complete" (no pruning), and the recorder
