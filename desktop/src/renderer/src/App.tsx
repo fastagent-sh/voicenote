@@ -53,13 +53,22 @@ function Elapsed({ since }: { since: number }) {
 /** The running recording: what it is, where it is, and what it has written. */
 function ActiveDetail({ job, live }: { job: Job; live: Live }) {
   const endRef = useRef<HTMLDivElement>(null)
-  // The draft grows in place in the page; follow it only while the user is
-  // already at the bottom, so scrolling back to re-read is not fought.
+  // Follow the growing draft until the reader scrolls up, then leave them
+  // alone until they come back to the bottom. Deciding per delta does not
+  // work: one paragraph can arrive at once and land further from the bottom
+  // than any threshold, which silently ends the follow.
+  const following = useRef(true)
   useEffect(() => {
-    const pane = document.querySelector('.main')
+    const pane = document.querySelector<HTMLElement>('.main')
     if (!pane) return
-    const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 120
-    if (atBottom) endRef.current?.scrollIntoView({ block: 'end' })
+    const onScroll = () => {
+      following.current = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 80
+    }
+    pane.addEventListener('scroll', onScroll, { passive: true })
+    return () => pane.removeEventListener('scroll', onScroll)
+  }, [])
+  useEffect(() => {
+    if (following.current) endRef.current?.scrollIntoView({ block: 'end' })
   }, [live.note])
 
   // The body opens with its own H1, so the title field is not rendered again.

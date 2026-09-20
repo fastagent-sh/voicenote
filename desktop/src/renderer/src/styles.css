@@ -69,7 +69,7 @@ button.primary:hover:not(:disabled) { filter: brightness(1.06); background: var(
 button.link { border: none; background: none; color: var(--accent); padding: 4px 2px; }
 button.link:hover { background: none; text-decoration: underline; }
 
-input {
+input[type="text"], input[type="password"], input[type="search"], input:not([type]) {
   font: inherit; padding: 6px 10px; border-radius: 7px; width: 100%;
   border: 1px solid var(--line-strong); background: var(--panel); color: var(--ink);
 }
@@ -205,6 +205,11 @@ button.link.inline { padding: 0; font-size: inherit; vertical-align: baseline; }
 .note-body th, .note-body td { border: 1px solid var(--line); padding: 7px 10px; text-align: left; vertical-align: top; }
 .note-body th { background: var(--panel); }
 .note-body details { color: var(--muted); font-size: 12.5px; margin-top: 2em; }
+/* Task lists: the checkbox replaces the bullet instead of sitting beside it. */
+.note-body li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.25em; }
+.note-body li > input[type="checkbox"] {
+  width: auto; margin: 0 8px 0 0; vertical-align: -1px; accent-color: var(--accent);
+}
 
 .placeholder { text-align: center; color: var(--muted); padding: 22vh 40px 0; }
 .placeholder-art { font-size: 42px; margin-bottom: 12px; filter: grayscale(.2); }
