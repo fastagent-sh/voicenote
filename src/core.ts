@@ -2318,13 +2318,13 @@ export async function upgradeSelf(): Promise<void> {
   // always has it. If it is somehow missing, the spawn error below says so
   // instead of the command silently "failing". `npm i -g` upgrades in place; no
   // remove-first, so a failed install leaves the running vn intact.
-  console.log('$ npm i -g @fastagent-sh/voicenote')
+  console.log('$ npm i -g @fastagent-sh/vn')
   const addCode = await new Promise<number>(res =>
-    spawn('npm', ['i', '-g', '@fastagent-sh/voicenote'], { stdio: 'inherit', shell: IS_WINDOWS, env })
+    spawn('npm', ['i', '-g', '@fastagent-sh/vn'], { stdio: 'inherit', shell: IS_WINDOWS, env })
       .on('close', c => res(c ?? 1))
       .on('error', (e: Error) => { console.error(`Cannot run npm: ${e.message}`); res(1) }))
   if (addCode !== 0) {
-    console.error(`Upgrade failed: \`npm i -g @fastagent-sh/voicenote\` exited ${addCode}. Your current install is unchanged; retry later.`)
+    console.error(`Upgrade failed: \`npm i -g @fastagent-sh/vn\` exited ${addCode}. Your current install is unchanged; retry later.`)
     process.exitCode = 1
     return
   }

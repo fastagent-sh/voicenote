@@ -12,7 +12,7 @@ CLI 命令:`vn`
 
 ## 安装(CLI)
 
-> CLI 从 npm 包 `@fastagent-sh/voicenote` 安装。下面的安装脚本 / `bun add -g` 均需该包**已发布到 npm** 后才可用(发布流程见文末「开发」)。
+> 本仓库发两个包:命令行 `@fastagent-sh/vn`(即 `vn` 命令)和桌面客户端 **VoiceNote**(Electron 应用)。两者共用 `src/core.ts`,但版本号和发布流程各自独立。
 
 推荐使用安装脚本(macOS):
 
@@ -43,21 +43,22 @@ bash <(curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/
 手动安装:
 
 ```bash
-bun remove -g @kid7st/voicenote 2>/dev/null || true   # 若装过改名前的旧包则清掉(没装则安全跳过)
-bun add -g @fastagent-sh/voicenote
-mkdir -p ~/.local/bin
-ln -sf ~/.bun/bin/vn ~/.local/bin/vn
+npm i -g @fastagent-sh/vn
 ```
 
-旧版(`git+…#main`)安装会被 `bun add -g @fastagent-sh/voicenote` 直接替换,无需先卸载。唯一例外是**改名前的 `@kid7st/voicenote`** 包:它带同一个 `vn` 命令,所以上面的 `bun remove -g` 会先清掉它(一键 `install.sh` 会自动处理)。
+旧版本用 `@kid7st/voicenote`、`@fastagent-sh/voicenote` 这两个名字发过同一个 `vn` 命令,其中一部分是用 bun 装的。安装脚本会一并清理,手动清理:
+
+```bash
+bun remove -g @kid7st/voicenote @fastagent-sh/voicenote 2>/dev/null || true
+npm uninstall -g @kid7st/voicenote @fastagent-sh/voicenote 2>/dev/null || true
+```
 
 ### Windows(CLI)
 
-CLI 已跨平台。前置:Bun、ffmpeg(提供 `ffprobe.exe`)、Node + pi。
+CLI 已跨平台。前置:Node >= 24、ffmpeg(提供 `ffprobe.exe`);pi 随包安装。
 
 ```powershell
-bun remove -g @kid7st/voicenote 2>$null   # 若装过改名前的旧包则清掉(没装则安全跳过)
-bun add -g @fastagent-sh/voicenote
+npm i -g @fastagent-sh/vn
 # Windows 无 /Volumes 挂载点,录音盘按盘符设置
 '{"env":{"VOICENOTE_RECORD_DIR":"E:\\RECORD"}}' | vn config set
 ```
@@ -247,7 +248,9 @@ bun run typecheck
 bun src/cli.ts doctor
 ```
 
-分发:vn 以**源码**分发,没有构建步骤 —— 它只在 bun 上运行(shebang + `bun:ffi` + `engines.bun`),而 bun 原生跑 TypeScript,所以 `bin` 直接指向 `src/cli.ts`,npm tarball 只带 `src/{cli,jobs,runLock,tos}.ts`。安装脚本 / `vn upgrade` 从已发布的 npm 包安装(`bun add -g @fastagent-sh/voicenote`);`git+https` 安装也能直接用(git 树自带源码,无需 build 或安装脚本)。
+分发:`vn` 以**源码**分发,没有构建步骤。Node >= 24 会即时剥离类型,所以 `bin` 直接指向 `src/cli.ts`,npm tarball 带上它需要的 `src/*.ts`。安装脚本和 `vn upgrade` 从 npm 安装(`npm i -g @fastagent-sh/vn`);`git+https` 安装也能直接用(git 树自带源码)。
+
+桌面客户端在 `desktop/`,用 electron-vite + electron-builder 构建(`cd desktop && npm run dist`)。它把 `src/core.ts` 打进主进程,因此 pipeline 的改动对两个产品同时生效;版本号各自独立。
 
 日常发布(打 tag 触发 CI):
 
@@ -264,9 +267,18 @@ workflow 位于 `.github/workflows/release.yml`:CI 显式跑 typecheck、测试�
 
 ## 桌面客户端
 
-Tauri 版桌面客户端已删除。替代它的是一个 Electron 应用：pipeline 直接跑在应用自己的进程里
-(没有 sidecar 可执行文件、没有后台 LaunchAgent,pi 以 SDK 形式作为库调用)。在它完成之前,
-上面的 CLI 就是全部产品。
+`desktop/` 是 VoiceNote 客户端:Electron 应用,pipeline 跑在它自己的主进程里 —— pi 以 SDK
+形式作为库调用,因此没有 sidecar 可执行文件、没有随包运行时、也没有后台 LaunchAgent。关闭窗口后
+它留在菜单栏,插入录音笔时自动开始处理。
+
+```bash
+cd desktop
+npm install
+npm run dev     # 开发
+npm run dist    # 打包(electron-builder)
+```
+
+打包、签名和自动更新尚未接入。
 
 ## License
 

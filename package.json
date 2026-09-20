@@ -1,7 +1,7 @@
 {
-  "name": "@fastagent-sh/voicenote",
+  "name": "@fastagent-sh/vn",
   "version": "0.22.2",
-  "description": "Voice recordings → diarized transcripts → integrated semantic Markdown notes. Currently optimized for the PHILIPS VTR6500 recorder, but the workflow is generic.",
+  "description": "CLI: voice recordings → diarized transcripts → integrated semantic Markdown notes. The desktop app ships separately.",
   "type": "module",
   "license": "MIT",
   "author": "fastagent-sh",
@@ -27,10 +27,13 @@
   },
   "files": [
     "src/cli.ts",
+    "src/core.ts",
     "src/chatgptAuth.ts",
+    "src/piAgent.ts",
+    "src/progress.ts",
+    "src/summaryJson.ts",
     "src/jobs.ts",
     "src/runLock.ts",
-    "src/tos.ts",
     "README.md",
     "LICENSE"
   ],

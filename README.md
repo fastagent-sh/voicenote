@@ -13,7 +13,7 @@ Today this is a CLI (`vn`). The desktop app is being rewritten on Electron; see
 
 ## Install (CLI)
 
-> The CLI installs from the npm package `@fastagent-sh/voicenote`. The install script / `bun add -g` below require the package to be **published to npm** (see "Development" at the end for the release flow).
+> Two packages ship from this repo: the CLI (`@fastagent-sh/vn`, the `vn` command) and the desktop app (**VoiceNote**, an Electron app). They share `src/core.ts` but version and release independently.
 
 Recommended: the install script (macOS):
 
@@ -44,21 +44,22 @@ The first install creates `~/.config/voicenote/config.json`. Once configured, ru
 Manual install:
 
 ```bash
-bun remove -g @kid7st/voicenote 2>/dev/null || true   # drop the pre-rebrand package if present (safe no-op otherwise)
-bun add -g @fastagent-sh/voicenote
-mkdir -p ~/.local/bin
-ln -sf ~/.bun/bin/vn ~/.local/bin/vn
+npm i -g @fastagent-sh/vn
 ```
 
-An older `git+…#main` install is replaced in place by `bun add -g @fastagent-sh/voicenote`. The one exception is the **pre-rebrand `@kid7st/voicenote`** package: it ships the same `vn` bin, so the `bun remove -g` line above clears it first (the one-line `install.sh` does this automatically).
+Older installs shipped the same `vn` command under `@kid7st/voicenote` and `@fastagent-sh/voicenote`, some of them through bun. The install script removes both; doing it by hand:
+
+```bash
+bun remove -g @kid7st/voicenote @fastagent-sh/voicenote 2>/dev/null || true
+npm uninstall -g @kid7st/voicenote @fastagent-sh/voicenote 2>/dev/null || true
+```
 
 ### Windows (CLI)
 
-The CLI is cross-platform. Prerequisites: Bun, ffmpeg (provides `ffprobe.exe`), Node + pi.
+The CLI is cross-platform. Prerequisites: Node >= 24 and ffmpeg (provides `ffprobe.exe`); pi installs with the package.
 
 ```powershell
-bun remove -g @kid7st/voicenote 2>$null   # drop the pre-rebrand package if present (safe no-op otherwise)
-bun add -g @fastagent-sh/voicenote
+npm i -g @fastagent-sh/vn
 # Windows has no /Volumes mount points; set the recorder drive explicitly
 '{"env":{"VOICENOTE_RECORD_DIR":"E:\\RECORD"}}' | vn config set
 ```
@@ -253,7 +254,9 @@ bun run typecheck
 bun src/cli.ts doctor
 ```
 
-Distribution: vn ships as **source** with no build step — it only runs on bun (shebang + `bun:ffi` + `engines.bun`), and bun runs TypeScript natively, so `bin` points straight at `src/cli.ts` and the npm tarball only contains `src/{cli,jobs,runLock,tos}.ts`. The install script / `vn upgrade` install from the published npm package (`bun add -g @fastagent-sh/voicenote`); a `git+https` install also works directly (the git tree carries the source; no build or install script needed).
+Distribution: `vn` ships as **source** with no build step. Node >= 24 strips types on the fly, so `bin` points straight at `src/cli.ts` and the npm tarball carries the `src/*.ts` files it needs. The install script and `vn upgrade` install from npm (`npm i -g @fastagent-sh/vn`); a `git+https` install also works (the git tree carries the source).
+
+The desktop app lives in `desktop/` and is built with electron-vite + electron-builder (`cd desktop && npm run dist`). It bundles `src/core.ts` into its main process, so a change to the pipeline reaches both products; their version numbers are independent.
 
 Routine release (tag triggers CI):
 
@@ -270,10 +273,20 @@ The workflow lives at `.github/workflows/release.yml`: CI explicitly runs typech
 
 ## Desktop app
 
-The Tauri desktop app was removed. Its replacement is an Electron app that runs
-the pipeline inside its own process (no sidecar binaries, no background
-LaunchAgent, pi used as a library through its SDK). Until it lands, the CLI
-above is the whole product.
+`desktop/` holds the VoiceNote app: Electron, with the pipeline running inside
+its own main process — pi is used as a library through its SDK, so there is no
+sidecar binary, no bundled runtime and no background LaunchAgent. It keeps
+running in the menu bar after the window closes, which is what starts a run
+when the recorder is plugged in.
+
+```bash
+cd desktop
+npm install
+npm run dev     # develop
+npm run dist    # package (electron-builder)
+```
+
+Packaging, signing and auto-update are not wired up yet.
 
 ## License
 

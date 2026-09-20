@@ -1,5 +1,5 @@
 {
-  "name": "voicenote-desktop",
+  "name": "voicenote",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -26,5 +26,36 @@
     "react-dom": "^19",
     "typescript": "^5",
     "vite": "^7"
+  },
+  "description": "VoiceNote desktop app: recordings in, semantic notes out.",
+  "build": {
+    "appId": "sh.fastagent.voicenote",
+    "productName": "VoiceNote",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/@earendil-works/pi-coding-agent/**"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "electronLanguages": [
+      "en",
+      "zh_CN"
+    ]
   }
 }

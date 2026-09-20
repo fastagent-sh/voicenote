@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# voicenote installer for macOS
+# vn (voicenote CLI) installer for macOS. The desktop app is a separate
+# download; this script only installs the command line tool.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install.sh | bash
@@ -13,10 +14,10 @@ set -euo pipefail
 #   VOLCANO_ASR_KEY="..." \
 #   bash scripts/install.sh
 
-PACKAGE="@fastagent-sh/voicenote"
+PACKAGE="@fastagent-sh/vn"
 MIN_NODE="24.0.0"   # keep in sync with package.json engines.node (vn ships TypeScript
                     # sources and relies on Node's built-in type stripping)
-LEGACY_PACKAGES=("@kid7st/voicenote")  # pre-rebrand names; same `vn` bin → must be removed to avoid a stale symlink
+LEGACY_PACKAGES=("@kid7st/voicenote" "@fastagent-sh/voicenote")  # pre-rebrand names; same `vn` bin → must be removed to avoid a stale symlink
 INSTALL_LAUNCH_AGENT="${VOICENOTE_INSTALL_LAUNCH_AGENT:-}"
 # Keys the editable template lists. Their default VALUES live in src/cli.ts — an
 # empty entry here means "use vn's default", so defaults are defined once.

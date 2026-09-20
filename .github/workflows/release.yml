@@ -33,18 +33,18 @@ jobs:
         run: bun run typecheck
 
       - name: Test
-        run: bun test ./src   # CLI tests only (`src/` would also match app/src); app/ has its own CI
-
-      # Smoke the published entry point (bin -> src/cli.ts): a bad shebang or a
-      # runtime dep that's a devDep by mistake passes typecheck+test yet fails
-      # to start. No build step — vn ships as source and runs on bun directly.
-      - name: Smoke test CLI
-        run: bun src/cli.ts --version
+        run: bun test ./src   # the test runner is bun; the product runs on Node
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: 24
           registry-url: 'https://registry.npmjs.org'
+
+      # Smoke the published entry point (bin -> src/cli.ts) on the runtime users
+      # get: a bad shebang, a devDep mistaken for a runtime dep, or TypeScript
+      # that Node cannot strip passes typecheck+test yet fails to start.
+      - name: Smoke test CLI
+        run: node src/cli.ts --version
 
       # Trusted publishing needs npm >= 11.5.1, newer than what Node ships.
       - name: Upgrade npm for trusted publishing
