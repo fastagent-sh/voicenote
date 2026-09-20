@@ -2,6 +2,7 @@
 // functions the `vn` CLI calls, running in this process. No sidecar binary, no
 // background daemon, no stdout parsing.
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, shell, Tray } from 'electron'
+import electronUpdater from 'electron-updater'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
@@ -97,6 +98,7 @@ function updateTray(): void {
   tray.setToolTip(running ? 'VoiceNote — 处理中' : 'VoiceNote — 空闲')
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: running ? '处理中…' : '空闲', enabled: false },
+    ...(updateReady ? [{ label: `重启以更新到 ${updateReady}`, click: () => autoUpdater.quitAndInstall() } as const] : []),
     { type: 'separator' },
     { label: '显示主窗口', click: () => showWindow() },
     { label: '立即处理', enabled: !running, click: () => { requestRun({ reason: 'manual' }) } },
@@ -162,7 +164,46 @@ async function searchNotes(query: string): Promise<{ path: string; title: string
   return results.slice(0, 50).map(({ path, title, snippet }) => ({ path, title, snippet }))
 }
 
+/**
+ * Updates come from GitHub Releases. The download happens in the background;
+ * installing is the user's call, because a pipeline run must not be killed
+ * mid-transcription by a restart.
+ *
+ * macOS will only *install* an update when the app is code-signed (a
+ * Squirrel.Mac requirement). An unsigned build still learns that a new
+ * version exists, so the window offers the download page instead of a
+ * restart — better than silently never updating.
+ */
+const { autoUpdater } = electronUpdater
+let updateReady: string | null = null
+
+function setupUpdates(): void {
+  if (!app.isPackaged) return
+  // A customer behind a firewall (or this project's own release test) can
+  // point the updater somewhere else; unset, it uses the GitHub release the
+  // build was published to.
+  const feed = process.env.VOICENOTE_UPDATE_FEED
+  if (feed) autoUpdater.setFeedURL({ provider: 'generic', url: feed })
+  autoUpdater.autoDownload = true
+  autoUpdater.autoInstallOnAppQuit = true
+  autoUpdater.on('update-available', (info) => broadcast('update:available', info.version))
+  autoUpdater.on('update-downloaded', (info) => {
+    updateReady = info.version
+    broadcast('update:ready', info.version)
+    updateTray()
+  })
+  autoUpdater.on('error', (error) => broadcast('update:error', String(error?.message ?? error)))
+  const check = () => { void autoUpdater.checkForUpdates().catch(() => { /* reported through the error event */ }) }
+  check()
+  setInterval(check, 6 * 60 * 60 * 1000)
+}
+
 function registerIpc(): void {
+  ipcMain.handle('update:state', () => ({ version: app.getVersion(), ready: updateReady }))
+  // Quitting for an update while a recording is being processed would lose
+  // the run, so the choice stays with the user and the window says as much.
+  ipcMain.handle('update:install', () => { autoUpdater.quitAndInstall() })
+  ipcMain.handle('update:open-releases', () => shell.openExternal('https://github.com/fastagent-sh/voicenote/releases/latest'))
   ipcMain.handle('search', (_e, query: string) => searchNotes(query))
   ipcMain.handle('status', () => collectDoctor())
   ipcMain.handle('jobs', (_e, limit: number) => jobsListData(limit ?? 50))
@@ -262,6 +303,7 @@ app.whenReady().then(() => {
   tray = new Tray(trayIcon(false))
   updateTray()
   watchRecorder()
+  setupUpdates()
   createWindow()
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
 })

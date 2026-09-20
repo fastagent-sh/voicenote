@@ -290,7 +290,30 @@ npm run dev     # develop
 npm run dist    # package (electron-builder)
 ```
 
-Packaging, signing and auto-update are not wired up yet.
+### Releases and auto-update
+
+The app checks GitHub Releases on start and every six hours, downloads a new
+version in the background, and offers a restart — installing is never
+automatic, because a restart mid-transcription would throw the run away.
+
+macOS refuses to *install* an update to an app whose signature it cannot
+verify (Squirrel.Mac checks the download against the running app's designated
+requirement; an unsigned build fails with "code has no resources but signature
+indicates they must be present"). There is no Developer ID for this project,
+so releases are signed with a **self-signed certificate** instead:
+
+- auto-update works, verified end to end (0.1.0 installed → 0.1.1 published →
+  downloaded → restart → 0.1.1 running)
+- Gatekeeper still does not know the certificate, so the **first launch needs
+  right-click → Open**
+- every release must use the SAME certificate; signing with a new one strands
+  everyone already running the old build
+
+`desktop/scripts/create-signing-cert.sh` creates it, `sign-and-build.sh` builds
+locally with it, and `.github/workflows/release-app.yml` does it in CI from the
+`MAC_SIGNING_P12` / `MAC_SIGNING_PASSWORD` secrets. Tag `app-v<version>` to
+publish. `VOICENOTE_UPDATE_FEED` points the updater at a different server for
+testing or for a customer who cannot reach GitHub.
 
 ## License
 

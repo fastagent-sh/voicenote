@@ -281,7 +281,23 @@ npm run dev     # 开发
 npm run dist    # 打包(electron-builder)
 ```
 
-打包、签名和自动更新尚未接入。
+### 发布与自动更新
+
+应用启动时以及之后每 6 小时检查一次 GitHub Releases,发现新版本就在后台下载,下载完成后
+提示重启。安装永远由用户点确认,因为转写跑到一半被重启会丢掉整次运行。
+
+macOS 不允许给一个签名无法验证的应用安装更新(Squirrel.Mac 会用运行中应用的 designated
+requirement 校验下载包,未签名的包会报 "code has no resources but signature indicates
+they must be present")。本项目没有 Developer ID 证书,所以用**自签名证书**签:
+
+- 自动更新可用,已端到端验证(装 0.1.0 → 发布 0.1.1 → 后台下载 → 重启 → 跑的是 0.1.1)
+- Gatekeeper 不认这张证书,所以**首次打开需要右键 → 打开**
+- 每次发布必须用**同一张证书**;换证书会让已经装了旧版的用户再也收不到自动更新,只能手动重装
+
+`desktop/scripts/create-signing-cert.sh` 生成证书,`sign-and-build.sh` 在本地用它构建,
+`.github/workflows/release-app.yml` 在 CI 里用 `MAC_SIGNING_P12` / `MAC_SIGNING_PASSWORD`
+两个 secret 完成同样的事。打 `app-v<版本>` 标签即发布。`VOICENOTE_UPDATE_FEED` 可以把更新源
+指向别的服务器,用于测试或给访问不了 GitHub 的客户自建。
 
 ## License
 

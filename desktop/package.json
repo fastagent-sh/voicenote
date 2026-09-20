@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.86.0",
+    "electron-updater": "^6.8.9",
     "marked": "^16.4.2",
     "undici": "^8"
   },
@@ -50,8 +51,15 @@
           "arch": [
             "arm64"
           ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
         }
-      ]
+      ],
+      "gatekeeperAssess": false
     },
     "electronLanguages": [
       "en",
@@ -59,6 +67,14 @@
     ],
     "extraResources": [
       "resources/**"
-    ]
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "fastagent-sh",
+        "repo": "voicenote"
+      }
+    ],
+    "afterPack": "build/afterPack.cjs"
   }
 }

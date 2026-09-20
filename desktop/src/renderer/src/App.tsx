@@ -182,6 +182,7 @@ export function App() {
   const [dropping, setDropping] = useState(false)
   const [pendingRetries, setPendingRetries] = useState<string[]>([])
   const [queuedRuns, setQueuedRuns] = useState(0)
+  const [update, setUpdate] = useState<{ available: string | null; ready: string | null }>({ available: null, ready: null })
 
   /** Every user action goes through here: a failure must be visible. */
   const act = useCallback(async (work: () => Promise<unknown>, done?: string) => {
@@ -204,6 +205,7 @@ export function App() {
   useEffect(() => {
     void refresh()
     void vn.pendingRetries().then(setPendingRetries)
+    void vn.updateState().then(state => setUpdate(u => ({ ...u, ready: state.ready })))
     const poll = setInterval(() => { void vn.jobs(200).then(setJobs) }, 2000)
     const off = [
       vn.on('pipeline:event', (event: PipelineEvent) => {
@@ -229,6 +231,8 @@ export function App() {
       vn.on('run:error', (message: string) => setToast(message)),
       vn.on('retry:pending', (ids: string[]) => setPendingRetries(ids)),
       vn.on('run:queued', (count: number) => setQueuedRuns(count)),
+      vn.on('update:available', (version: string) => setUpdate(u => ({ ...u, available: version }))),
+      vn.on('update:ready', (version: string) => setUpdate(u => ({ ...u, ready: version }))),
       vn.on('recorder:connected', () => setToast('检测到录音笔,开始处理')),
       vn.on('login:event', (event: LoginEvent) => {
         if (event.event === 'success') { setToast('已登录 ChatGPT'); void refresh() }
@@ -419,6 +423,17 @@ export function App() {
 
       <main className="main">
         <div className="titlebar-drag" />
+        {update.ready && (
+          <div className="callout callout-top callout-update">
+            <span>新版本 {update.ready} 已下载{running ? ',当前处理完成后再重启' : ''}。</span>
+            <button className="primary" onClick={() => void vn.installUpdate()} disabled={running}>重启以更新</button>
+          </div>
+        )}
+        {!update.ready && update.available && (
+          <div className="callout callout-top callout-update">
+            <span>发现新版本 {update.available},正在后台下载…</span>
+          </div>
+        )}
         {problem && (
           <div className="callout callout-top">
             <span>{problem.message}</span>

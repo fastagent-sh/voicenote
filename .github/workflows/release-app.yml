@@ -1,0 +1,73 @@
+name: Release desktop app
+
+# Builds, signs and publishes the VoiceNote app to GitHub Releases, which is
+# also the feed electron-updater reads. Trigger with an `app-v*` tag, kept
+# separate from the CLI's `v*` tags:
+#   cd desktop && npm version patch && cd ..
+#   git commit -am "Release app 0.1.1" && git tag app-v0.1.1 && git push --follow-tags
+#
+# Signing: the app is signed with a self-signed certificate stored as the
+# secrets MAC_SIGNING_P12 (base64 of the .p12) and MAC_SIGNING_PASSWORD. It is
+# not a Developer ID, so Gatekeeper still asks the user to approve the first
+# launch — but macOS refuses to INSTALL an update to an app it cannot verify,
+# so some stable signature is required for auto-update to work at all.
+# The same certificate must sign every release; a new one strands everyone on
+# the old version.
+
+on:
+  push:
+    tags:
+      - 'app-v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Verify tag matches the app version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: test "${GITHUB_REF_NAME#app-v}" = "$(jq -r .version desktop/package.json)"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Type check and bundle
+        working-directory: desktop
+        run: npm run build
+
+      # Fail here rather than shipping a build that can never auto-update.
+      - name: Check signing secrets are present
+        env:
+          P12: ${{ secrets.MAC_SIGNING_P12 }}
+        run: test -n "$P12" || { echo "MAC_SIGNING_P12 is not set; see desktop/scripts/create-signing-cert.sh" >&2; exit 1; }
+
+      - name: Import the signing certificate
+        env:
+          P12: ${{ secrets.MAC_SIGNING_P12 }}
+          PASSWORD: ${{ secrets.MAC_SIGNING_PASSWORD }}
+        run: |
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          security create-keychain -p "$PASSWORD" "$RUNNER_TEMP/build.keychain"
+          security unlock-keychain -p "$PASSWORD" "$RUNNER_TEMP/build.keychain"
+          security import "$RUNNER_TEMP/signing.p12" -k "$RUNNER_TEMP/build.keychain" \
+            -P "$PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$PASSWORD" "$RUNNER_TEMP/build.keychain"
+          security list-keychains -d user -s "$RUNNER_TEMP/build.keychain" $(security list-keychains -d user | tr -d '"')
+
+      - name: Build, sign and publish
+        working-directory: desktop
+        env:
+          VN_SIGN_IDENTITY: VoiceNote Self Signed
+          VN_SIGN_KEYCHAIN: ${{ runner.temp }}/build.keychain
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --mac --arm64 --publish always

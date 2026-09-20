@@ -16,9 +16,11 @@ export function Settings({ status, onClose, onLogin }: { status: Status | null; 
   const [self, setSelf] = useState<{ name: string | null; aliases: string[] }>({ name: null, aliases: [] })
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
+  const [version, setVersion] = useState('')
 
   useEffect(() => {
     void vn.configGet().then(config => { setEnv(config.env); setSelf(config.self) })
+    void vn.updateState().then(state => setVersion(state.version))
   }, [])
 
   const save = async () => {
@@ -82,6 +84,15 @@ export function Settings({ status, onClose, onLogin }: { status: Status | null; 
               />
             </label>
           ))}
+        </section>
+
+        <section>
+          <h3>关于</h3>
+          <div className="sheet-row">
+            <span className="hint">VoiceNote {version || ''}{status?.pi.version ? ` · 纪要引擎 pi ${status.pi.version}` : ''}</span>
+            <button onClick={() => void vn.openReleases()}>查看发布页</button>
+          </div>
+          <p className="hint">新版本会在后台自动下载,下载完成后窗口顶部会提示重启。</p>
         </section>
 
         {message && <p className="hint">{message}</p>}

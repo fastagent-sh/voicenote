@@ -186,6 +186,9 @@ button.link.inline { padding: 0; font-size: inherit; vertical-align: baseline; }
   background: var(--panel); border-color: color-mix(in srgb, var(--warn) 40%, transparent);
 }
 .callout-top { display: flex; align-items: center; gap: 12px; margin: 8px 36px 0; }
+.callout-update {
+  background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
 .raw-error {
   margin: 12px 0 0; padding: 10px 12px; border-radius: 8px; white-space: pre-wrap;
   background: var(--panel); color: var(--muted); font-size: 12px; max-height: 240px; overflow: auto;
