@@ -8,7 +8,8 @@ import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import {
   collectDoctor, configGetData, configSetData, getConfig, importRecording, jobsListData,
-  loginChatGPT, NOTE_HTML_CSS, resetConfigCache, retryRecording, runPipeline, VERSION,
+  listRecorderFiles, loginChatGPT, NOTE_HTML_CSS, regenerateNotes, resetConfigCache,
+  retryRecording, runPipeline, VERSION,
 } from '../../../src/core.ts'
 import { onPipelineEvent } from '../../../src/progress.ts'
 
@@ -37,10 +38,10 @@ function broadcast(channel: string, payload?: unknown): void {
 }
 
 /** Runs the pipeline unless one is already running; resolves when it finishes. */
-function startRun(reason: 'manual' | 'recorder' | 'retry'): Promise<void> {
+function startRun(reason: 'manual' | 'recorder' | 'retry' | 'file', file?: string): Promise<void> {
   if (running) return running
   broadcast('run:state', { running: true, reason })
-  running = runPipeline(undefined, {})
+  running = runPipeline(file, {})
     .catch((error: unknown) => { broadcast('run:error', String((error as Error)?.message ?? error)) })
     .finally(() => {
       running = null
@@ -155,14 +156,14 @@ function registerIpc(): void {
   // being processed. Rejecting would be honest but useless — the user asked
   // for this recording to be redone, so queue the intent and run it when the
   // current job finishes.
-  ipcMain.handle('retry', async (_e, id: string) => {
+  const requeue = async (id: string, apply: (id: string) => Promise<void>) => {
     const active = running
     if (active) {
       pendingRetries.add(id)
       broadcast('retry:pending', [...pendingRetries])
       void active.then(async () => {
         try {
-          await retryRecording(id)
+          await apply(id)
         } catch (error) {
           broadcast('run:error', String((error as Error)?.message ?? error))
         } finally {
@@ -173,10 +174,16 @@ function registerIpc(): void {
       })
       return { queued: true }
     }
-    await retryRecording(id)
+    await apply(id)
     void startRun('retry')
     return { queued: false }
-  })
+  }
+  ipcMain.handle('retry', (_e, id: string) => requeue(id, retryRecording))
+  ipcMain.handle('regenerate', (_e, id: string) => requeue(id, regenerateNotes))
+  ipcMain.handle('recorder-files', () => listRecorderFiles())
+  // Processing one file by path bypasses the age/size filters, which is the
+  // point: the user picked this recording explicitly.
+  ipcMain.handle('run-file', (_e, path: string) => startRun('file', path))
   ipcMain.handle('import', async (_e, path: string) => {
     await importRecording(path, { json: true })
     void startRun('manual')

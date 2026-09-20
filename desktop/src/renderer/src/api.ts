@@ -35,6 +35,22 @@ export type JobsResponse = {
   recorder_present: boolean
 }
 
+export type RecorderFile = {
+  sourceId: string
+  name: string
+  path: string
+  recordedAt: string
+  sizeBytes: number
+  durationSeconds: number | null
+  /** 'ready' | 'already_done' | 'too_old' | 'too_small' | 'too_short' | 'gave_up' | … */
+  verdict: string
+  detail: string | null
+  state: string | null
+  title: string | null
+}
+
+export type RecorderFiles = { dir: string; present: boolean; items: RecorderFile[] }
+
 export type PipelineEvent =
   | { type: 'job_start'; id: string; name: string; durationSeconds: number | null }
   | { type: 'job_step'; step: string }
@@ -55,6 +71,9 @@ type Api = {
   configSet: (payload: unknown) => Promise<{ ok: true }>
   run: () => Promise<void>
   retry: (id: string) => Promise<{ queued: boolean }>
+  regenerate: (id: string) => Promise<{ queued: boolean }>
+  recorderFiles: () => Promise<RecorderFiles>
+  runFile: (path: string) => Promise<void>
   pendingRetries: () => Promise<string[]>
   importRecording: (path: string) => Promise<void>
   pathForFile: (file: File) => string

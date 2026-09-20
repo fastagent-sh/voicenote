@@ -201,6 +201,18 @@ export function requeueFailed(entry: JobRecord, now: string): boolean {
 }
 
 /**
+ * Queue a finished recording for a fresh set of notes. Its paths are kept, so
+ * the run resumes from the saved transcript instead of paying for ASR again —
+ * this is for "the model or my speaker list changed, write it again", not for
+ * re-transcribing.
+ */
+export function requeueForRegenerate(entry: JobRecord, now: string): boolean {
+  if (entry.state !== 'done') return false
+  patchJob(entry, { state: 'queued', code: null, detail: null, attempts: 0 }, now)
+  return true
+}
+
+/**
  * Reclaim records left `running` by a dead run. Safe to do wholesale because the
  * caller holds the run lock: no other run can own a `running` record right now.
  */

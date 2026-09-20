@@ -4,8 +4,8 @@ import { vn, type Job } from './api.ts'
 import { friendlyTime, spokenDuration } from './format.ts'
 
 type Props =
-  | { job: Job; path?: undefined; title?: undefined; onToast: (message: string) => void }
-  | { job?: undefined; path: string; title: string; onToast: (message: string) => void }
+  | { job: Job; pending: boolean; onRegenerate: () => void; path?: undefined; title?: undefined; onToast: (message: string) => void }
+  | { job?: undefined; pending?: undefined; onRegenerate?: undefined; path: string; title: string; onToast: (message: string) => void }
 
 /**
  * A finished note, read in the window. The markup comes from our own notes and
@@ -59,6 +59,11 @@ export function NoteDetail(props: Props) {
           )}
         </div>
         <div className="row-actions">
+          {props.job && (
+            props.pending
+              ? <span className="hint">已排队重新生成…</span>
+              : <button onClick={props.onRegenerate} title="用保存的转写稿重写纪要,不会重新转写">重新生成</button>
+          )}
           {audio && <button onClick={() => setPlaying(v => !v)}>{playing ? '收起播放' : '播放录音'}</button>}
           <button onClick={() => { void navigator.clipboard.writeText(markdown ?? ''); props.onToast('已复制 Markdown') }} disabled={!markdown}>复制</button>
           <button onClick={() => void vn.openNoteAsHtml(title, html)} disabled={!markdown}>浏览器打开</button>

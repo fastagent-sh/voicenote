@@ -9,14 +9,19 @@ export function clock(seconds: number): string {
   return h ? `${h}:${pad(m)}:${pad(rest)}` : `${pad(m)}:${pad(rest)}`
 }
 
-/** "2 小时 57 分" — for the length of a recording, where seconds are noise. */
+/**
+ * "2 小时 57 分" / "3 分钟" / "12 秒" — the length of a recording. Short files
+ * keep their seconds: rounding a 7-second clip up to "1 分钟" is exactly the
+ * case where the number matters (it is why the file was skipped).
+ */
 export function spokenDuration(seconds: number | null): string | null {
   if (!seconds || seconds <= 0) return null
+  if (seconds < 60) return `${Math.round(seconds)} 秒`
   const h = Math.floor(seconds / 3600)
   const m = Math.round((seconds % 3600) / 60)
   if (h && m) return `${h} 小时 ${m} 分`
   if (h) return `${h} 小时`
-  return `${Math.max(1, m)} 分钟`
+  return `${m} 分钟`
 }
 
 /**

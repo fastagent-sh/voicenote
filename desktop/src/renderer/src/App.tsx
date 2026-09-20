@@ -6,6 +6,7 @@ import { clock, estimateRemaining, friendlyTime, spokenDuration, timeGroup } fro
 import { explainFailure, topProblem } from './problems.ts'
 import { NoteDetail } from './NoteDetail.tsx'
 import { Onboarding } from './Onboarding.tsx'
+import { Recorder } from './Recorder.tsx'
 import { Settings } from './Settings.tsx'
 
 /** Why a recording was never processed, in the user's words. */
@@ -167,7 +168,7 @@ export function App() {
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<{ path: string; title: string; snippet: string }[]>([])
   const [selected, setSelected] = useState<{ kind: 'job'; id: string } | { kind: 'path'; path: string; title: string } | null>(null)
-  const [screen, setScreen] = useState<'main' | 'settings'>('main')
+  const [screen, setScreen] = useState<'main' | 'settings' | 'recorder'>('main')
   const [skipSetup, setSkipSetup] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [dropping, setDropping] = useState(false)
@@ -273,10 +274,14 @@ export function App() {
     if (!selected && active) setSelected({ kind: 'job', id: active.id! })
   }, [active, selected])
 
+  const skipped = filteredRow?.filtered?.total ?? 0
   const problem = topProblem(status)
 
   if (screen === 'settings') {
     return <Settings status={status} onClose={() => { setScreen('main'); void refresh() }} onLogin={() => vn.login()} />
+  }
+  if (screen === 'recorder') {
+    return <Recorder running={running} onClose={() => { setScreen('main'); void refresh() }} onToast={setToast} />
   }
   if (!skipSetup && status !== null && (!status.volcano.configured || !status.pi.auth)) {
     return <Onboarding status={status} onDone={() => setSkipSetup(true)} onRefresh={() => void refresh()} />
@@ -307,6 +312,18 @@ export function App() {
         </div>
 
         <div className="search"><input placeholder="搜索纪要  ⌘F" value={query} onChange={e => setQuery(e.target.value)} /></div>
+
+        <button className="device-card" onClick={() => setScreen('recorder')}>
+          <span className="device-main">
+            <span className="device-title">录音笔文件</span>
+            <span className="device-sub">
+              {status?.recorder.exists
+                ? (skipped > 0 ? `${skipped} 个录音未处理,点这里查看` : '全部处理完了,点这里查看')
+                : '未连接 · 仍可查看上次的列表'}
+            </span>
+          </span>
+          {skipped > 0 && <span className="device-badge">{skipped}</span>}
+        </button>
 
         <nav className="list">
           {active && (
@@ -363,13 +380,6 @@ export function App() {
           ))}
 
           {!items.length && <div className="sidebar-empty">还没有纪要</div>}
-          {filteredRow && (
-            <div className="skipped">
-              {filteredRow.filtered?.total ?? 0} 个录音被跳过 ·{' '}
-              {Object.entries(filteredRow.filtered?.byCode ?? {}).map(([code, n]) => `${FILTER_REASONS[code] ?? code} ${n}`).join('、')}
-              {filteredRow.history_filtered && <button className="link" onClick={() => setScreen('settings')}>放宽范围</button>}
-            </div>
-          )}
         </nav>
 
         <div className="sidebar-foot">
@@ -400,7 +410,14 @@ export function App() {
             onOpen={(path) => void act(() => vn.openPath(path))}
           />
         )}
-        {selectedJob?.status === 'done' && selectedJob.notes && <NoteDetail job={selectedJob} onToast={setToast} />}
+        {selectedJob?.status === 'done' && selectedJob.notes && (
+          <NoteDetail
+            job={selectedJob}
+            pending={!!selectedJob.id && pendingRetries.includes(selectedJob.id)}
+            onRegenerate={() => { if (selectedJob.id) void act(() => vn.regenerate(selectedJob.id!), '已开始重新生成') }}
+            onToast={setToast}
+          />
+        )}
         {selected?.kind === 'path' && <NoteDetail path={selected.path} title={selected.title} onToast={setToast} />}
         {!selected && (
           <div className="placeholder">

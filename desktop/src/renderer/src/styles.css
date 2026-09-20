@@ -252,3 +252,38 @@ button.link.inline { padding: 0; font-size: inherit; vertical-align: baseline; }
 }
 .step-dot.done { background: var(--ok); color: #fff; }
 .path { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── recorder card + file list ─────────────────────────────────────────── */
+.device-card {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  margin: 0 12px 10px; width: calc(100% - 24px);
+  padding: 9px 12px; border-radius: 9px; border: 1px solid var(--line);
+  background: var(--panel); color: inherit;
+}
+.device-card:hover { border-color: var(--accent); background: var(--accent-soft); }
+.device-main { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.device-title { font-weight: 550; }
+.device-sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.device-badge {
+  flex: none; min-width: 22px; text-align: center; padding: 1px 7px; border-radius: 999px;
+  background: var(--accent); color: #fff; font-size: 12px; font-variant-numeric: tabular-nums;
+}
+
+.sheet.wide { max-width: 860px; }
+.file-row {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 14px;
+}
+.file-main { flex: 1; min-width: 0; }
+.file-title { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.verdict { flex: none; font-size: 12px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.verdict.ready { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.verdict.done { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, transparent); }
+.verdict.bad { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+
+.segmented { display: flex; -webkit-app-region: no-drag; }
+.segmented button { border-radius: 0; }
+.segmented button:first-child { border-radius: 7px 0 0 7px; }
+.segmented button:last-child { border-radius: 0 7px 7px 0; margin-left: -1px; }
+.segmented button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }

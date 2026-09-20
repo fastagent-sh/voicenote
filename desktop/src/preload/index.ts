@@ -8,6 +8,9 @@ const api = {
   configSet: (payload: unknown) => ipcRenderer.invoke('config:set', payload),
   run: () => ipcRenderer.invoke('run'),
   retry: (id: string) => ipcRenderer.invoke('retry', id) as Promise<{ queued: boolean }>,
+  regenerate: (id: string) => ipcRenderer.invoke('regenerate', id) as Promise<{ queued: boolean }>,
+  recorderFiles: () => ipcRenderer.invoke('recorder-files'),
+  runFile: (path: string) => ipcRenderer.invoke('run-file', path),
   pendingRetries: () => ipcRenderer.invoke('pending-retries') as Promise<string[]>,
   importRecording: (path: string) => ipcRenderer.invoke('import', path),
   // Electron removed File.path; this is the supported way to get the real path

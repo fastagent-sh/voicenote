@@ -7,7 +7,7 @@ import { loginWithBrowser, loginWithDeviceCode, PI_PROVIDER_ID } from './chatgpt
 import { runAgentPrompt } from './piAgent.ts'
 import { parseSummaryJson } from './summaryJson.ts'
 import { emitPipelineEvent } from './progress.ts'
-import { applyOutcome, buildJobsView, classify, emptyState, localIso, MAX_ATTEMPTS, migrateLegacyState, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs.ts'
+import { applyOutcome, buildJobsView, classify, emptyState, localIso, MAX_ATTEMPTS, migrateLegacyState, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, requeueForRegenerate, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs.ts'
 import { createHash, randomUUID } from 'node:crypto'
 import { appendFile, chmod, mkdir, readFile, writeFile, copyFile, rename, unlink, stat, readdir, rmdir, utimes } from 'node:fs/promises'
 import { createReadStream, existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, appendFileSync, openSync, closeSync, statSync, readSync, unlinkSync, renameSync } from 'node:fs'
@@ -2281,6 +2281,72 @@ export async function retryRecording(id: string): Promise<void> {
     await saveState(config, store)
     console.log(`queued ${entry.name} for retry`)
   } finally { await lock.release() }
+}
+
+/** Re-run the notes for a finished recording, reusing its saved transcript. */
+export async function regenerateNotes(id: string): Promise<void> {
+  const config = getConfig()
+  const lock = await acquireRunLock()
+  if (!lock) throw new Error('A voicenote run is in progress. Regenerate once it finishes.')
+  try {
+    await migrateStateOnDisk(config)
+    const store = await loadState(config)
+    const entry = store.jobs[id]
+    if (!entry) throw new Error('Recording no longer exists in the processing list.')
+    if (!entry.paths?.transcript || !existsSync(entry.paths.transcript)) {
+      throw new Error('No saved transcript for this recording, so the notes cannot be rewritten without transcribing again.')
+    }
+    if (!requeueForRegenerate(entry, nowIso())) throw new Error(`Cannot regenerate notes for a recording in state '${entry.state}'.`)
+    await saveState(config, store)
+    console.log(`queued ${entry.name} for a fresh summary`)
+  } finally { await lock.release() }
+}
+
+/**
+ * What is on the recorder right now, and what the pipeline would do with each
+ * file: processed, skipped (and why), or waiting. Read-only — nothing is
+ * queued and no state is written, so a UI can show the device's contents
+ * without side effects.
+ */
+export async function listRecorderFiles(): Promise<{
+  dir: string
+  present: boolean
+  items: {
+    sourceId: string
+    name: string
+    path: string
+    recordedAt: string
+    sizeBytes: number
+    durationSeconds: number | null
+    verdict: string
+    detail: string | null
+    state: string | null
+    title: string | null
+  }[]
+}> {
+  const config = getConfig()
+  const store = await loadState(config)
+  const { recordings } = await scanRecordings(config)
+  const limits = { maxAgeHours: config.maxAgeHours, minBytes: config.minBytes, minDurationSeconds: config.minDurationSeconds }
+  const now = Date.now()
+  const items = recordings.map(rec => {
+    const entry = store.jobs[rec.sourceId]
+    const verdict = classify(rec, entry, limits, { force: false, notesMode: true, now })
+    return {
+      sourceId: rec.sourceId,
+      name: basename(rec.sourcePath),
+      path: rec.sourcePath,
+      recordedAt: localIso(rec.recordedAt),
+      sizeBytes: rec.sizeBytes,
+      durationSeconds: rec.durationSeconds ?? null,
+      verdict: verdict.run ? 'ready' : verdict.code,
+      detail: verdict.run ? null : verdict.detail,
+      state: entry?.state ?? null,
+      title: entry?.title ?? null,
+    }
+  })
+  items.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt))
+  return { dir: config.recordDir, present: existsSync(config.recordDir), items }
 }
 
 export async function showLog(opts: { lines?: number; follow?: boolean; err?: boolean; date?: string }): Promise<void> {
