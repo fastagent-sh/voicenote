@@ -20,8 +20,7 @@
     "diarization",
     "meeting-notes",
     "philips",
-    "cli",
-    "bun"
+    "cli"
   ],
   "bin": {
     "vn": "src/cli.ts"
@@ -36,10 +35,10 @@
     "LICENSE"
   ],
   "scripts": {
-    "dev": "bun src/cli.ts",
+    "dev": "node src/cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "doctor": "bun src/cli.ts doctor",
+    "doctor": "node src/cli.ts doctor",
     "prepublishOnly": "bun run typecheck && bun test ./src"
   },
   "publishConfig": {
@@ -54,6 +53,6 @@
     "typescript": "latest"
   },
   "engines": {
-    "bun": ">=1.3.0"
+    "node": ">=24"
   }
 }

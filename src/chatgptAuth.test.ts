@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { accountIdFromAccessToken, buildAuthorizeUrl } from './chatgptAuth'
+import { accountIdFromAccessToken, buildAuthorizeUrl } from './chatgptAuth.ts'
 
 // Every param below is validated server-side against OpenAI's allowlist for
 // the shared Codex client_id. Drift breaks sign-in with a generic

@@ -4,11 +4,11 @@ import { mkdtemp, mkdir, readFile, rm, writeFile, chmod } from 'node:fs/promises
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-// `bun add -g` reaches npm through the proxy only if vn passes it: the proxy
-// lives in config.json, not in the shell, so an upgrade used to hang or fail on
-// networks that need one. The fake bun records what it was handed and fails, so
-// nothing is actually installed.
-test.skipIf(process.platform === 'win32')('vn upgrade runs bun with the configured proxy', async () => {
+// `npm i -g` reaches the registry through the proxy only if vn passes it: the
+// proxy lives in config.json, not in the shell, so an upgrade used to hang or
+// fail on networks that need one. The fake npm records what it was handed and
+// fails, so nothing is actually installed.
+test.skipIf(process.platform === 'win32')('vn upgrade runs npm with the configured proxy', async () => {
   const home = await mkdtemp(join(tmpdir(), 'voicenote-upgrade-'))
   const configDir = join(home, '.config/voicenote')
   const binDir = join(home, 'bin')
@@ -17,8 +17,8 @@ test.skipIf(process.platform === 'win32')('vn upgrade runs bun with the configur
     await mkdir(configDir, { recursive: true })
     await mkdir(binDir, { recursive: true })
     await writeFile(join(configDir, 'config.json'), JSON.stringify({ LOCAL_PROXY_HOST: '127.0.0.1', LOCAL_PROXY_PORT: '7890' }))
-    await writeFile(join(binDir, 'bun'), `#!/bin/sh\nprintf '%s' "$http_proxy" > "$VN_TEST_SEEN"\nexit 1\n`)
-    await chmod(join(binDir, 'bun'), 0o755)
+    await writeFile(join(binDir, 'npm'), `#!/bin/sh\nprintf '%s' "$http_proxy" > "$VN_TEST_SEEN"\nexit 1\n`)
+    await chmod(join(binDir, 'npm'), 0o755)
 
     const result = spawnSync(process.execPath, [join(import.meta.dir, 'cli.ts'), 'upgrade'], {
       env: { HOME: home, PATH: `${binDir}:${dirname(process.execPath)}`, VN_TEST_SEEN: seen },

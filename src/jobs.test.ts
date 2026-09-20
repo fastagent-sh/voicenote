@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { applyOutcome, buildJobsView, classify, emptyState, MAX_ATTEMPTS, migrateLegacyState, parseJobsLimit, parseStateFile, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, startAttempt, type JobRecord, type StateFile } from './jobs'
+import { applyOutcome, buildJobsView, classify, emptyState, MAX_ATTEMPTS, migrateLegacyState, parseJobsLimit, parseStateFile, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, startAttempt, type JobRecord, type StateFile } from './jobs.ts'
 
 const rec = (over: Partial<JobRecord> & { name: string; recorded_at: string; state: JobRecord['state'] }): JobRecord => ({
   source_path: `/Volumes/VTR6500/RECORD/A/${over.name}`,

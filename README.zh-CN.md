@@ -8,14 +8,7 @@ CLI 命令:`vn`
 
 当前主要适配 PHILIPS VTR6500 录音设备,但工作流通用:扫描某个挂载点下的录音 → 转写并按说话人分离 → GPT 在纪要生成阶段内部完成必要清理与过程还原 → 生成智能纪要。
 
-**两种用法:**
-
-- 🖥️ **桌面客户端(GUI)** -- 面向不用终端的用户,自包含 `.app`,一键安装:
-  ```bash
-  curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install-app.sh | bash
-  ```
-  详见下方 [桌面客户端](#桌面客户端guiapp)。
-- ⌨️ **CLI(`vn`)** -- 面向终端用户/开发者,见下方「安装(CLI)」。
+目前提供 CLI(`vn`)。桌面客户端正在用 Electron 重写,见下方[桌面客户端](#桌面客户端)。
 
 ## 安装(CLI)
 
@@ -27,7 +20,7 @@ CLI 命令:`vn`
 curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install.sh | bash
 ```
 
-安装脚本默认**不做交互式配置**:先安装/检查 `ffmpeg`、Bun、Node/npm、pi、`vn`,然后生成可编辑的 `config.json` 模板。安装完成后打开配置文件填写密钥和姓名:
+安装脚本默认**不做交互式配置**:先安装/检查 `ffmpeg`、Node、`vn`(pi 随包安装),然后生成可编辑的 `config.json` 模板。安装完成后打开配置文件填写密钥和姓名:
 
 ```bash
 open ~/.config/voicenote/config.json
@@ -42,9 +35,6 @@ VOICENOTE_NAME="李元" \
 VOICENOTE_ALIAS="Vincent" \
 VOICENOTE_WORKSPACE="$HOME/Documents/meetings" \
 VOLCANO_ASR_KEY="..." \
-VOLCANO_TOS_BUCKET="..." \
-VOLCANO_TOS_ACCESS_KEY="..." \
-VOLCANO_TOS_SECRET_KEY="..." \
 bash <(curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install.sh)
 ```
 
@@ -85,19 +75,13 @@ bun add -g @fastagent-sh/voicenote
 brew install ffmpeg
 ```
 
-安装脚本只会把 `vn` / Bun / Homebrew 的 PATH 写入当前 shell 配置;应用配置写在 `~/.config/voicenote/config.json`。手动配置时至少需要:
+安装脚本只会把 `vn` / Homebrew 的 PATH 写入当前 shell 配置;应用配置写在 `~/.config/voicenote/config.json`。手动配置时至少需要:
 
 ```json
 {
   "VOICENOTE_WORKSPACE": "/Users/you/Documents/meetings",
   "VOLCANO_ASR_KEY": "...",
   "VOLCANO_ASR_RESOURCE_ID": "volc.seedasr.auc",
-  "VOLCANO_TOS_REGION": "cn-guangzhou",
-  "VOLCANO_TOS_ENDPOINT": "tos-s3-cn-guangzhou.volces.com",
-  "VOLCANO_TOS_BUCKET": "...",
-  "VOLCANO_TOS_ACCESS_KEY": "...",
-  "VOLCANO_TOS_SECRET_KEY": "...",
-  "VOLCANO_TOS_KEEP": "0",
   "speakers": {
     "self": { "name": "你的姓名", "aliases": ["你的别名", "英文名", "昵称"] },
     "known": []
@@ -185,7 +169,7 @@ vn uninstall-launch-agent
 安装脚本会生成一个可编辑模板:
 
 ```text
-~/.config/voicenote/config.json     # workspace、Volcano ASR/TOS、summary 后端、本人姓名/别名等
+~/.config/voicenote/config.json     # workspace、Volcano ASR 密钥、summary 后端、本人姓名/别名等
 ```
 
 其中 `speakers` 用于把 Speaker A/B/C 还原成真实姓名,`known` 是已知联系人:
@@ -206,7 +190,7 @@ vn uninstall-launch-agent
 1. 扫描 `/Volumes/VTR6500/RECORD/` 下的录音
 2. 过滤:忽略 `._*`、小文件(<100KB)、短录音(<60s)、已完成录音;如果上次只是在 summary 阶段失败且 transcript 已保存,则不视为完成,会断点继续
 3. 复制原始音频到 `${VOICENOTE_WORKSPACE}/_audio/YYYY-MM/`
-4. 转写:火山豆包【大模型录音文件识别标准版 API】,本地音频先传到 TOS,提交任务后轮询结果,完成后默认删除 TOS 对象
+4. 转写:火山豆包【大模型录音文件识别标准版 API】,音频字节直接随提交请求上传(不经对象存储),然后轮询结果
 5. 转写完成后立刻落盘原始 transcript(不做 lossy 清洗),避免后面步骤失败导致 ASR 费用白付
 6. summary 模型(由 pi 自身配置决定)直接看原始 transcript,在纪要生成阶段内部完成必要清理、说话人还原、观点/争论/共识形成过程还原;如果 summary 失败,下一次 `vn run` / `vn run --latest` 会复用已保存 transcript,直接重试纪要生成,不需要 `vn forget`
 7. 写出 notes / metadata；系统不做任何归档决定，文件留在配置的 workspace 中
@@ -279,119 +263,11 @@ workflow 位于 `.github/workflows/release.yml`:CI 显式跑 typecheck、测试�
 
 > 本包这两步都已完成(Trusted Publisher 已配置,自 0.18.0 起由 CI 发布并带 provenance),常规发版只需打 tag。以下保留给 fork 者:npm 无 pending-publisher,trusted publishing 发不了包的**第一个**版本 —— 先本机 `npm login` 后手动 `npm publish --ignore-scripts` 发一次,再到 npmjs.com 包设置页加 Trusted Publisher(repo、workflow `release.yml`),之后 CI 自动接管(需 npm 账号开 2FA)。
 
-## 桌面客户端(GUI,`app/`)
+## 桌面客户端
 
-面向**非终端用户**:一个自包含的 macOS `.app`(Tauri v2),目标机器无需预装 bun / pi / ffprobe / 全局 `vn`。
-
-**定位**:GUI 是工作状态 dashboard，提供产出快捷入口、拖拽导入以及手动同步/重试。全流程仍由后台 LaunchAgent 用包内 CLI 每 60s 自主运行(关掉 GUI 也跑)。
-
-- 首次:配置向导(身份 / Volcano keys / 代理)→ ChatGPT 登录(设备无终端,走 `vn login` 的浏览器回调流)
-- 之后:主界面显示 agent 活动和最近纪要，可打开产物、重试失败录音，也可把一个本地音频文件拖到窗口任意位置立即排队
-
-### 打包内容
-
-`bun build --compile` 把 `vn` CLI(含 bun 运行时)编成单文件 sidecar;pi 不能 compile(运行时读磁盘数据文件),故整包随行,用一个随包的 `bun` 运行:
-
-| 组件 | 形式 | 用途 |
-|------|------|------|
-| `vn`(编译版) | externalBin | pipeline + ChatGPT 登录 |
-| `bun` | externalBin | 跑 pi |
-| `ffprobe`(macOS 原生 universal) | externalBin | 音频时长(pi 只用 ffprobe,不用整个 ffmpeg) |
-| `pi` + node_modules | resource | 纪要后端(ChatGPT Codex agent) |
-
-运行时 Rust 直接调用包内 `vn`，并注入 `VOICENOTE_PI_BIN`、`VOICENOTE_PI_CLI`、`VOICENOTE_FFPROBE_BIN`；`vn` 无 wrapper 地运行 `<包内bun> <包内pi/cli.js>`。发布构建为 **universal**（x86_64 + arm64，vn/bun/ffprobe 各自 `lipo` 合并；pi 是 JS 无需）。
-
-### 构建
-
-前置:Rust + cargo、node/npm、Xcode CLT,以及 `app/scripts/build-vn-sidecar.sh` 里 `BUN_VERSION` 指定的那个 bun 版本(版本不符脚本直接报错退出,因为 `bun build --compile` 会把当前 bun 的运行时编进产物)。
-
-打包进 App 的东西全部固定版本,不从构建机器上取:pi 来自 `package.json` 的 `dependencies["@earendil-works/pi-coding-agent"]`(与 CLI 包安装的是同一版本),bun 运行时和 ffprobe 来自构建脚本里的 `BUN_VERSION` / `FFPROBE_*_VERSION`。下载产物缓存在 `app/.build-cache/`,改动固定版本号后会重新下载。
-
-```bash
-cd app
-bun install
-bun run tauri build
-# 产物:src-tauri/target/release/bundle/macos/VoiceNote.app
-```
-
-**Windows**(需在 Windows + Rust + MSVC C++ 生成工具上构建;WebView2 在 Win10/11 已预装,NSIS 由 Tauri 自动下载):
-
-```powershell
-cd app
-bun install
-bun run tauri build --config src-tauri/tauri.windows.conf.json
-# 产物:app\src-tauri\target\release\bundle\nsis\VoiceNote_<版本>_x64-setup.exe
-```
-
-Windows 用 `scripts/build-vn-sidecar.ps1` 暂存 `vn.exe`(`--windows-hide-console` 无控制台)/`bun.exe`/`ffprobe.exe` + pi;`tauri.windows.conf.json` 出 NSIS(currentUser 免管理员)。
-
-`beforeBuildCommand` 会先跑 `scripts/build-vn-sidecar.sh` 暂存 vn/bun/ffprobe/pi(`binaries/`、`resources/` 均已 gitignore;pi/ffprobe 拷贝幂等)。开发调试用 `bun run tauri dev`(dev 模式直接跑 `../src/cli.ts`,不打包、不装后台 agent)。
-
-### 用户怎么安装(一键,推荐)
-
-> 与上面 CLI 的 `install.sh` 是两套:CLI 面向开发者(装 bun/pi/vn);这里是面向**非技术用户**的桌面 app(下载 .app → /Applications)。
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install-app.sh | bash
-```
-
-**Windows**(一键,免管理员):
-
-```powershell
-irm https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install-app.ps1 | iex
-```
-
-`install-app.ps1` 从 GitHub Release 下载 NSIS 安装器(自包含 vn/bun/ffprobe/pi)→ 静默装到 `%LOCALAPPDATA%`(无需管理员)→ 启动。
-
-`install-app.sh` 会:从 GitHub Releases 下载已打包的 `.app` → 装到 `/Applications` → **替用户去掉隔离标记**(未公证时绕过 Gatekeeper)→ 打开。目标机器无需 bun/pi/ffprobe/全局 vn(全内置)。
-
-**首次打开**:应用落在「设置」页 → 填身份 + 自己的火山 ASR/TOS 密钥 + 代理(BYOK)→ 保存 → 「状态」面板点「登录 ChatGPT」(浏览器授权一次)。完成后 GUI 自动安装并加载后台 LaunchAgent(指向包内 CLI),插上录音笔即自动转写+生成纪要。
-
-> 后台 agent label 是 `sh.fastagent.voicenote`(与 CLI 版同名,机器上只保留一个)。`.app` 换位置后再打开一次即可重新校准 plist。
-
-**升级**:0.1.9 起内置自动更新 —— 打开 app →「设置 → 软件更新」→「检查更新」，有新版点「下载并安装」，装好自动重启，配置/纪要均保留。首次安装、或从 0.1.8 及更早版本升级（它们还没有更新器），重跑上面的一键安装脚本即可。
-
-> **Windows 从 0.1.11 及更早版本升级**：这些构建的更新地址指向改名前的旧仓库，而旧仓库至今存在、最新版停在 0.1.11，所以「检查更新」永远显示已是最新。同一次改名还换了 bundle identifier，重跑安装脚本**不会**覆盖旧版，两份会同名共存。先在「设置 → 应用」里卸载旧的 VoiceNote，再跑一键安装。卸载不影响配置和纪要。
-
-### 维护者:打包 + 发布
-
-**自动(推荐)**:打 `app-v*` tag 触发 `.github/workflows/release-app.yml`:
-
-```bash
-git tag app-v0.1.0 && git push --tags
-```
-
-**一个 `app-v*` tag = 一个 Release、带 mac + Windows 两平台**。`release-app.yml` 是单一 workflow：mac（universal + ad-hoc 深度签名）与 Windows（NSIS）并行构建，再由 `release` job 汇总发布。每个 Release 同时带：
-
-- **首装包** `VoiceNote.zip`（mac）/ `VoiceNote-setup.exe`（win）—— `install-app.*` 从 `releases/latest/download/...` 取；
-- **更新器产物** `VoiceNote.app.tar.gz` + `latest.json` —— GUI 内 Tauri updater（设置→软件更新）用。
-
-> 更新器需要签名 secrets `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（`tauri signer generate` 生成，公钥填 `tauri.conf.json`）；pubkey 还是占位符时 `preflight` job 会拦下发布。
-
-> 用 `app-v*`（与 CLI 的 `v*` npm 发布 tag 区分）。产物为 **universal**（x86_64 + arm64），Intel 与 Apple Silicon 通用。
-
-**手动**:
-
-```bash
-cd app
-bash scripts/package.sh          # → app/release/VoiceNote-<版本>.zip(约 110MB)
-gh release create app-v0.1.0 app/release/VoiceNote-<版本>.zip#VoiceNote.zip -t "VoiceNote 0.1.0" -n "桌面客户端"
-```
-
-资产名必须是 **`VoiceNote.zip`**(`install-app.sh` 从 `releases/latest/download/VoiceNote.zip` 取)。本地测试可绕过 Release:`VOICENOTE_APP_URL=file:///path/to/VoiceNote.zip bash scripts/install-app.sh`。
-
-### 签名 / 公证(免 `xattr`、双击即用)
-
-JIT entitlements 已就绪(`src-tauri/entitlements.plist`:bun/vn 的 `allow-jit` 等;`tauri.conf.json` 已引用)。`scripts/sign-macos.sh` 做 inside-out 深度签名(hardened runtime + entitlements):
-
-```bash
-# 内部 ad-hoc(已验证 JIT 在 hardened runtime 下存活)
-bash scripts/sign-macos.sh /Applications/VoiceNote.app
-
-# 正式分发(需 Apple Developer Program $99/年 的 Developer ID 证书)
-bash scripts/sign-macos.sh VoiceNote.app "Developer ID Application: NAME (TEAMID)"
-xcrun notarytool submit ... && xcrun stapler staple VoiceNote.app
-```
+Tauri 版桌面客户端已删除。替代它的是一个 Electron 应用：pipeline 直接跑在应用自己的进程里
+(没有 sidecar 可执行文件、没有后台 LaunchAgent,pi 以 SDK 形式作为库调用)。在它完成之前,
+上面的 CLI 就是全部产品。
 
 ## License
 

@@ -8,14 +8,8 @@ CLI command: `vn`
 
 Currently tuned for the PHILIPS VTR6500 voice recorder, but the workflow is generic: scan recordings under a mount point → transcribe with speaker diarization → the selected summary model performs cleanup and process reconstruction → produce smart notes.
 
-**Two ways to use it:**
-
-- 🖥️ **Desktop app (GUI)** — for non-terminal users, a self-contained `.app`, one-line install:
-  ```bash
-  curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install-app.sh | bash
-  ```
-  See [Desktop app](#desktop-app-gui-app) below.
-- ⌨️ **CLI (`vn`)** — for terminal users / developers, see "Install (CLI)" below.
+Today this is a CLI (`vn`). The desktop app is being rewritten on Electron; see
+[Desktop app](#desktop-app) below.
 
 ## Install (CLI)
 
@@ -27,7 +21,7 @@ Recommended: the install script (macOS):
 curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install.sh | bash
 ```
 
-The install script does **no interactive configuration** by default: it installs/checks `ffmpeg`, Bun, Node/npm, pi, and `vn`, then writes an editable `config.json` template. After installation, open the config file and fill in your keys and name:
+The install script does **no interactive configuration** by default: it installs/checks `ffmpeg`, Node, and `vn` (pi ships with the package), then writes an editable `config.json` template. After installation, open the config file and fill in your keys and name:
 
 ```bash
 open ~/.config/voicenote/config.json
@@ -42,9 +36,6 @@ VOICENOTE_NAME="Jane Doe" \
 VOICENOTE_ALIAS="jane" \
 VOICENOTE_WORKSPACE="$HOME/Documents/meetings" \
 VOLCANO_ASR_KEY="..." \
-VOLCANO_TOS_BUCKET="..." \
-VOLCANO_TOS_ACCESS_KEY="..." \
-VOLCANO_TOS_SECRET_KEY="..." \
 bash <(curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install.sh)
 ```
 
@@ -85,19 +76,13 @@ bun add -g @fastagent-sh/voicenote
 brew install ffmpeg
 ```
 
-The install script only writes `vn` / Bun / Homebrew PATH entries to your shell config; app configuration lives in `~/.config/voicenote/config.json`. A manual setup needs at least:
+The install script only writes `vn` / Homebrew PATH entries to your shell config; app configuration lives in `~/.config/voicenote/config.json`. A manual setup needs at least:
 
 ```json
 {
   "VOICENOTE_WORKSPACE": "/Users/you/Documents/meetings",
   "VOLCANO_ASR_KEY": "...",
   "VOLCANO_ASR_RESOURCE_ID": "volc.seedasr.auc",
-  "VOLCANO_TOS_REGION": "cn-guangzhou",
-  "VOLCANO_TOS_ENDPOINT": "tos-s3-cn-guangzhou.volces.com",
-  "VOLCANO_TOS_BUCKET": "...",
-  "VOLCANO_TOS_ACCESS_KEY": "...",
-  "VOLCANO_TOS_SECRET_KEY": "...",
-  "VOLCANO_TOS_KEEP": "0",
   "speakers": {
     "self": { "name": "Your name", "aliases": ["nickname", "alias"] },
     "known": []
@@ -190,7 +175,7 @@ vn uninstall-launch-agent
 The install script writes an editable template:
 
 ```text
-~/.config/voicenote/config.json     # workspace, Volcano ASR/TOS, summary backend, your name/aliases, etc.
+~/.config/voicenote/config.json     # workspace, Volcano ASR key, summary backend, your name/aliases, etc.
 ```
 
 `speakers` maps Speaker A/B/C back to real names; `known` lists known contacts:
@@ -211,7 +196,7 @@ Changes take effect on the next `vn run`. `~`, `$HOME`, and `${HOME}` are accept
 1. Scan recordings under `/Volumes/VTR6500/RECORD/`
 2. Filter: ignore `._*`, small files (<100KB), short recordings (<60s), and already-processed recordings; if a previous run failed only at the summary stage and the transcript is saved, it is not considered done — processing resumes from there
 3. Copy the original audio into `${VOICENOTE_WORKSPACE}/_audio/YYYY-MM/`
-4. Transcribe with the Volcano Doubao large-model audio-file recognition API: upload local audio to TOS, submit the job, poll for results, and delete the TOS object by default when done
+4. Transcribe with the Volcano Doubao large-model audio-file recognition API: post the audio bytes straight to the submit endpoint (no object storage), then poll for the result
 5. Persist the raw transcript immediately after transcription (no lossy cleanup), so a later-stage failure never wastes the ASR spend
 6. The summary model (default: pi codex via ChatGPT Plus) reads the raw transcript directly, performing necessary cleanup, speaker restoration, and reconstruction of views/debates/consensus inside the notes-generation stage; if the summary fails, the next `vn run` / `vn run --latest` reuses the saved transcript and retries only the notes generation — no `vn forget` needed
 7. Write notes / metadata; the system makes no archiving decisions — files stay in the configured workspace
@@ -284,119 +269,12 @@ The workflow lives at `.github/workflows/release.yml`: CI explicitly runs typech
 
 > Both are already done for this package (Trusted Publisher configured, CI publishing since 0.18.0 with provenance), so a routine release needs nothing but the tag. Kept for forks: npm has no pending-publisher, so trusted publishing cannot publish a package's *very first* version — publish once manually with `npm login` + `npm publish --ignore-scripts`, then add a Trusted Publisher on the package settings page at npmjs.com (repo, workflow `release.yml`); CI takes over afterwards (the npm account needs 2FA).
 
-## Desktop app (GUI, `app/`)
+## Desktop app
 
-A self-contained macOS `.app` (Tauri v2) for **non-terminal users**: the target machine needs no pre-installed bun / pi / ffprobe / global `vn`.
-
-**Positioning**: the GUI is a status dashboard with quick access to output, drag-to-import, and manual Sync/Retry controls. The full pipeline still runs autonomously every 60s via the background LaunchAgent using the bundled CLI (it keeps running with the GUI closed).
-
-- First run: settings (identity / Volcano keys / proxy). The notes model comes from pi; ChatGPT users can sign in from the Status panel (`vn login`'s browser-callback flow).
-- After that: the main view shows agent activity and recent notes, opens outputs, retries failed recordings, and accepts one local audio file dropped anywhere on the window.
-
-### What's bundled
-
-`bun build --compile` compiles the `vn` CLI (bun runtime included) into a single-file sidecar; pi cannot be compiled (it reads data files from disk at runtime), so the whole package ships alongside and runs with a bundled `bun`:
-
-| Component | Form | Purpose |
-|------|------|------|
-| `vn` (compiled) | externalBin | pipeline + ChatGPT sign-in |
-| `bun` | externalBin | runs pi |
-| `ffprobe` (native universal on macOS) | externalBin | audio duration (pi only needs ffprobe, not all of ffmpeg) |
-| `pi` + node_modules | resource | notes backend (ChatGPT, OpenAI API, or DeepSeek) |
-
-At runtime, Rust invokes the bundled `vn` directly and injects `VOICENOTE_PI_BIN`, `VOICENOTE_PI_CLI`, and `VOICENOTE_FFPROBE_BIN`; `vn` then runs `<bundled bun> <bundled pi/cli.js>` without a wrapper script. Release builds are **universal** (x86_64 + arm64; vn/bun/ffprobe each merged with `lipo`; pi is JS and needs none).
-
-### Build
-
-Prerequisites: Rust + cargo, node/npm, Xcode CLT, and the exact bun version pinned in `app/scripts/build-vn-sidecar.sh` (`BUN_VERSION`; the script aborts on a mismatch because `bun build --compile` embeds the compiling bun's runtime).
-
-Everything the app ships is pinned, nothing is taken from the build machine: pi from `package.json` (`dependencies["@earendil-works/pi-coding-agent"]`, the same version the CLI package installs), the bun runtime and ffprobe from `BUN_VERSION` / `FFPROBE_*_VERSION` in the build script. Downloads are cached under `app/.build-cache/` and re-fetched when a pin changes.
-
-```bash
-cd app
-bun install
-bun run tauri build
-# Output: src-tauri/target/release/bundle/macos/VoiceNote.app
-```
-
-**Windows** (build on Windows with Rust + MSVC C++ build tools; WebView2 is preinstalled on Win10/11, NSIS is downloaded by Tauri automatically):
-
-```powershell
-cd app
-bun install
-bun run tauri build --config src-tauri/tauri.windows.conf.json
-# Output: app\src-tauri\target\release\bundle\nsis\VoiceNote_<version>_x64-setup.exe
-```
-
-Windows uses `scripts/build-vn-sidecar.ps1` to stage `vn.exe` (`--windows-hide-console`, no console window) / `bun.exe` / `ffprobe.exe` + pi; `tauri.windows.conf.json` produces the NSIS installer (currentUser, no admin).
-
-`beforeBuildCommand` first runs `scripts/build-vn-sidecar.sh` to stage vn/bun/ffprobe/pi (`binaries/` and `resources/` are gitignored; pi/ffprobe copying is idempotent). For development use `bun run tauri dev` (dev mode runs `../src/cli.ts` directly, no bundling, no background agent install).
-
-### How users install (one line, recommended)
-
-> This is separate from the CLI `install.sh` above: the CLI script targets developers (installs bun/pi/vn); this one targets **non-technical users** (download .app → /Applications).
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install-app.sh | bash
-```
-
-**Windows** (one line, no admin):
-
-```powershell
-irm https://raw.githubusercontent.com/fastagent-sh/voicenote/main/scripts/install-app.ps1 | iex
-```
-
-`install-app.ps1` downloads the NSIS installer from the GitHub Release (self-contained vn/bun/ffprobe/pi) → silent install into `%LOCALAPPDATA%` (no admin) → launches it.
-
-`install-app.sh` downloads the packaged `.app` from GitHub Releases → installs to `/Applications` → **removes the quarantine flag for the user** (Gatekeeper bypass for un-notarized builds) → opens it. The target machine needs no bun/pi/ffprobe/global vn (all bundled).
-
-**First launch**: the app lands on Settings. Fill in identity, your Volcano ASR/TOS keys, and proxy as needed. Notes are written by pi with pi's own provider and model; for ChatGPT, click "Sign in to ChatGPT" in the Status panel. Saving installs and loads the background LaunchAgent using the bundled CLI. Once credentials are configured, plug in the recorder for automatic transcription and notes.
-
-> The background agent label is `sh.fastagent.voicenote` (same as the CLI version; only one exists per machine). If the `.app` is moved, open it once to recalibrate the plist.
-
-**Upgrades**: since 0.1.9 the app has a built-in updater — open the app → "Settings → Software update" → "Check for updates"; when a new version appears, click "Download & install"; the app restarts automatically with config/notes preserved. For first installs, or upgrades from 0.1.8 and earlier (which had no updater), re-run the one-line install script above.
-
-> **Windows, from 0.1.11 or earlier**: those builds point their updater at the pre-rebrand repo, which still exists and stops at 0.1.11 — "Check for updates" therefore always reports "up to date". The bundle identifier changed in the same rebrand, so re-running the installer does *not* replace them; both copies stay installed under the same name. Uninstall the old VoiceNote (Settings → Apps) first, then run the one-line install. Config and notes are untouched by the uninstall.
-
-### Maintainers: packaging + release
-
-**Automatic (recommended)**: push an `app-v*` tag to trigger `.github/workflows/release-app.yml`:
-
-```bash
-git tag app-v0.1.0 && git push --tags
-```
-
-**One `app-v*` tag = one Release covering mac + Windows.** `release-app.yml` is a single workflow: mac (universal + ad-hoc deep signing) and Windows (NSIS) build in parallel, then the `release` job publishes. Each Release carries:
-
-- **First-install packages** `VoiceNote.zip` (mac) / `VoiceNote-setup.exe` (win) — fetched by `install-app.*` from `releases/latest/download/...`;
-- **Updater artifacts** `VoiceNote.app.tar.gz` + `latest.json` — used by the in-app Tauri updater (Settings → Software update).
-
-> The updater needs signing secrets `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (generated with `tauri signer generate`; the public key goes in `tauri.conf.json`); the `preflight` job blocks the release while the pubkey is still a placeholder.
-
-> Use `app-v*` (distinct from the CLI's `v*` npm release tags). Artifacts are **universal** (x86_64 + arm64), working on both Intel and Apple Silicon.
-
-**Manual**:
-
-```bash
-cd app
-bash scripts/package.sh          # → app/release/VoiceNote-<version>.zip (~110MB)
-gh release create app-v0.1.0 app/release/VoiceNote-<version>.zip#VoiceNote.zip -t "VoiceNote 0.1.0" -n "Desktop app"
-```
-
-The asset name must be **`VoiceNote.zip`** (`install-app.sh` fetches `releases/latest/download/VoiceNote.zip`). For local testing bypass the Release with: `VOICENOTE_APP_URL=file:///path/to/VoiceNote.zip bash scripts/install-app.sh`.
-
-### Signing / notarization (no `xattr`, double-click to run)
-
-JIT entitlements are in place (`src-tauri/entitlements.plist`: `allow-jit` etc. for bun/vn; referenced from `tauri.conf.json`). `scripts/sign-macos.sh` performs inside-out deep signing (hardened runtime + entitlements):
-
-```bash
-# Internal ad-hoc (JIT verified to survive under hardened runtime)
-bash scripts/sign-macos.sh /Applications/VoiceNote.app
-
-# Official distribution (requires a Developer ID certificate, Apple Developer Program $99/yr)
-bash scripts/sign-macos.sh VoiceNote.app "Developer ID Application: NAME (TEAMID)"
-xcrun notarytool submit ... && xcrun stapler staple VoiceNote.app
-```
+The Tauri desktop app was removed. Its replacement is an Electron app that runs
+the pipeline inside its own process (no sidecar binaries, no background
+LaunchAgent, pi used as a library through its SDK). Until it lands, the CLI
+above is the whole product.
 
 ## License
 

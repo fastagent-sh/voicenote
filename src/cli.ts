@@ -1,14 +1,12 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 import { cac } from 'cac'
 import packageJson from '../package.json' with { type: 'json' }
-import { parseLockOwner } from './runLock'
-import { loginWithBrowser, loginWithDeviceCode, PI_PROVIDER_ID } from './chatgptAuth'
-import { tosObject, type TosConfig as VolcanoTosConfig } from './tos'
-import { applyOutcome, buildJobsView, classify, emptyState, localIso, MAX_ATTEMPTS, migrateLegacyState, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs'
+import { parseLockOwner } from './runLock.ts'
+import { loginWithBrowser, loginWithDeviceCode, PI_PROVIDER_ID } from './chatgptAuth.ts'
+import { applyOutcome, buildJobsView, classify, emptyState, localIso, MAX_ATTEMPTS, migrateLegacyState, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs.ts'
 import { createHash, randomUUID } from 'node:crypto'
 import { appendFile, chmod, mkdir, readFile, writeFile, copyFile, rename, unlink, stat, readdir, rmdir, utimes } from 'node:fs/promises'
-import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, appendFileSync, openSync, closeSync, statSync, readSync, unlinkSync, renameSync } from 'node:fs'
-import { dlopen, FFIType, suffix } from 'bun:ffi'
+import { createReadStream, existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, appendFileSync, openSync, closeSync, statSync, readSync, unlinkSync, renameSync } from 'node:fs'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
@@ -74,7 +72,6 @@ type VolcanoConfig = {
   apiKey: string              // X-Api-Key (new Volcano console)
   resourceId: string
   language?: string
-  tos: VolcanoTosConfig
 }
 
 /** How this install runs pi: which binary, which model, what it may read. */
@@ -127,12 +124,6 @@ const ENV_KEYS = [
   'VOLCANO_ASR_KEY',
   'VOLCANO_ASR_RESOURCE_ID',
   'VOLCANO_ASR_LANGUAGE',
-  'VOLCANO_TOS_REGION',
-  'VOLCANO_TOS_ENDPOINT',
-  'VOLCANO_TOS_BUCKET',
-  'VOLCANO_TOS_ACCESS_KEY',
-  'VOLCANO_TOS_SECRET_KEY',
-  'VOLCANO_TOS_KEEP',
   'VOICENOTE_PI_BIN',
   'VOICENOTE_PI_CLI',
   'PI_CODING_AGENT_DIR',
@@ -149,11 +140,11 @@ const ENV_KEYS = [
   'DEEPSEEK_API_KEY',
 ]
 
-// Volcano endpoints (TOS object storage + openspeech ASR) should NEVER go through
-// the SOCKS/HTTP proxy that pi (ChatGPT Codex OAuth) may need:
-//   1) the proxy bandwidth often chokes on multi-megabyte PUTs to TOS
-//   2) routing China-mainland Volcano APIs through an overseas proxy is slower / unreliable
-const VOLCANO_NO_PROXY_HOSTS = ['.volces.com', '.volcengineapi.com', 'openspeech.bytedance.com']
+// The Volcano ASR endpoint must NEVER go through the SOCKS/HTTP proxy that pi
+// (ChatGPT Codex OAuth) may need: the audio upload is tens of megabytes, which
+// proxy bandwidth chokes on, and routing a China-mainland API through an
+// overseas proxy is slower and less reliable.
+const VOLCANO_NO_PROXY_HOSTS = ['openspeech.bytedance.com']
 
 function systemProxyUrl(): string | null {
   if (process.platform !== 'darwin') return null
@@ -202,18 +193,11 @@ function proxyEnv(s: Settings): Record<string, string> {
 
 function volcanoFrom(s: Settings): VolcanoConfig | null {
   const apiKey = s.VOLCANO_ASR_KEY || ''
-  const tosAccess = s.VOLCANO_TOS_ACCESS_KEY
-  const tosSecret = s.VOLCANO_TOS_SECRET_KEY
-  const bucket = s.VOLCANO_TOS_BUCKET
-  if (!apiKey || !tosAccess || !tosSecret || !bucket) return null
-  const region = s.VOLCANO_TOS_REGION || 'cn-guangzhou'
-  const endpoint = s.VOLCANO_TOS_ENDPOINT || `tos-s3-${region}.volces.com`
-  const keep = ['1', 'true', 'yes'].includes((s.VOLCANO_TOS_KEEP || '0').toLowerCase())
+  if (!apiKey) return null
   return {
     apiKey,
     resourceId: s.VOLCANO_ASR_RESOURCE_ID || 'volc.seedasr.auc',
     language: s.VOLCANO_ASR_LANGUAGE || undefined,
-    tos: { endpoint, region, bucket, accessKey: tosAccess, secretKey: tosSecret, keep },
   }
 }
 
@@ -239,13 +223,13 @@ function settingNumber(s: Settings, key: string, fallback: number): number {
  * Path to the pi CLI that ships with this package. pi is a pinned dependency
  * so every install runs the same version instead of whatever `pi` happens to
  * be on PATH; resolution walks up from this source file, which covers both a
- * repo checkout and a global `bun add` install. Returns null for the compiled
+ * repo checkout and a global npm install. Returns null for the compiled
  * sidecar (no node_modules on disk) — there the GUI passes VOICENOTE_PI_BIN /
  * VOICENOTE_PI_CLI for its staged copy — and for a source tree with no
  * dependencies installed, where `pi` from PATH is the remaining option.
  */
 function bundledPiCli(): string | null {
-  let dir = import.meta.dir
+  let dir = dirname(fileURLToPath(import.meta.url))
   for (;;) {
     const candidate = join(dir, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'cli.js')
     if (existsSync(candidate)) return candidate
@@ -519,22 +503,8 @@ function normalizeRunMode(opts: any): RunMode {
 // Cross-process lock
 // ────────────────────────────────────────────────────────────────────────────
 
-// Single-instance mutual exclusion via an OS advisory lock (flock) held on an open
-// fd. The kernel releases it automatically when the process exits — including
-// SIGKILL/crash — so there is NO pid / mtime / heartbeat / stale-steal logic to
-// race on. flock is loaded from libSystem, so it is macOS-only; every other
-// platform uses the pid+timestamp lockfile below.
-const flockFn = (() => {
-  try {
-    const lib = dlopen(`libSystem.${suffix}`, { flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } })
-    return lib.symbols.flock as (fd: number, op: number) => number
-  } catch { return null }
-})()
-const FLOCK_EX_NB = 2 | 4  // LOCK_EX | LOCK_NB
-const FLOCK_UN = 8
-
-// Lockfile used wherever flock is not available (Windows, Linux). A pid+timestamp
-// file, created atomically with 'wx'. We only reclaim an existing lock when its
+// Single-instance mutual exclusion via a pid+timestamp lockfile created
+// atomically with 'wx'. We only reclaim an existing lock when its
 // owner pid is dead OR the lock is stale (older than STALE_MS). The holder refreshes its timestamp every 5 minutes
 // (heartbeat below), so a legitimately long RUNNING job — ASR on a multi-hour
 // recording — never looks stale. The staleness escape exists for the pid-reuse
@@ -543,11 +513,9 @@ const FLOCK_UN = 8
 // (timers don't fire while asleep), so the heartbeat verifies ownership before
 // each refresh and, if the lock was reclaimed, stops touching it and warns — the
 // old run finishes unprotected rather than corrupting the new holder's record.
-// Task Scheduler's IgnoreNew already blocks the common 60s overlap; this only has
-// to cover a manual `vn run` racing the scheduled one. The tiny create/reclaim
-// window is acceptable: its failure mode is conservatively skipping one run (same
-// as mac when flock is already held).
-async function acquireRunLockFile(): Promise<{ release: () => Promise<void> } | null> {
+// The tiny create/reclaim window is acceptable: its failure mode is
+// conservatively skipping one run.
+async function acquireRunLock(): Promise<{ release: () => Promise<void> } | null> {
   await mkdir(dirname(LOCK_PATH), { recursive: true })
   const STALE_MS = 30 * 60 * 1000
   const tryCreate = (): number | null => {
@@ -619,41 +587,18 @@ async function acquireRunLockFile(): Promise<{ release: () => Promise<void> } | 
   return { release }
 }
 
-async function acquireRunLock(): Promise<{ release: () => Promise<void> } | null> {
-  if (!flockFn) return acquireRunLockFile()
-  await mkdir(dirname(LOCK_PATH), { recursive: true })
-  // The lock is a regular file we keep open. Builds ≤ 0.15.2 used a *directory*
-  // here, held purely by its existence, with no pid or refreshed mtime inside — so
-  // a leftover legacy dir carries NO reliable signal about whether an old `vn run`
-  // still holds it. Rather than guess (and risk deleting a live lock → concurrent
-  // double-processing), refuse to auto-reclaim it: warn and skip. Normal upgrades
-  // don't hit this (≤ 0.15.2 removes its own dir lock on SIGTERM/exit); it only
-  // appears after a hard crash of an old build, where a one-time manual cleanup is
-  // the safe move.
-  let fd: number
-  try { fd = openSync(LOCK_PATH, 'w') }
-  catch (e: any) {
-    if (e?.code !== 'EISDIR') throw e
-    console.error(`Found a legacy (≤ 0.15.2) lock directory at ${LOCK_PATH}; it carries no liveness info and can't be auto-reclaimed safely. If no 'vn run' is active, remove it once:  rm -rf "${LOCK_PATH}"  — skipping this run.`)
-    return null
-  }
-  if (flockFn(fd, FLOCK_EX_NB) !== 0) { closeSync(fd); return null }  // another run holds it
-  let released = false
-  const release = async () => {
-    if (released) return
-    released = true
-    try { flockFn(fd, FLOCK_UN) } catch {}
-    try { closeSync(fd) } catch {}
-  }
-  process.once('exit', () => { void release() })
-  process.once('SIGINT', () => { void release(); process.exit(130) })
-  process.once('SIGTERM', () => { void release(); process.exit(143) })
-  return { release }
-}
-
 // ────────────────────────────────────────────────────────────────────────────
 // Recording scan
 // ────────────────────────────────────────────────────────────────────────────
+
+/** Every file under `dir`, recursively, as absolute paths (dotfiles included). */
+async function* walkFiles(dir: string): AsyncGenerator<string> {
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) yield* walkFiles(full)
+    else yield full
+  }
+}
 
 function parseRecordedAt(path: string): Date {
   const stem = basename(path, extname(path))
@@ -667,12 +612,7 @@ function parseRecordedAt(path: string): Date {
 
 async function sha256File(path: string): Promise<string> {
   const h = createHash('sha256')
-  const reader = Bun.file(path).stream().getReader()
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    h.update(value)
-  }
+  for await (const chunk of createReadStream(path)) h.update(chunk as Buffer)
   return h.digest('hex')
 }
 
@@ -799,7 +739,7 @@ async function scanRecordings(config: Config): Promise<{ recordings: Recording[]
   ]
   for (const root of roots) {
     try {
-      for await (const file of new Bun.Glob('**/*').scan({ cwd: root.dir, absolute: true, dot: true })) {
+      for await (const file of walkFiles(root.dir)) {
         if (!isCandidateFile(file)) continue
         const st = await stat(file).catch(() => null)
         // Listed a moment ago but unreadable now: the device is going away, or
@@ -894,26 +834,15 @@ async function promoteOutputs(from: LocalFiles, to: LocalFiles): Promise<void> {
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// Volcano (Doubao ASR + TOS upload)
+// Volcano (Doubao ASR). The audio bytes are posted straight to the submit
+// endpoint as base64 — no object storage, no presigned URL, no second set of
+// credentials. Verified against a 42 MB / 2h57m recording.
 // ───────────────────────────────────────────────────────────────────────
 
-function volcanoContentTypeFromExt(ext: string): string {
-  const e = ext.replace(/^\./, '').toLowerCase()
-  switch (e) {
-    case 'mp3': return 'audio/mpeg'
-    case 'wav': return 'audio/wav'
-    case 'm4a': return 'audio/mp4'
-    case 'aac': return 'audio/aac'
-    case 'ogg': return 'audio/ogg'
-    case 'flac': return 'audio/flac'
-    default: return 'application/octet-stream'
-  }
-}
-
-async function volcanoSubmitTask(volc: VolcanoConfig, taskId: string, audioUrl: string, format: string): Promise<void> {
+async function volcanoSubmitTask(volc: VolcanoConfig, taskId: string, audioBase64: string, format: string): Promise<void> {
   const body = {
     user: { uid: 'voicenote' },
-    audio: { url: audioUrl, format },
+    audio: { data: audioBase64, format },
     request: {
       model_name: 'bigmodel',
       enable_itn: true,
@@ -990,25 +919,14 @@ function volcanoFormatTranscript(result: { text?: string; utterances?: VolcanoUt
 }
 
 async function volcanoTranscribeAudio(volc: VolcanoConfig, audioPath: string, rec: Recording): Promise<string> {
-  const ext = extname(audioPath).toLowerCase() || '.mp3'
-  const format = ext.replace(/^\./, '')
-  const contentType = volcanoContentTypeFromExt(ext)
-  const { month } = dateParts(rec.recordedAt)
-  const key = `voicenote/${month}/${rec.sourceId}-${Date.now()}${ext}`
-  const object = tosObject(volc.tos, key)
-  console.log(`Volcano: upload audio to TOS as ${key}`)
-  await withHeartbeat('upload audio to TOS', () => object.write(Bun.file(audioPath), { type: contentType }), 30)
-  let cleanedUp = false
-  const cleanup = async () => {
-    if (cleanedUp || volc.tos.keep) return
-    cleanedUp = true
-    await object.delete().catch(e => warnSideEffect(`delete TOS object ${key}`, e))
-  }
-  try {
-    const audioUrl = object.presign({ method: 'GET', expiresIn: 6 * 3600 })
+  const format = (extname(audioPath).toLowerCase() || '.mp3').replace(/^\./, '')
+  {
     const taskId = randomUUID()
-    console.log(`Volcano: submit ASR task ${taskId} (resource=${volc.resourceId}, format=${format})`)
-    await volcanoSubmitTask(volc, taskId, audioUrl, format)
+    const audioBase64 = (await readFile(audioPath)).toString('base64')
+    console.log(`Volcano: submit ASR task ${taskId} (resource=${volc.resourceId}, format=${format}, ${(audioBase64.length / 1e6).toFixed(1)} MB upload)`)
+    // The upload happens inside this POST, so a multi-hour recording can hold
+    // it for a minute or more; the heartbeat keeps the run visibly alive.
+    await withHeartbeat('upload audio and submit ASR task', () => volcanoSubmitTask(volc, taskId, audioBase64, format), 30)
     const started = Date.now()
     const expectedSeconds = rec.durationSeconds || 0
     const maxWaitMs = Math.max(20 * 60 * 1000, Math.ceil(expectedSeconds * 1000 * 1.5))
@@ -1061,13 +979,11 @@ async function volcanoTranscribeAudio(volc: VolcanoConfig, audioPath: string, re
       if (q.status === '20000003') throw new Error('Volcano: 20000003 silent audio (no speech detected)')
       throw new Error(`Volcano query failed: status=${q.status} message=${q.message}`)
     }
-  } finally {
-    await cleanup()
   }
 }
 
 async function transcribeAudio(config: Config, audioPath: string, rec: Recording): Promise<string> {
-  if (!config.volcano) throw new Error('Volcano ASR not configured. Set VOLCANO_ASR_KEY / VOLCANO_TOS_* in config.json.')
+  if (!config.volcano) throw new Error('Volcano ASR not configured. Set VOLCANO_ASR_KEY in config.json.')
   return volcanoTranscribeAudio(config.volcano, audioPath, rec)
 }
 
@@ -1923,7 +1839,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   if (targets.length && !opts.dryRun) {
     const needsAsr = targets.some(rec => !resumableTranscriptFiles(config, rec, store, mode, force))
     if (needsAsr && !config.volcano) {
-      if (shouldLogIdleStatus(`asr-misconfig:${config.recordDir}`)) console.error('ASR not configured: Volcano needs VOLCANO_ASR_KEY / VOLCANO_TOS_*. Skipping; run `vn doctor`, fix config, then re-run.')
+      if (shouldLogIdleStatus(`asr-misconfig:${config.recordDir}`)) console.error('ASR not configured: Volcano needs VOLCANO_ASR_KEY. Skipping; run `vn doctor`, fix config, then re-run.')
       return
     }
   }
@@ -2479,22 +2395,20 @@ async function showErrors(opts: { lines?: number }): Promise<void> {
 }
 
 async function upgradeSelf(): Promise<void> {
-  // The registry fetch needs the configured proxy: `bun add -g` only sees it if
-  // we pass it, because the proxy lives in config.json, not in the shell.
+  // The registry fetch needs the configured proxy: npm only sees it if we pass
+  // it, because the proxy lives in config.json, not in the shell.
   const env = { ...process.env, ...getConfig().childEnv }
-  // Plain `bun` from PATH: vn is started by bun (`#!/usr/bin/env bun`), so an
-  // interactive upgrade always has it. If it is somehow missing, the spawn error
-  // below says so instead of the command silently "failing".
-  // `bun add -g` upgrades in place: verified no dependency loop on npm→npm re-add
-  // (the steady-state upgrade path) nor on replacing an old git-ref install. No
-  // remove-first, so a failed add leaves the running vn intact.
-  console.log('$ bun add -g @fastagent-sh/voicenote')
+  // Plain `npm` from PATH: vn is installed with it, so an interactive upgrade
+  // always has it. If it is somehow missing, the spawn error below says so
+  // instead of the command silently "failing". `npm i -g` upgrades in place; no
+  // remove-first, so a failed install leaves the running vn intact.
+  console.log('$ npm i -g @fastagent-sh/voicenote')
   const addCode = await new Promise<number>(res =>
-    spawn('bun', ['add', '-g', '@fastagent-sh/voicenote'], { stdio: 'inherit', shell: IS_WINDOWS, env })
+    spawn('npm', ['i', '-g', '@fastagent-sh/voicenote'], { stdio: 'inherit', shell: IS_WINDOWS, env })
       .on('close', c => res(c ?? 1))
-      .on('error', (e: Error) => { console.error(`Cannot run bun: ${e.message}`); res(1) }))
+      .on('error', (e: Error) => { console.error(`Cannot run npm: ${e.message}`); res(1) }))
   if (addCode !== 0) {
-    console.error(`Upgrade failed: \`bun add -g @fastagent-sh/voicenote\` exited ${addCode}. Your current install is unchanged; retry later.`)
+    console.error(`Upgrade failed: \`npm i -g @fastagent-sh/voicenote\` exited ${addCode}. Your current install is unchanged; retry later.`)
     process.exitCode = 1
     return
   }
@@ -2622,7 +2536,6 @@ async function collectDoctor() {
           configured: true as const,
           auth: 'new-console',
           resourceId: v.resourceId,
-          tos: { bucket: v.tos.bucket, region: v.tos.region, endpoint: v.tos.endpoint, keep: v.tos.keep, accessKey: !!v.tos.accessKey, secretKey: !!v.tos.secretKey },
           language: v.language ?? null,
         }
       : { configured: false as const },
@@ -2688,8 +2601,6 @@ async function doctor(opts: { json?: boolean } = {}): Promise<void> {
   if (s.volcano.configured) {
     console.log(`volcano.auth=${s.volcano.auth}`)
     console.log(`volcano.resourceId=${s.volcano.resourceId}`)
-    console.log(`volcano.tos=bucket:${s.volcano.tos.bucket} region:${s.volcano.tos.region} endpoint:${s.volcano.tos.endpoint} keep:${s.volcano.tos.keep}`)
-    console.log(`volcano.tos.accessKey=${s.volcano.tos.accessKey ? 'loaded' : 'missing'} secretKey=${s.volcano.tos.secretKey ? 'loaded' : 'missing'}`)
     if (s.volcano.language) console.log(`volcano.language=${s.volcano.language}`)
   } else {
     console.log(`volcano=not configured`)
@@ -2772,7 +2683,7 @@ cli.command('log', 'Print the daily log (today by default)')
 
 cli.command('errors', 'Show recent ERROR lines from daily logs').option('--lines <n>', 'How many lines to print', { default: 20 }).action(showErrors)
 
-cli.command('upgrade', 'Upgrade to the latest published version via bun add -g').action(upgradeSelf)
+cli.command('upgrade', 'Upgrade to the latest published version via npm i -g').action(upgradeSelf)
 
 cli.command('doctor', 'Check environment')
   .option('--json', 'Output structured status as JSON (for the GUI)')
@@ -2813,5 +2724,6 @@ try {
   await cli.runMatchedCommand()
 } catch (e: any) {
   console.error(`vn: ${e?.message || e}`)
+  if (process.env.VN_DEBUG) console.error(e?.stack || '')
   process.exit(1)
 }

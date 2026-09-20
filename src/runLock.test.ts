@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseLockOwner } from "./runLock";
+import { parseLockOwner } from './runLock.ts';
 
 describe("parseLockOwner", () => {
   test("our own pid → mine", () => {
