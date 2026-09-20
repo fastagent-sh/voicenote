@@ -69,11 +69,11 @@ type Api = {
   jobs: (limit?: number) => Promise<JobsResponse>
   configGet: () => Promise<{ path: string; env: Record<string, string>; self: { name: string | null; aliases: string[] } }>
   configSet: (payload: unknown) => Promise<{ ok: true }>
-  run: () => Promise<void>
+  run: () => Promise<{ queued: boolean }>
   retry: (id: string) => Promise<{ queued: boolean }>
   regenerate: (id: string) => Promise<{ queued: boolean }>
   recorderFiles: () => Promise<RecorderFiles>
-  runFile: (path: string) => Promise<void>
+  runFile: (path: string) => Promise<{ queued: boolean }>
   pendingRetries: () => Promise<string[]>
   importRecording: (path: string) => Promise<void>
   pathForFile: (file: File) => string
@@ -86,7 +86,7 @@ type Api = {
   search: (query: string) => Promise<{ path: string; title: string; snippet: string }[]>
   openNoteAsHtml: (title: string, html: string) => Promise<string>
   setAutoProcess: (enabled: boolean) => Promise<boolean>
-  on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'recorder:connected' | 'retry:pending', listener: (payload: any) => void) => () => void
+  on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'run:queued' | 'recorder:connected' | 'retry:pending', listener: (payload: any) => void) => () => void
 }
 
 export const vn = (window as unknown as { vn: Api }).vn

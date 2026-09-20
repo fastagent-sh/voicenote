@@ -37,19 +37,40 @@ function broadcast(channel: string, payload?: unknown): void {
   mainWindow?.webContents.send(channel, payload)
 }
 
-/** Runs the pipeline unless one is already running; resolves when it finishes. */
-function startRun(reason: 'manual' | 'recorder' | 'retry' | 'file', file?: string): Promise<void> {
-  if (running) return running
-  broadcast('run:state', { running: true, reason })
-  running = runPipeline(file, {})
+/**
+ * Work asked for while a run holds the lock. A request must never be dropped
+ * silently: picking a file and seeing nothing happen is worse than waiting.
+ * An entry with no `file` means "scan the recorder".
+ */
+type RunRequest = { reason: 'manual' | 'recorder' | 'retry' | 'file'; file?: string }
+const queuedRuns: RunRequest[] = []
+
+/** Starts a run, or queues it behind the one in flight. Never blocks a caller. */
+function requestRun(request: RunRequest): { queued: boolean } {
+  if (running) {
+    queuedRuns.push(request)
+    broadcast('run:queued', queuedRuns.length)
+    return { queued: true }
+  }
+  startRun(request)
+  return { queued: false }
+}
+
+function startRun(request: RunRequest): void {
+  broadcast('run:state', { running: true, reason: request.reason })
+  running = runPipeline(request.file, {})
     .catch((error: unknown) => { broadcast('run:error', String((error as Error)?.message ?? error)) })
     .finally(() => {
       running = null
-      broadcast('run:state', { running: false })
       updateTray()
+      const next = queuedRuns.shift()
+      broadcast('run:queued', queuedRuns.length)
+      // Hand straight over to a queued request; the window stays in "running"
+      // state instead of flickering back to idle between the two.
+      if (next) startRun(next)
+      else broadcast('run:state', { running: false })
     })
   updateTray()
-  return running
 }
 
 // The recorder is a mount point that appears when it is plugged in. Polling it
@@ -65,7 +86,7 @@ function watchRecorder(): void {
     lastRecorderSeen = present
     if (appeared) {
       broadcast('recorder:connected')
-      void startRun('recorder')
+      requestRun({ reason: 'recorder' })
     }
   }, 5000)
 }
@@ -78,7 +99,7 @@ function updateTray(): void {
     { label: running ? '处理中…' : '空闲', enabled: false },
     { type: 'separator' },
     { label: '显示主窗口', click: () => showWindow() },
-    { label: '立即处理', enabled: !running, click: () => { void startRun('manual') } },
+    { label: '立即处理', enabled: !running, click: () => { requestRun({ reason: 'manual' }) } },
     { label: '插入录音笔时自动处理', type: 'checkbox', checked: autoProcess, click: (item) => { autoProcess = item.checked; updateTray() } },
     { type: 'separator' },
     { label: '打开笔记文件夹', click: () => { void shell.openPath(getConfig().workspace) } },
@@ -151,7 +172,9 @@ function registerIpc(): void {
     resetConfigCache()
     return result
   })
-  ipcMain.handle('run', () => startRun('manual'))
+  // These return as soon as the work is accepted. Awaiting the run itself
+  // would leave the caller hanging for minutes and make a click look dead.
+  ipcMain.handle('run', () => requestRun({ reason: 'manual' }))
   // Retrying takes the run lock, so it cannot happen while a recording is
   // being processed. Rejecting would be honest but useless — the user asked
   // for this recording to be redone, so queue the intent and run it when the
@@ -170,12 +193,12 @@ function registerIpc(): void {
           pendingRetries.delete(id)
           broadcast('retry:pending', [...pendingRetries])
         }
-        await startRun('retry')
+        requestRun({ reason: 'retry' })
       })
       return { queued: true }
     }
     await apply(id)
-    void startRun('retry')
+    requestRun({ reason: 'retry' })
     return { queued: false }
   }
   ipcMain.handle('retry', (_e, id: string) => requeue(id, retryRecording))
@@ -183,10 +206,10 @@ function registerIpc(): void {
   ipcMain.handle('recorder-files', () => listRecorderFiles())
   // Processing one file by path bypasses the age/size filters, which is the
   // point: the user picked this recording explicitly.
-  ipcMain.handle('run-file', (_e, path: string) => startRun('file', path))
+  ipcMain.handle('run-file', (_e, path: string) => requestRun({ reason: 'file', file: path }))
   ipcMain.handle('import', async (_e, path: string) => {
     await importRecording(path, { json: true })
-    void startRun('manual')
+    return requestRun({ reason: 'manual' })
   })
   ipcMain.handle('login', async () => {
     await loginChatGPT({ json: true, emit: (event) => broadcast('login:event', event) })

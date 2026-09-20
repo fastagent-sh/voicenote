@@ -173,6 +173,7 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null)
   const [dropping, setDropping] = useState(false)
   const [pendingRetries, setPendingRetries] = useState<string[]>([])
+  const [queuedRuns, setQueuedRuns] = useState(0)
 
   /** Every user action goes through here: a failure must be visible. */
   const act = useCallback(async (work: () => Promise<unknown>, done?: string) => {
@@ -212,6 +213,7 @@ export function App() {
       }),
       vn.on('run:error', (message: string) => setToast(message)),
       vn.on('retry:pending', (ids: string[]) => setPendingRetries(ids)),
+      vn.on('run:queued', (count: number) => setQueuedRuns(count)),
       vn.on('recorder:connected', () => setToast('检测到录音笔,开始处理')),
       vn.on('login:event', (event: LoginEvent) => {
         if (event.event === 'success') { setToast('已登录 ChatGPT'); void refresh() }
@@ -383,7 +385,9 @@ export function App() {
         </nav>
 
         <div className="sidebar-foot">
-          <button className="primary" onClick={() => void act(() => vn.run())} disabled={running}>{running ? '处理中…' : '立即处理'}</button>
+          <button className="primary" onClick={() => void act(() => vn.run())} disabled={running}>
+            {running ? (queuedRuns > 0 ? `处理中 · 还有 ${queuedRuns}` : '处理中…') : '立即处理'}
+          </button>
           <button onClick={() => void act(async () => { const path = await vn.pickAudio(); if (path) await vn.importRecording(path) }, '已加入队列')}>导入</button>
           <button onClick={() => setScreen('settings')} title="设置">⚙</button>
         </div>

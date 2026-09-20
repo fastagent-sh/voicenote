@@ -6,11 +6,11 @@ const api = {
   jobs: (limit = 50) => ipcRenderer.invoke('jobs', limit),
   configGet: () => ipcRenderer.invoke('config:get'),
   configSet: (payload: unknown) => ipcRenderer.invoke('config:set', payload),
-  run: () => ipcRenderer.invoke('run'),
+  run: () => ipcRenderer.invoke('run') as Promise<{ queued: boolean }>,
   retry: (id: string) => ipcRenderer.invoke('retry', id) as Promise<{ queued: boolean }>,
   regenerate: (id: string) => ipcRenderer.invoke('regenerate', id) as Promise<{ queued: boolean }>,
   recorderFiles: () => ipcRenderer.invoke('recorder-files'),
-  runFile: (path: string) => ipcRenderer.invoke('run-file', path),
+  runFile: (path: string) => ipcRenderer.invoke('run-file', path) as Promise<{ queued: boolean }>,
   pendingRetries: () => ipcRenderer.invoke('pending-retries') as Promise<string[]>,
   importRecording: (path: string) => ipcRenderer.invoke('import', path),
   // Electron removed File.path; this is the supported way to get the real path
@@ -25,7 +25,7 @@ const api = {
   search: (query: string) => ipcRenderer.invoke('search', query),
   openNoteAsHtml: (title: string, html: string) => ipcRenderer.invoke('note:open-html', { title, html }),
   setAutoProcess: (enabled: boolean) => ipcRenderer.invoke('auto-process', enabled),
-  on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'recorder:connected' | 'retry:pending', listener: (payload: any) => void) => {
+  on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'run:queued' | 'recorder:connected' | 'retry:pending', listener: (payload: any) => void) => {
     const wrapped = (_event: unknown, payload: unknown) => listener(payload)
     ipcRenderer.on(channel, wrapped)
     return () => { ipcRenderer.removeListener(channel, wrapped) }

@@ -43,9 +43,9 @@ export function Recorder({ running, onClose, onToast }: {
 
   const process = async (item: RecorderFile) => {
     try {
-      await vn.runFile(item.path)
-      onToast(`开始处理 ${item.name}`)
-      onClose()
+      const { queued } = await vn.runFile(item.path)
+      onToast(queued ? `${item.name} 已排队,当前任务完成后开始` : `开始处理 ${item.name}`)
+      onClose()   // the sidebar is where progress lives
     } catch (e) {
       onToast(String((e as Error).message ?? e))
     }
