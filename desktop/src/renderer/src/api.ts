@@ -48,9 +48,11 @@ type Api = {
   importRecording: (path: string) => Promise<void>
   pathForFile: (file: File) => string
   pickAudio: () => Promise<string | null>
+  pickDirectory: () => Promise<string | null>
   login: () => Promise<void>
   openPath: (path: string) => Promise<string>
   readNote: (path: string) => Promise<string>
+  search: (query: string) => Promise<{ path: string; title: string; snippet: string }[]>
   openNoteAsHtml: (title: string, html: string) => Promise<string>
   setAutoProcess: (enabled: boolean) => Promise<boolean>
   on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'recorder:connected', listener: (payload: any) => void) => () => void

@@ -4,7 +4,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { readFile, writeFile } from 'node:fs/promises'
+import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import {
   collectDoctor, configGetData, configSetData, getConfig, importRecording, jobsListData,
@@ -13,6 +13,10 @@ import {
 import { onPipelineEvent } from '../../../src/progress.ts'
 
 const dirname = fileURLToPath(new URL('.', import.meta.url))
+// Tray art: template images (black + alpha) so macOS recolours them for the
+// light and dark menu bar.
+const resourcesDir = app.isPackaged ? join(process.resourcesPath, 'resources') : join(dirname, '../../resources')
+const trayIcon = (busy: boolean) => nativeImage.createFromPath(join(resourcesDir, busy ? 'trayBusyTemplate.png' : 'trayTemplate.png'))
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -60,7 +64,7 @@ function watchRecorder(): void {
 
 function updateTray(): void {
   if (!tray) return
-  tray.setTitle(running ? '◐' : '◉')
+  tray.setImage(trayIcon(!!running))
   tray.setToolTip(running ? 'VoiceNote — 处理中' : 'VoiceNote — 空闲')
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: running ? '处理中…' : '空闲', enabled: false },
@@ -97,7 +101,40 @@ function createWindow(): void {
   else void mainWindow.loadFile(join(dirname, '../renderer/index.html'))
 }
 
+/**
+ * Full-text search over the notes on disk. Titles come back from the job list
+ * already; this is for "I remember someone said X". The workspace holds one
+ * markdown file per note in month folders, so reading them is fast enough to
+ * do per keystroke without an index — revisit if a workspace ever gets big
+ * enough to feel it.
+ */
+async function searchNotes(query: string): Promise<{ path: string; title: string; snippet: string }[]> {
+  const needle = query.trim().toLowerCase()
+  if (needle.length < 2) return []
+  const workspace = getConfig().workspace
+  const months = await readdir(workspace, { withFileTypes: true }).catch(() => [])
+  const results: { path: string; title: string; snippet: string; mtime: number }[] = []
+  for (const month of months) {
+    if (!month.isDirectory() || month.name.startsWith('_') || month.name.startsWith('.')) continue
+    const dir = join(workspace, month.name)
+    for (const entry of await readdir(dir).catch(() => [])) {
+      if (!entry.endsWith('.md')) continue
+      const path = join(dir, entry)
+      const text = await readFile(path, 'utf8').catch(() => '')
+      const at = text.toLowerCase().indexOf(needle)
+      if (at < 0) continue
+      const title = text.match(/^#\s+(.+)$/m)?.[1] ?? entry.replace(/\.md$/, '')
+      const snippet = text.slice(Math.max(0, at - 60), at + 120).replace(/\s+/g, ' ').trim()
+      const info = await stat(path).catch(() => null)
+      results.push({ path, title, snippet, mtime: info?.mtimeMs ?? 0 })
+    }
+  }
+  results.sort((a, b) => b.mtime - a.mtime)
+  return results.slice(0, 50).map(({ path, title, snippet }) => ({ path, title, snippet }))
+}
+
 function registerIpc(): void {
+  ipcMain.handle('search', (_e, query: string) => searchNotes(query))
   ipcMain.handle('status', () => collectDoctor())
   ipcMain.handle('jobs', (_e, limit: number) => jobsListData(limit ?? 50))
   ipcMain.handle('config:get', () => configGetData())
@@ -128,6 +165,10 @@ function registerIpc(): void {
     await shell.openExternal(pathToFileURL(file).href)
     return file
   })
+  ipcMain.handle('pick-directory', async () => {
+    const picked = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
+    return picked.canceled ? null : picked.filePaths[0]
+  })
   ipcMain.handle('pick-audio', async () => {
     const picked = await dialog.showOpenDialog({
       properties: ['openFile'],
@@ -141,9 +182,7 @@ function registerIpc(): void {
 app.whenReady().then(() => {
   registerIpc()
   onPipelineEvent((event) => broadcast('pipeline:event', event))
-  // A 1x1 transparent image keeps the tray alive until real art exists; the
-  // title text is what the user reads on macOS.
-  tray = new Tray(nativeImage.createEmpty())
+  tray = new Tray(trayIcon(false))
   updateTray()
   watchRecorder()
   createWindow()

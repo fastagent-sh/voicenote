@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { vn, type Job, type JobsResponse, type LoginEvent, type Status } from './api.ts'
 import { explainFailure, topProblem } from './problems.ts'
 import { NoteReader } from './NoteReader.tsx'
+import { Onboarding } from './Onboarding.tsx'
 import { Settings } from './Settings.tsx'
 
 const STEP_ORDER = ['Copy audio', 'Transcribe audio', 'Generate', 'Write outputs']
@@ -120,6 +121,9 @@ export function App() {
   const [query, setQuery] = useState('')
   const [screen, setScreen] = useState<'timeline' | 'settings'>('timeline')
   const [reading, setReading] = useState<Job | null>(null)
+  const [readingPath, setReadingPath] = useState<{ path: string; title: string } | null>(null)
+  const [hits, setHits] = useState<{ path: string; title: string; snippet: string }[]>([])
+  const [skipSetup, setSkipSetup] = useState(false)
   const [banner, setBanner] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
@@ -153,6 +157,26 @@ export function App() {
     return () => { clearInterval(id); off.forEach(fn => fn()) }
   }, [refresh])
 
+  // Search runs over the notes on disk; the title filter below is instant, so
+  // this only adds body matches.
+  useEffect(() => {
+    if (query.trim().length < 2) { setHits([]); return }
+    const id = setTimeout(() => { void vn.search(query).then(setHits) }, 200)
+    return () => clearTimeout(id)
+  }, [query])
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key === 'f') {
+        event.preventDefault()
+        document.querySelector<HTMLInputElement>('.search')?.focus()
+      }
+      if (event.key === 'Escape') { setReading(null); setReadingPath(null) }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   useEffect(() => {
     if (!banner) return
     const id = setTimeout(() => setBanner(null), 6000)
@@ -178,7 +202,13 @@ export function App() {
 
   const problem = topProblem(status)
 
-  if (reading) return <NoteReader job={reading} onClose={() => setReading(null)} />
+  if (reading) return <NoteReader path={reading.notes!} title={reading.title || reading.name} onClose={() => setReading(null)} />
+  if (readingPath) return <NoteReader path={readingPath.path} title={readingPath.title} onClose={() => setReadingPath(null)} />
+
+  const needsSetup = !skipSetup && status !== null && (!status.volcano.configured || !status.pi.auth)
+  if (needsSetup) {
+    return <Onboarding status={status} onDone={() => setSkipSetup(true)} onRefresh={() => void refresh()} />
+  }
 
   if (screen === 'settings') {
     return <Settings onClose={() => { setScreen('timeline'); void refresh() }} onLogin={() => vn.login()} status={status} />
@@ -213,6 +243,17 @@ export function App() {
       <main className="timeline">
         {active && <ActiveCard job={active} note={note} tool={tool} startedAt={startedAt} />}
         {!active && !rest.length && <div className="empty">还没有纪要。插上录音笔,或把音频拖进这个窗口。</div>}
+        {hits.length > 0 && (
+          <section className="hits">
+            <h4>正文里提到「{query.trim()}」</h4>
+            {hits.map(hit => (
+              <article key={hit.path} className="card card-openable" onClick={() => setReadingPath({ path: hit.path, title: hit.title })}>
+                <div className="card-title">{hit.title}</div>
+                <div className="card-sub snippet">…{hit.snippet}…</div>
+              </article>
+            ))}
+          </section>
+        )}
         {rest.map(job => (
           <JobCard
             key={job.id ?? job.name}

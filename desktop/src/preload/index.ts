@@ -13,9 +13,11 @@ const api = {
   // of a dropped file.
   pathForFile: (file: File) => webUtils.getPathForFile(file),
   pickAudio: () => ipcRenderer.invoke('pick-audio'),
+  pickDirectory: () => ipcRenderer.invoke('pick-directory'),
   login: () => ipcRenderer.invoke('login'),
   openPath: (path: string) => ipcRenderer.invoke('open-path', path),
   readNote: (path: string) => ipcRenderer.invoke('note:read', path),
+  search: (query: string) => ipcRenderer.invoke('search', query),
   openNoteAsHtml: (title: string, html: string) => ipcRenderer.invoke('note:open-html', { title, html }),
   setAutoProcess: (enabled: boolean) => ipcRenderer.invoke('auto-process', enabled),
   on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'recorder:connected', listener: (payload: any) => void) => {

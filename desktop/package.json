@@ -56,6 +56,9 @@
     "electronLanguages": [
       "en",
       "zh_CN"
+    ],
+    "extraResources": [
+      "resources/**"
     ]
   }
 }
