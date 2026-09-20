@@ -7,9 +7,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import {
-  collectDoctor, configGetData, configSetData, getConfig, importRecording, jobsListData,
-  listRecorderFiles, loginChatGPT, NOTE_HTML_CSS, regenerateNotes, resetConfigCache,
-  retryRecording, runPipeline, VERSION,
+  collectDoctor, configGetData, configSetData, getConfig, ignoreJob, importRecording,
+  jobsListData, listRecorderFiles, loginChatGPT, NOTE_HTML_CSS, regenerateNotes,
+  resetConfigCache, retryRecording, runPipeline, VERSION,
 } from '../../../src/core.ts'
 import { onPipelineEvent } from '../../../src/progress.ts'
 
@@ -204,6 +204,9 @@ function registerIpc(): void {
   ipcMain.handle('retry', (_e, id: string) => requeue(id, retryRecording))
   ipcMain.handle('regenerate', (_e, id: string) => requeue(id, regenerateNotes))
   ipcMain.handle('recorder-files', () => listRecorderFiles())
+  // Ignoring touches the same state file as a run, so it waits for the lock
+  // the same way a retry does.
+  ipcMain.handle('ignore', (_e, id: string) => requeue(id, async (jobId) => { await ignoreJob(jobId) }))
   // Processing one file by path bypasses the age/size filters, which is the
   // point: the user picked this recording explicitly.
   ipcMain.handle('run-file', (_e, path: string) => requestRun({ reason: 'file', file: path }))

@@ -72,6 +72,7 @@ type Api = {
   run: () => Promise<{ queued: boolean }>
   retry: (id: string) => Promise<{ queued: boolean }>
   regenerate: (id: string) => Promise<{ queued: boolean }>
+  ignore: (id: string) => Promise<{ queued: boolean }>
   recorderFiles: () => Promise<RecorderFiles>
   runFile: (path: string) => Promise<{ queued: boolean }>
   pendingRetries: () => Promise<string[]>

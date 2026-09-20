@@ -23,7 +23,12 @@
 type JobState = 'queued' | 'running' | 'done' | 'filtered' | 'error' | 'gave_up'
 
 /** Which stage produced a failure; also carries the filter reason. */
-type JobCode = 'transcribe_failed' | 'summary_failed' | 'interrupted' | 'too_small' | 'too_short' | 'too_old' | null
+type JobCode =
+  | 'transcribe_failed' | 'summary_failed' | 'interrupted'
+  // Reasons a recording is set aside rather than failed: the file is fine, it
+  // just holds nothing worth transcribing, or the user said to drop it.
+  | 'too_small' | 'too_short' | 'too_old' | 'no_speech' | 'bad_audio' | 'ignored'
+  | null
 
 export type JobRecord = {
   name: string
@@ -72,7 +77,7 @@ type FilterCode = Extract<JobCode, 'too_small' | 'too_short' | 'too_old'>
 type Verdict =
   | { run: true }
   | { run: false; persist: true; code: FilterCode; detail: string | null }
-  | { run: false; persist: false; code: 'already_done' | 'gave_up'; detail: string | null }
+  | { run: false; persist: false; code: 'already_done' | 'gave_up' | 'no_speech' | 'bad_audio' | 'ignored'; detail: string | null }
 
 type ScanFacts = { recordedAt: Date; sizeBytes: number; durationSeconds: number | null }
 type Limits = { maxAgeHours: number; minBytes: number; minDurationSeconds: number }
@@ -88,7 +93,14 @@ export function classify(
   limits: Limits,
   opts: { force: boolean; notesMode: boolean; now: number },
 ): Verdict {
+  // An explicit "ignore" outranks even --force: the user said to leave this
+  // file alone, and a manual run over the whole recorder must respect that.
+  if (entry?.code === 'ignored') return { run: false, persist: false, code: 'ignored', detail: null }
   if (opts.force) return { run: true }
+  // Answers that will not change on a retry, so they are never re-paid for.
+  if (entry?.code === 'no_speech' || entry?.code === 'bad_audio') {
+    return { run: false, persist: false, code: entry.code, detail: entry.detail }
+  }
   if (entry?.state === 'done') return { run: false, persist: false, code: 'already_done', detail: null }
   // Only the summary is outstanding, and this run doesn't make summaries. The
   // transcription stage is genuinely finished — re-running it would pay for ASR
@@ -152,9 +164,15 @@ export function applyOutcome(entry: JobRecord, outcome: Outcome, now: string): v
       patchJob(entry, { title: outcome.title, paths: outcome.paths }, now)
       giveUp('summary_failed', outcome.message)
       return
-    case 'failed':
+    case 'failed': {
+      const setAside = setAsideCode(outcome.message)
+      if (setAside) {
+        patchJob(entry, { state: 'filtered', code: setAside, detail: outcome.message, attempts: 0 }, now)
+        return
+      }
       giveUp('transcribe_failed', outcome.message)
       return
+    }
     case 'interrupted': {
       // An interrupted run says nothing about the recording: the process was
       // killed (app quit, sleep, power loss) before it could report. Charging
@@ -198,6 +216,15 @@ export function requeueFailed(entry: JobRecord, now: string): boolean {
   if (entry.state !== 'error' && entry.state !== 'gave_up') return false
   patchJob(entry, { state: 'queued', detail: null, attempts: 0 }, now)
   return true
+}
+
+/**
+ * Set a recording aside for good: the file stays on the recorder, but no run
+ * picks it up again. This is the way out of a dead end — a failure whose
+ * retry would fail identically still has to be removable from the list.
+ */
+export function ignoreRecording(entry: JobRecord, now: string): void {
+  patchJob(entry, { state: 'filtered', code: 'ignored', detail: null, attempts: 0 }, now)
 }
 
 /**
@@ -373,7 +400,7 @@ export function parseStateFile(text: string, path: string): StateFile {
   const jobs: Record<string, JobRecord> = {}
   for (const [id, j] of Object.entries<any>(raw)) {
     if (!j || typeof j !== 'object') continue
-    jobs[id] = {
+    const entry: JobRecord = {
       ...j,
       name: typeof j.name === 'string' ? j.name : id,
       source_path: typeof j.source_path === 'string' ? j.source_path : '',
@@ -382,6 +409,18 @@ export function parseStateFile(text: string, path: string): StateFile {
       interruptions: Number.isInteger(j.interruptions) && j.interruptions >= 0 ? j.interruptions : 0,
       paths: j.paths && typeof j.paths === 'object' ? j.paths : null,
     }
+    // Records written before "no speech" and "unusable audio" were recognised
+    // sit in the failure list forever, offering a retry that fails the same
+    // way. Reclassify them on read rather than leaving dead ends on screen.
+    const setAside = entry.state !== 'done' && entry.code === 'transcribe_failed'
+      ? setAsideCode(entry.detail ?? '')
+      : null
+    if (setAside) {
+      entry.state = 'filtered'
+      entry.code = setAside
+      entry.attempts = 0
+    }
+    jobs[id] = entry
   }
   return { version: 2, jobs }
 }
@@ -400,6 +439,22 @@ const FILTER_LABELS: Record<string, string> = {
   too_small: 'too small',
   too_short: 'too short',
   too_old: 'too old',
+  no_speech: 'no speech',
+  bad_audio: 'unusable audio',
+  ignored: 'ignored',
+}
+
+/**
+ * A transcription that came back "there is no speech in here" or "this is not
+ * usable audio" is not a failure to retry: the answer will not change. Such a
+ * recording belongs with the ones that were filtered out, not in the list of
+ * things the user still has to deal with.
+ */
+function setAsideCode(message: string): JobCode | null {
+  const text = message.toLowerCase()
+  if (/20000003|no valid speech|silent audio/.test(text)) return 'no_speech'
+  if (/45000|invalid audio|audio convert failed/.test(text)) return 'bad_audio'
+  return null
 }
 
 /** `2026-07-29T12:06:29` → `2026-07-29 12:06`. */

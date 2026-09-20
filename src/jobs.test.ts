@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { applyOutcome, buildJobsView, classify, emptyState, MAX_ATTEMPTS, MAX_INTERRUPTIONS, migrateLegacyState, parseJobsLimit, parseStateFile, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, startAttempt, type JobRecord, type StateFile } from './jobs.ts'
+import { applyOutcome, buildJobsView, classify, emptyState, ignoreRecording, MAX_ATTEMPTS, MAX_INTERRUPTIONS, migrateLegacyState, parseJobsLimit, parseStateFile, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, startAttempt, type JobRecord, type StateFile } from './jobs.ts'
 
 const rec = (over: Partial<JobRecord> & { name: string; recorded_at: string; state: JobRecord['state'] }): JobRecord => ({
   source_path: `/Volumes/VTR6500/RECORD/A/${over.name}`,
@@ -378,4 +378,41 @@ test('a record from a newer build is refused, not re-run', () => {
   const alien = rec({ name: 'a.mp3', recorded_at: '', state: 'teleported' as any })
   expect(classify(FACTS, alien, LIMITS, opts())).toMatchObject({ run: false })
   expect(view(state({ a: alien })).items[0]!.status).toBe('error')
+})
+
+// A recording with no speech is not a job to retry — the answer will not
+// change — and a dead end the user cannot clear is worse than a failure.
+test('unusable audio is set aside, not queued for retry', () => {
+  const j = rec({ name: 'a.mp3', recorded_at: '', state: 'queued', attempts: 0 })
+  startAttempt(j, 'T1')
+  applyOutcome(j, { kind: 'failed', message: 'Volcano: 20000003 silent audio (no speech detected)' }, 'T2')
+  expect(j).toMatchObject({ state: 'filtered', code: 'no_speech', attempts: 0 })
+
+  // And it stays set aside on the next scan, without paying for ASR again.
+  const verdict = classify({ recordedAt: new Date(), sizeBytes: 5_000_000, durationSeconds: 600 }, j, LIMITS, opts())
+  expect(verdict).toMatchObject({ run: false, persist: false, code: 'no_speech' })
+})
+
+test('ignoring a recording outranks even --force', () => {
+  const j = rec({ name: 'a.mp3', recorded_at: '', state: 'gave_up', code: 'transcribe_failed', attempts: 3 })
+  ignoreRecording(j, 'T')
+  expect(j).toMatchObject({ state: 'filtered', code: 'ignored' })
+  const facts = { recordedAt: new Date(), sizeBytes: 5_000_000, durationSeconds: 600 }
+  expect(classify(facts, j, LIMITS, opts())).toMatchObject({ run: false, code: 'ignored' })
+  expect(classify(facts, j, LIMITS, { ...opts(), force: true })).toMatchObject({ run: false, code: 'ignored' })
+})
+
+// Records written before "no speech" was recognised are stuck in the failure
+// list offering a retry that cannot succeed; reading them reclassifies them.
+test('old unusable-audio failures are reclassified on read', () => {
+  const file = JSON.stringify({
+    version: 2,
+    jobs: {
+      a: { name: 'a.mp3', state: 'error', code: 'transcribe_failed', attempts: 1, detail: 'Volcano: 20000003 silent audio (no speech detected) (attempt 1/3)' },
+      b: { name: 'b.mp3', state: 'error', code: 'transcribe_failed', attempts: 1, detail: 'fetch failed' },
+    },
+  })
+  const parsed = parseStateFile(file, '/tmp/jobs.json')
+  expect(parsed.jobs.a).toMatchObject({ state: 'filtered', code: 'no_speech', attempts: 0 })
+  expect(parsed.jobs.b).toMatchObject({ state: 'error', code: 'transcribe_failed', attempts: 1 })
 })

@@ -5,7 +5,7 @@ import {
   VERSION,
   configGet, configSet, doctor, ensureScheduler, forgetRecording, importRecording,
   installScheduler, jobsList, lastMeeting, listMeetings, loginChatGPT, openTarget,
-  printSchedulerStatus, regenerateNotes, retryRecording, runPipeline, showErrors, showLog,
+  ignoreJob, printSchedulerStatus, regenerateNotes, retryRecording, runPipeline, showErrors, showLog,
   uninstallScheduler, upgradeSelf,
 } from './core.ts'
 
@@ -42,6 +42,7 @@ cli.command('import <file>', 'Copy one audio file into the durable manual-import
   .action((file: string, opts: { json?: boolean }) => importRecording(file, opts))
 cli.command('forget <key>', 'Drop a recording\'s job record so it is queued again (a saved transcript on disk is still reused)').action((key: string) => forgetRecording(key))
 cli.command('retry <id>', 'Requeue one failed recording while retaining saved outputs').action((id: string) => retryRecording(id))
+cli.command('ignore <id>', 'Set a recording aside so no run picks it up again').action((id: string) => ignoreJob(id))
 cli.command('regenerate <id>', 'Write the notes again from the saved transcript (no new transcription cost)').action((id: string) => regenerateNotes(id))
 
 cli.command('log', 'Print the daily log (today by default)')

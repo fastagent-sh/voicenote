@@ -9,6 +9,7 @@ const api = {
   run: () => ipcRenderer.invoke('run') as Promise<{ queued: boolean }>,
   retry: (id: string) => ipcRenderer.invoke('retry', id) as Promise<{ queued: boolean }>,
   regenerate: (id: string) => ipcRenderer.invoke('regenerate', id) as Promise<{ queued: boolean }>,
+  ignore: (id: string) => ipcRenderer.invoke('ignore', id) as Promise<{ queued: boolean }>,
   recorderFiles: () => ipcRenderer.invoke('recorder-files'),
   runFile: (path: string) => ipcRenderer.invoke('run-file', path) as Promise<{ queued: boolean }>,
   pendingRetries: () => ipcRenderer.invoke('pending-retries') as Promise<string[]>,

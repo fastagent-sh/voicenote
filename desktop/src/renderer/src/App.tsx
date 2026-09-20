@@ -14,6 +14,9 @@ const FILTER_REASONS: Record<string, string> = {
   too_old: '早于设定的时间范围',
   too_small: '文件太小',
   too_short: '时长太短',
+  no_speech: '没有人声',
+  bad_audio: '音频无法识别',
+  ignored: '已忽略',
 }
 
 const STEPS = [
@@ -124,10 +127,11 @@ function ActiveDetail({ job, live }: { job: Job; live: Live }) {
   )
 }
 
-function FailureDetail({ job, pending, onRetry, onLogin, onSettings, onOpen }: {
+function FailureDetail({ job, pending, onRetry, onIgnore, onLogin, onSettings, onOpen }: {
   job: Job
   pending: boolean
   onRetry: () => void
+  onIgnore: () => void
   onLogin: () => void
   onSettings: () => void
   onOpen: (path: string) => void
@@ -151,11 +155,15 @@ function FailureDetail({ job, pending, onRetry, onLogin, onSettings, onOpen }: {
           {!pending && problem.action?.kind === 'settings' && <button className="primary" onClick={onSettings}>{problem.action.label}</button>}
           {!pending && problem.action?.kind === 'retry' && job.id && <button className="primary" onClick={onRetry}>重试</button>}
           {job.transcript && <button onClick={() => onOpen(job.transcript!)}>打开转写稿</button>}
+          {/* Every failure needs a way out, including the ones a retry cannot fix. */}
+          {!pending && job.id && <button onClick={onIgnore}>不再处理这条</button>}
           {job.detail && <button className="link" onClick={() => setRaw(v => !v)}>{raw ? '收起原始错误' : '原始错误'}</button>}
         </div>
         {raw && <pre className="raw-error">{job.detail}</pre>}
       </div>
-      <p className="hint">转写稿已经保存,重试只会重新生成纪要,不会重复花费转写费用。</p>
+      {job.transcript
+        ? <p className="hint">转写稿已经保存,重试只会重新生成纪要,不会重复花费转写费用。</p>
+        : <p className="hint">「不再处理这条」只是把它从列表里移走,录音笔上的文件不会被删除。</p>}
     </div>
   )
 }
@@ -276,7 +284,13 @@ export function App() {
     if (!selected && active) setSelected({ kind: 'job', id: active.id! })
   }, [active, selected])
 
-  const skipped = filteredRow?.filtered?.total ?? 0
+  // Only the recordings a person might actually want processed are counted:
+  // a two-second accidental press is not a to-do item.
+  const SCRAP_CODES = ['too_small', 'too_short', 'no_speech', 'bad_audio', 'ignored']
+  const byCode = filteredRow?.filtered?.byCode ?? {}
+  const skipped = Object.entries(byCode)
+    .filter(([code]) => !SCRAP_CODES.includes(code))
+    .reduce((total, [, count]) => total + count, 0)
   const problem = topProblem(status)
 
   if (screen === 'settings') {
@@ -320,7 +334,7 @@ export function App() {
             <span className="device-title">录音笔文件</span>
             <span className="device-sub">
               {status?.recorder.exists
-                ? (skipped > 0 ? `${skipped} 个录音未处理,点这里查看` : '全部处理完了,点这里查看')
+                ? (skipped > 0 ? `${skipped} 个录音待处理,点这里查看` : '全部处理完了,点这里查看')
                 : '未连接 · 仍可查看上次的列表'}
             </span>
           </span>
@@ -409,6 +423,7 @@ export function App() {
             job={selectedJob}
             pending={!!selectedJob.id && pendingRetries.includes(selectedJob.id)}
             onRetry={() => { if (selectedJob.id) void act(() => vn.retry(selectedJob.id!), '已加入重试队列') }}
+            onIgnore={() => { if (selectedJob.id) { void act(() => vn.ignore(selectedJob.id!), '已移出列表'); setSelected(null) } }}
             onLogin={() => void act(() => vn.login())}
             onSettings={() => setScreen('settings')}
             onOpen={(path) => void act(() => vn.openPath(path))}
