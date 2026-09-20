@@ -59,7 +59,7 @@ type Status = {
   workspace: string;
   recorder: { dir: string; exists: boolean };
   volcano: { configured: true; tos: { bucket: string } } | { configured: false };
-  pi: { available: boolean };
+  pi: { available: boolean; auth: boolean };
   summary: { model: string | null };
   proxy: { url: string | null };
   identity: { self: string | null };
@@ -129,6 +129,12 @@ function renderStatus() {
   if (!status) { box.appendChild(statusRow(t("Status"), t("Checking…"), "muted")); return; }
   const s = status;
   box.appendChild(statusRow(t("Notes generation"), s.pi.available ? t("pi ready") : t("pi not available"), s.pi.available ? "ok" : "err"));
+  // `auth` only means credentials are stored; an expired token that fails to
+  // refresh still reads as signed in until a run actually uses it.
+  box.appendChild(statusRow(t("ChatGPT sign-in"), s.pi.auth ? t("Credentials saved") : t("Not signed in"), s.pi.auth ? "ok" : "warn"));
+  // Stays clickable when signed in: the only cure for a refresh token the
+  // backend rejected is signing in again.
+  $("login-btn").textContent = s.pi.auth ? t("Sign in to ChatGPT again") : t("Sign in to ChatGPT");
   box.appendChild(statusRow(t("Summary model"), s.summary.model ?? t("pi's own default"), "muted"));
   box.appendChild(statusRow(t("Transcription"), s.volcano.configured ? t("Configured · {0}", s.volcano.tos.bucket) : t("Not configured"), s.volcano.configured ? "ok" : "err"));
   box.appendChild(statusRow(t("Proxy"), s.proxy.url ?? t("Not set"), s.proxy.url ? "ok" : "warn"));

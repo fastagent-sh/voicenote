@@ -268,11 +268,6 @@ function getConfig(): Config {
   // vn's own fetch (the ChatGPT OAuth flow) reads the proxy from the process
   // environment, so the derived values have to land there as well.
   for (const [key, value] of Object.entries(proxy)) process.env[key] = value
-  // Passed to every child: the proxy, plus the credentials and config dir that
-  // pi — not vn — resolves for itself.
-  const childEnv = { ...proxy }
-  for (const key of ['PI_CODING_AGENT_DIR', 'OPENAI_API_KEY', 'DEEPSEEK_API_KEY']) if (s[key]) childEnv[key] = s[key]!
-
   const deviceVolume = s.VOICENOTE_DEVICE_VOLUME || 'VTR6500'
   const workspace = expandHome(s.VOICENOTE_WORKSPACE || '~/Documents/meetings')
   // pi keeps credentials in its config dir, which PI_CODING_AGENT_DIR relocates.
@@ -280,6 +275,13 @@ function getConfig(): Config {
   // pipeline reads and refreshes: an interactive pi session rewrites its own
   // auth.json wholesale on exit and has already dropped entries that way.
   const piAgentDir = expandHome(s.PI_CODING_AGENT_DIR || join(os.homedir(), '.pi', 'agent'))
+  // Passed to every child: the proxy, plus the credentials and the config dir
+  // pi resolves for itself. pi gets the same EXPANDED path vn reports as
+  // `authPath`; forwarding the raw setting handed pi a literal "$HOME/..."
+  // directory, so every summary failed with "No API key found" while doctor
+  // kept reporting the credentials as present.
+  const childEnv: Record<string, string> = { ...proxy, PI_CODING_AGENT_DIR: piAgentDir }
+  for (const key of ['OPENAI_API_KEY', 'DEEPSEEK_API_KEY']) if (s[key]) childEnv[key] = s[key]!
   configCache = Object.freeze({
     recordDir: expandHome(s.VOICENOTE_RECORD_DIR || `/Volumes/${deviceVolume}/RECORD`),
     workspace,
@@ -2026,15 +2028,19 @@ async function launchAgentEnv(config: Config): Promise<Record<string, string>> {
   }
   // Provenance matters here, so this reads the raw sources rather than Config:
   // only paths the GUI injected into our environment (and that config.json does
-  // not already carry) have to be written into the plist.
+  // not already carry) have to be written into the plist. VOICENOTE_PI_BIN and
+  // VOICENOTE_PI_CLI travel as a pair — `<bun> <cli.js>` with the script half
+  // missing would start bun with no program. A pi that vn resolves from its own
+  // node_modules needs no entry at all: the scheduled run resolves it the same
+  // way, and it stays correct when bun or pi is upgraded underneath.
   const fileEnv = configFileEnv()
-  for (const key of ['VOICENOTE_PI_CLI', 'VOICENOTE_FFPROBE_BIN'] as const) {
+  for (const key of ['VOICENOTE_PI_BIN', 'VOICENOTE_PI_CLI', 'VOICENOTE_FFPROBE_BIN'] as const) {
     if (process.env[key] && process.env[key] !== fileEnv[key]) env[key] = process.env[key]!
   }
-  const configuredPi = config.pi.bin
-  if (configuredPi.startsWith('/')) env.VOICENOTE_PI_BIN = configuredPi
-  else {
-    const found = await runCommand(IS_WINDOWS ? 'where' : 'which', [configuredPi], 5000)
+  // A bare `pi` resolves only through PATH, and launchd's PATH is not the login
+  // shell's — pin it now, while the user's environment is still available.
+  if (!config.pi.cli && !config.pi.bin.startsWith('/') && !env.VOICENOTE_PI_BIN) {
+    const found = await runCommand(IS_WINDOWS ? 'where' : 'which', [config.pi.bin], 5000)
     const path = found.code === 0 ? (found.stdout.trim().split(/\r?\n/)[0] || '') : ''
     if (path && existsSync(path)) env.VOICENOTE_PI_BIN = path
   }

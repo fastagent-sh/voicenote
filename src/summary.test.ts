@@ -21,6 +21,9 @@ async function runWithFakePi(config: Record<string, string>, expectModel: string
   try {
     await mkdir(configDir, { recursive: true })
     await mkdir(join(workspace, '_transcripts', '2026-09'), { recursive: true })
+    // A config path written as "$HOME/..." must reach pi expanded, or pi looks
+    // for credentials in a literal "$HOME" directory and every summary fails.
+    const expectAgentDir = config.PI_CODING_AGENT_DIR?.replace('$HOME', home) ?? null
     await writeFile(fakePi, `
       const a = process.argv
       const model = a.includes('--model') ? a[a.indexOf('--model') + 1] : null
@@ -28,6 +31,7 @@ async function runWithFakePi(config: Record<string, string>, expectModel: string
       else if (a.includes('--provider')) { console.error('voicenote must never pick a provider'); process.exit(1) }
       else if (model !== ${JSON.stringify(expectModel)}) { console.error('unexpected --model: ' + model); process.exit(1) }
       else if (${JSON.stringify(expectProxy)} && process.env.http_proxy !== ${JSON.stringify(expectProxy)}) { console.error('pi did not inherit http_proxy: ' + process.env.http_proxy); process.exit(1) }
+      else if (${JSON.stringify(expectAgentDir)} && process.env.PI_CODING_AGENT_DIR !== ${JSON.stringify(expectAgentDir)}) { console.error('pi got an unexpanded config dir: ' + process.env.PI_CODING_AGENT_DIR); process.exit(1) }
       else console.log(JSON.stringify({ title: 'Fake note', summary: 'ok' }))
     `)
     await writeFile(join(configDir, 'config.json'), JSON.stringify({
@@ -72,4 +76,12 @@ test('VOICENOTE_PI_MODEL is passed straight to pi as --model', async () => {
 // proxy and dies on `fetch failed`.
 test('pi inherits the proxy derived from config, not just the real environment', async () => {
   await runWithFakePi({ LOCAL_PROXY_HOST: '127.0.0.1', LOCAL_PROXY_PORT: '7897' }, null, 'http://127.0.0.1:7897')
+}, 30_000)
+
+// vn expands `~`/`$HOME` in PI_CODING_AGENT_DIR for its own auth-path reporting;
+// pi must get the same expanded value. It used to get the raw setting, so
+// `vn doctor` reported credentials as present while every summary failed with
+// "No API key found".
+test('pi gets an expanded PI_CODING_AGENT_DIR, not the raw setting', async () => {
+  await runWithFakePi({ PI_CODING_AGENT_DIR: '$HOME/.config/voicenote/pi-agent' }, null)
 }, 30_000)

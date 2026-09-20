@@ -436,14 +436,16 @@ export function buildJobsView(
   done.sort((a, b) => -asc(a, b))
 
   const filteredRow = foldFiltered(filtered)
-  // Priority is the array order: live work, then the queue, then anything needing
-  // attention, then history. Everything is subject to `limit` — exempting the
+  // Priority is the array order: live work, the queue, anything needing
+  // attention, then the skipped recordings — those are unprocessed work the user
+  // can still act on (widen the history range), so they must not sit below a
+  // long list of finished notes where nobody scrolls. `done` is history and
+  // comes last. Everything is subject to `limit` — exempting the
   // head would make one broken credential (every recording failing MAX_ATTEMPTS
   // times into `attention`) an unbounded list, with `total` claiming it was whole.
-  const ordered = [...running, ...queued, ...attention, ...done]
-  const items: JobView[] = ordered.slice(0, Math.max(0, opts.limit - (filteredRow ? 1 : 0)))
-  if (filteredRow) items.push(filteredRow)
-  const total = ordered.length + (filteredRow ? 1 : 0)
+  const ordered = [...running, ...queued, ...attention, ...(filteredRow ? [filteredRow] : []), ...done]
+  const items: JobView[] = ordered.slice(0, Math.max(0, opts.limit))
+  const total = ordered.length
 
   for (const it of items) delete (it as any)._t
   // `queued_total` is pre-truncation on purpose: "N recordings waiting" counted

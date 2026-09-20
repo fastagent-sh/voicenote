@@ -62,6 +62,9 @@ export const ZH: Record<string, string> = {
   "Empty = pi's own default; or e.g. openai-codex/gpt-5.6-sol": "留空 = 用 pi 自己的默认模型；也可填如 openai-codex/gpt-5.6-sol",
   "Summary model": "纪要模型",
   "pi's own default": "pi 的默认模型",
+  "ChatGPT sign-in": "ChatGPT 登录",
+  "Credentials saved": "已登录",
+  "Not signed in": "未登录",
   "pi ready": "pi 可用",
   "pi not available": "pi 不可用",
   "DeepSeek API Key": "DeepSeek API Key",
@@ -164,6 +167,7 @@ export const ZH: Record<string, string> = {
   "Sync failed: {0}": "同步失败：{0}",
 
   // Login
+  "Sign in to ChatGPT again": "重新登录 ChatGPT",
   "Starting sign-in…": "正在启动登录…",
   "Browser opened; this completes automatically after you authorize…": "已打开浏览器，授权完成后会自动继续…",
   "Enter {0} at {1}": "在 {1} 输入 {0}",

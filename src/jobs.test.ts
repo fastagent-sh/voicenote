@@ -30,7 +30,7 @@ test('a running row needs BOTH a live pid and a `running` record', () => {
   expect(view(done, current).items[0]!.status).toBe('done')
 })
 
-test('filtered records fold into a single counted row, always last', () => {
+test('filtered records fold into a single counted row, ranked above finished notes', () => {
   const s = state({
     a: rec({ name: 'a.mp3', recorded_at: '2026-07-01T10:00:00', state: 'filtered', code: 'too_small' }),
     b: rec({ name: 'b.mp3', recorded_at: '2026-07-02T10:00:00', state: 'filtered', code: 'too_small' }),
@@ -41,7 +41,8 @@ test('filtered records fold into a single counted row, always last', () => {
   const { items, total } = view(s)
   expect(items).toHaveLength(2)
   expect(total).toBe(2)
-  expect(items[1]).toMatchObject({ status: 'filtered', name: '4 recordings filtered out', detail: 'too small ×2, too short ×1, too old ×1', history_filtered: true })
+  expect(items[0]).toMatchObject({ status: 'filtered', name: '4 recordings filtered out', detail: 'too small ×2, too short ×1, too old ×1', history_filtered: true })
+  expect(items[1]).toMatchObject({ status: 'done', name: 'd.mp3' })
 })
 
 test('queue is oldest-first (pipeline order), history newest-first', () => {
