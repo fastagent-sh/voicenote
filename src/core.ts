@@ -241,11 +241,12 @@ export function getConfig(): Config {
   for (const [key, value] of Object.entries(proxy)) process.env[key] = value
   const deviceVolume = s.VOICENOTE_DEVICE_VOLUME || 'VTR6500'
   const workspace = expandHome(s.VOICENOTE_WORKSPACE || '~/Documents/meetings')
-  // pi keeps credentials in its config dir, which PI_CODING_AGENT_DIR relocates.
-  // Point it at a voicenote-owned directory to get an auth.json that only the
-  // pipeline reads and refreshes: an interactive pi session rewrites its own
-  // auth.json wholesale on exit and has already dropped entries that way.
-  const piAgentDir = expandHome(s.PI_CODING_AGENT_DIR || join(os.homedir(), '.pi', 'agent'))
+  // Credentials live in a voicenote-owned directory, not pi's ~/.pi/agent.
+  // Sharing that file means sharing an account with the pi CLI, and an
+  // interactive pi session rewrites its auth.json wholesale on exit — it has
+  // dropped entries that way. PI_CODING_AGENT_DIR still overrides it for
+  // anyone who does want one shared login.
+  const piAgentDir = expandHome(s.PI_CODING_AGENT_DIR || join(CONFIG_DIR, 'pi-agent'))
   // Passed to every child: the proxy, plus the credentials and the config dir
   // pi resolves for itself. pi gets the same EXPANDED path vn reports as
   // `authPath`; forwarding the raw setting handed pi a literal "$HOME/..."

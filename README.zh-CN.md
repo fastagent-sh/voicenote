@@ -117,18 +117,21 @@ brew install ffmpeg
 不选 provider, 也不会回退到第二个。pi 失败时 transcript 会保留, 用 `vn run --latest`
 重试纪要即可。
 
-### 给 voicenote 一份独立凭证
+### 独立的凭证
 
-`PI_CODING_AGENT_DIR` 可以改掉 pi 的配置目录, `auth.json` 就存在那里。指向一个
-voicenote 自己的目录后, `vn login` 写入这里, pi 也在这里刷新 token, 交互式 pi 会话
-碰不到它 —— 那边退出时会整份覆写自己的 `auth.json`, 之前就把 provider 条目悄悄弄丢过:
+`vn login` 自己跑完整的 ChatGPT(Codex)OAuth 流程 —— PKCE、localhost 回调、token 交换 ——
+并把结果存进 **voicenote 自己的**配置目录 `~/.config/voicenote/pi-agent/auth.json`,
+而不是 pi 的 `~/.pi/agent`:共用那个文件意味着和 pi CLI 共用同一个 ChatGPT 账号,
+而交互式 pi 会话退出时会整份覆写自己的 `auth.json`, 之前就把 provider 条目悄悄弄丢过。
+
+access token 过期后会在下一次运行时自动刷新, 轮换后的 refresh token 写回同一个文件。
+`vn doctor` 的 `pi.auth=` 一行会打印实际读取的路径。
+
+如果你确实想和 pi 共用一份登录, 设置 `PI_CODING_AGENT_DIR` 即可:
 
 ```bash
-echo '{"env":{"PI_CODING_AGENT_DIR":"$HOME/.config/voicenote/pi-agent"}}' | vn config set
-vn login   # 登录后凭证就存在该目录
+echo '{"env":{"PI_CODING_AGENT_DIR":"$HOME/.pi/agent"}}' | vn config set
 ```
-
-`vn doctor` 的 `pi.auth=` 一行会打印实际读取的路径。
 
 配置里的 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` 只是透传给 pi 的环境变量。
 

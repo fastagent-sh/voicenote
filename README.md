@@ -121,18 +121,22 @@ with `vn run --latest`.
 
 ### Credentials of their own
 
-`PI_CODING_AGENT_DIR` relocates pi's config directory, which is where it keeps
-`auth.json`. Point it at a voicenote-owned directory and `vn login` writes there,
-pi refreshes the tokens there, and an interactive pi session cannot clobber
-them — it rewrites its own `auth.json` wholesale on exit, which has silently
-dropped providers before:
+`vn login` runs the ChatGPT (Codex) OAuth flow itself — PKCE, a localhost
+callback, token exchange — and stores the result in **voicenote's own**
+config directory, `~/.config/voicenote/pi-agent/auth.json`. It is not pi's
+`~/.pi/agent`: sharing that file means sharing one ChatGPT account with the
+pi CLI, and an interactive pi session rewrites its `auth.json` wholesale on
+exit, which has silently dropped providers before.
+
+Expired access tokens refresh automatically on the next run and the rotated
+refresh token is written back to the same file. `vn doctor` prints the path
+it reads (`pi.auth=...`).
+
+Set `PI_CODING_AGENT_DIR` if you do want one shared login:
 
 ```bash
-echo '{"env":{"PI_CODING_AGENT_DIR":"$HOME/.config/voicenote/pi-agent"}}' | vn config set
-vn login   # signs in and stores credentials in that directory
+echo '{"env":{"PI_CODING_AGENT_DIR":"$HOME/.pi/agent"}}' | vn config set
 ```
-
-`vn doctor` prints the path it will read (`pi.auth=...`).
 
 `DEEPSEEK_API_KEY` and `OPENAI_API_KEY` in the config are only forwarded to pi's
 environment for providers that read them.

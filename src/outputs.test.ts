@@ -17,7 +17,7 @@ test('a successful retry moves every output to its titled name', async () => {
   const audio = join(home, '20260908103805.mp3')
   const untitled = '2026-09-08-10-38'
   const titled = '2026-09-08-10-38-Fake-note'
-  const fake = await startFakeModel(join(home, '.pi', 'agent'))
+  const fake = await startFakeModel(join(configDir, 'pi-agent'))
   try {
     await mkdir(configDir, { recursive: true })
     await mkdir(join(workspace, '_transcripts', '2026-09'), { recursive: true })

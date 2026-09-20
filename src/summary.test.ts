@@ -17,7 +17,9 @@ async function runWithFakeModel(
   const home = await mkdtemp(join(tmpdir(), 'voicenote-summary-'))
   const configDir = join(home, process.platform === 'win32' ? 'voicenote' : '.config/voicenote')
   const workspace = join(home, 'ws')
-  const agentDir = (opts.agentDirIn ?? ((h: string) => join(h, '.pi', 'agent')))(home)
+  // Matches the default in core.ts: credentials live in voicenote's own
+  // config directory, not in pi's.
+  const agentDir = (opts.agentDirIn ?? ((h: string) => join(configDir, 'pi-agent')))(home)
   const fake = await startFakeModel(agentDir)
   try {
     await mkdir(configDir, { recursive: true })
