@@ -4,6 +4,10 @@
 // cannot: the note text as the model writes it, and which file the agent is
 // reading. One run at a time holds the lock, so events need no job id.
 export type PipelineEvent =
+  | { type: 'job_start'; id: string; name: string; durationSeconds: number | null }
+  | { type: 'job_step'; step: string }
+  | { type: 'job_done'; id: string; title: string | null; notes: string | null; stub: boolean }
+  | { type: 'job_failed'; id: string; message: string }
   | { type: 'note_delta'; delta: string }
   | { type: 'note_tool'; name: string }
 

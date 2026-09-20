@@ -46,7 +46,7 @@ export function Settings({ status, onClose, onLogin }: { status: Status | null; 
       <main className="sheet">
         <section>
           <h3>ChatGPT</h3>
-          <div className="row">
+          <div className="sheet-row">
             <span>{status?.pi.auth ? '已登录' : '未登录'}{status?.pi.version ? ` · pi ${status.pi.version}` : ''}</span>
             <button onClick={onLogin}>{status?.pi.auth ? '重新登录' : '登录'}</button>
           </div>

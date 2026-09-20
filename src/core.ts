@@ -442,6 +442,7 @@ function progressStep(step: number, total: number, title: string, detail?: strin
   // Single hook for live progress: the dashboard shows the same string the log
   // does, instead of regex-guessing the step from log text.
   reportStep(title)
+  emitPipelineEvent({ type: 'job_step', step: title })
 }
 
 async function withHeartbeat<T>(label: string, work: () => Promise<T>, heartbeatSeconds = 60): Promise<T> {
@@ -1806,16 +1807,26 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
     startAttempt(entry, nowIso())
     await saveState(config, store)
     writeCurrent(rec.sourceId, 'starting', currentJobStartedAt)
+    emitPipelineEvent({ type: 'job_start', id: rec.sourceId, name: entry.name, durationSeconds: rec.durationSeconds ?? null })
     try {
       const resumeFromTranscriptFiles = resumableTranscriptFiles(config, rec, store, mode, force)
       const result = await processRecording(config, rec, { ...opts, resumeFromTranscriptFiles })
-      applyOutcome(entry, result.status === SUMMARY_FAILED_STATUS
+      const stub = result.status === SUMMARY_FAILED_STATUS
+      applyOutcome(entry, stub
         ? { kind: 'summary_failed', title: result.title ?? null, paths: result.final_paths ?? null, message: String(result.summary_error ?? 'summary failed; transcript saved') }
         : { kind: 'done', title: result.title ?? null, paths: result.final_paths ?? null }, nowIso())
+      emitPipelineEvent({
+        type: 'job_done',
+        id: rec.sourceId,
+        title: (result.title as string | null) ?? null,
+        notes: ((result.final_paths as Record<string, string> | null)?.notes) ?? null,
+        stub,
+      })
       importedDone = rec.imported && result.status !== SUMMARY_FAILED_STATUS
     } catch (e: any) {
       const message = String(e?.message || e)
       console.error(`ERROR processing ${rec.sourcePath}: ${message}`)
+      emitPipelineEvent({ type: 'job_failed', id: rec.sourceId, message })
       // Source vanished mid-run (recorder unplugged, file deleted) AND nothing
       // was produced: that's not a failed job, it's a job that no longer exists.
       // Drop it so it can't linger as a permanent "failed" row. A record that

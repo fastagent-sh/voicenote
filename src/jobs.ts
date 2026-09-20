@@ -257,7 +257,13 @@ type JobView = {
   time: string | null
   step: string | null
   detail: string | null
+  /** Machine-readable failure reason, for a UI that wants its own wording. */
+  code: string | null
   notes: string | null
+  /** Saved alongside the note: the copied audio and the transcript. */
+  audio: string | null
+  transcript: string | null
+  durationSeconds: number | null
   history_filtered: boolean
   /** Only on the folded "filtered out" row: how many, and why. */
   filtered?: { total: number; byCode: Record<string, number> }
@@ -378,7 +384,7 @@ function foldFiltered(records: JobRecord[]): JobView | null {
     id: null,
     status: 'filtered',
     name: `${records.length} recording${records.length > 1 ? 's' : ''} filtered out`,
-    title: null, time: null, step: null, detail, notes: null,
+    title: null, time: null, step: null, detail, code: null, notes: null, audio: null, transcript: null, durationSeconds: null,
     history_filtered: records.some(r => r.code === 'too_old'), imported: false,
     filtered: { total: records.length, byCode },
   }
@@ -411,7 +417,11 @@ export function buildJobsView(
       time: displayTime(j.recorded_at),
       step: null,
       detail: null as string | null,
+      code: null as string | null,
       notes: j.paths?.notes ?? null,
+      audio: j.paths?.audio ?? null,
+      transcript: j.paths?.transcript ?? null,
+      durationSeconds: j.duration_seconds ?? null,
       history_filtered: false,
       imported: j.origin === 'import',
       _t: j.recorded_at ?? '',
@@ -425,8 +435,8 @@ export function buildJobsView(
       case 'queued': queued.push({ ...base, status: 'queued' }); break
       // A saved transcript with a failed summary reads better as its own row:
       // the stub note is openable and the retry is cheap (no ASR).
-      case 'error': attention.push({ ...base, status: j.code === 'summary_failed' ? 'notes_failed' : 'error', detail: j.detail }); break
-      case 'gave_up': attention.push({ ...base, status: 'gave_up', detail: j.detail }); break
+      case 'error': attention.push({ ...base, status: j.code === 'summary_failed' ? 'notes_failed' : 'error', detail: j.detail, code: j.code ?? null }); break
+      case 'gave_up': attention.push({ ...base, status: 'gave_up', detail: j.detail, code: j.code ?? null }); break
       case 'filtered': filtered.push(j); break
       // `state` comes off disk and could be hand-edited or written by a newer
       // build. Showing an unknown value as "done" would hide unprocessed work,

@@ -18,7 +18,11 @@ export type Job = {
   time: string | null
   step: string | null
   detail: string | null
+  code: string | null
   notes: string | null
+  audio: string | null
+  transcript: string | null
+  durationSeconds: number | null
   history_filtered: boolean
   filtered?: { total: number; byCode: Record<string, number> }
   imported: boolean
@@ -31,7 +35,13 @@ export type JobsResponse = {
   recorder_present: boolean
 }
 
-export type PipelineEvent = { type: 'note_delta'; delta: string } | { type: 'note_tool'; name: string }
+export type PipelineEvent =
+  | { type: 'job_start'; id: string; name: string; durationSeconds: number | null }
+  | { type: 'job_step'; step: string }
+  | { type: 'job_done'; id: string; title: string | null; notes: string | null; stub: boolean }
+  | { type: 'job_failed'; id: string; message: string }
+  | { type: 'note_delta'; delta: string }
+  | { type: 'note_tool'; name: string }
 export type LoginEvent =
   | { event: 'auth_url'; url: string }
   | { event: 'device_code'; userCode: string; verificationUri: string }
@@ -51,6 +61,7 @@ type Api = {
   pickDirectory: () => Promise<string | null>
   login: () => Promise<void>
   openPath: (path: string) => Promise<string>
+  revealPath: (path: string) => Promise<void>
   readNote: (path: string) => Promise<string>
   search: (query: string) => Promise<{ path: string; title: string; snippet: string }[]>
   openNoteAsHtml: (title: string, html: string) => Promise<string>

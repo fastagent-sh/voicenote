@@ -54,7 +54,7 @@ export function Onboarding({ status, onDone, onRefresh }: {
         <section>
           <h3><span className={signedIn ? 'step-dot done' : 'step-dot'}>1</span> 登录 ChatGPT</h3>
           <p className="hint">纪要由 ChatGPT 的模型生成，需要你自己的账号。</p>
-          <div className="row">
+          <div className="sheet-row">
             <span>{signedIn ? '已登录' : loginState === 'waiting' ? '已打开浏览器，授权后自动继续…' : '未登录'}</span>
             <button className={signedIn ? '' : 'primary'} onClick={() => { setLoginState('waiting'); void vn.login() }}>
               {signedIn ? '重新登录' : '登录'}
@@ -71,14 +71,14 @@ export function Onboarding({ status, onDone, onRefresh }: {
         <section>
           <h3><span className={workspace ? 'step-dot done' : 'step-dot'}>3</span> 选择笔记目录</h3>
           <p className="hint">纪要、转写稿和音频都会存在这里。留空则用默认目录。</p>
-          <div className="row">
+          <div className="sheet-row">
             <span className="path">{workspace || '（默认：~/Documents/meetings）'}</span>
             <button onClick={async () => { const dir = await vn.pickDirectory(); if (dir) setWorkspace(dir) }}>选择目录…</button>
           </div>
         </section>
 
         {error && <p className="problem">{error}</p>}
-        <div className="row">
+        <div className="sheet-row">
           <button className="link" onClick={onDone}>稍后再说</button>
           <button className="primary" onClick={() => void save()} disabled={saving || !hasKey}>开始使用</button>
         </div>

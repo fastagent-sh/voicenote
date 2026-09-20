@@ -16,6 +16,7 @@ const api = {
   pickDirectory: () => ipcRenderer.invoke('pick-directory'),
   login: () => ipcRenderer.invoke('login'),
   openPath: (path: string) => ipcRenderer.invoke('open-path', path),
+  revealPath: (path: string) => ipcRenderer.invoke('reveal-path', path),
   readNote: (path: string) => ipcRenderer.invoke('note:read', path),
   search: (query: string) => ipcRenderer.invoke('search', query),
   openNoteAsHtml: (title: string, html: string) => ipcRenderer.invoke('note:open-html', { title, html }),

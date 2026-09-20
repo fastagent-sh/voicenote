@@ -1,7 +1,7 @@
 // The desktop app's main process. It owns the pipeline directly: the same
 // functions the `vn` CLI calls, running in this process. No sidecar binary, no
 // background daemon, no stdout parsing.
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, shell, Tray } from 'electron'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
@@ -157,6 +157,7 @@ function registerIpc(): void {
   })
   ipcMain.handle('open-path', (_e, path: string) => shell.openPath(path))
   ipcMain.handle('note:read', (_e, path: string) => readFile(path, 'utf8'))
+  ipcMain.handle('reveal-path', (_e, path: string) => { shell.showItemInFolder(path) })
   // The renderer already turned the note into HTML for the reading view;
   // writing it out and handing it to the browser is the whole "open as HTML".
   ipcMain.handle('note:open-html', async (_e, payload: { title: string; html: string }) => {
@@ -181,7 +182,20 @@ function registerIpc(): void {
 
 app.whenReady().then(() => {
   registerIpc()
-  onPipelineEvent((event) => broadcast('pipeline:event', event))
+  onPipelineEvent((event) => {
+    broadcast('pipeline:event', event)
+    // The app is usually in the background while a recording processes, so the
+    // result has to reach the user outside the window.
+    if (event.type === 'job_done' && !mainWindow?.isFocused()) {
+      new Notification({
+        title: event.stub ? '转写完成,纪要失败' : '纪要已生成',
+        body: event.title ?? '打开 VoiceNote 查看',
+      }).show()
+    }
+    if (event.type === 'job_failed' && !mainWindow?.isFocused()) {
+      new Notification({ title: '处理失败', body: event.message.slice(0, 120) }).show()
+    }
+  })
   tray = new Tray(trayIcon(false))
   updateTray()
   watchRecorder()
