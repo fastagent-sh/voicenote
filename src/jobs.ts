@@ -112,10 +112,16 @@ export function classify(
 
   // Filters are deterministic properties of the file, checked before anything
   // stateful so a too-short file can't ping-pong between error and queued.
-  const ageHours = (opts.now - rec.recordedAt.getTime()) / 3600_000
-  if (limits.maxAgeHours > 0 && ageHours > limits.maxAgeHours) return { run: false, persist: true, code: 'too_old', detail: `${ageHours.toFixed(0)}h > ${limits.maxAgeHours}h` }
+  //
+  // Size and duration come first, and the order is the point: they say the
+  // recording holds nothing worth transcribing, which no amount of "process
+  // it anyway" changes. Age only says it is old — a real meeting from last
+  // month is still worth processing on request. Reporting a 14-second button
+  // press as "too old" invited exactly that pointless request.
   if (rec.sizeBytes < limits.minBytes) return { run: false, persist: true, code: 'too_small', detail: `${rec.sizeBytes} < ${limits.minBytes} bytes` }
   if (rec.durationSeconds !== null && rec.durationSeconds < limits.minDurationSeconds) return { run: false, persist: true, code: 'too_short', detail: `${rec.durationSeconds.toFixed(0)}s < ${limits.minDurationSeconds}s` }
+  const ageHours = (opts.now - rec.recordedAt.getTime()) / 3600_000
+  if (limits.maxAgeHours > 0 && ageHours > limits.maxAgeHours) return { run: false, persist: true, code: 'too_old', detail: `${ageHours.toFixed(0)}h > ${limits.maxAgeHours}h` }
 
   // `error`, `queued` and `running` are retryable. A previously `filtered`
   // record is runnable too once it passes the CURRENT filters, so widening the

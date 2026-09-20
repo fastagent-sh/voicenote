@@ -23,6 +23,17 @@ const VERDICTS: Record<string, { label: string; tone: 'ready' | 'done' | 'skip' 
  */
 const SCRAP = new Set(['too_small', 'too_short', 'no_speech', 'bad_audio', 'ignored'])
 
+/**
+ * Which verdicts are worth a button. A recording that is too small, too
+ * short, silent or unusable holds nothing to transcribe, so offering to
+ * process it only invites a run that ends the same way. Age is different: an
+ * old recording is a real one the automatic rules skipped, and processing it
+ * on request is exactly what the button is for.
+ */
+function canProcess(verdict: string): boolean {
+  return !SCRAP.has(verdict)
+}
+
 function sizeLabel(bytes: number): string {
   return bytes >= 1e6 ? `${(bytes / 1e6).toFixed(0)} MB` : `${Math.max(1, Math.round(bytes / 1000))} KB`
 }
@@ -101,13 +112,15 @@ export function Recorder({ running, onClose, onToast }: {
                 </div>
               </div>
               <span className={`verdict ${verdict.tone}`} title={item.detail ?? undefined}>{verdict.label}</span>
-              <button
-                className={verdict.tone === 'ready' ? 'primary' : ''}
-                disabled={running}
-                onClick={() => void process(item)}
-              >
-                {item.verdict === 'already_done' ? '重新处理' : '处理'}
-              </button>
+              {canProcess(item.verdict) && (
+                <button
+                  className={verdict.tone === 'ready' ? 'primary' : ''}
+                  disabled={running}
+                  onClick={() => void process(item)}
+                >
+                  {item.verdict === 'already_done' ? '重新处理' : '处理'}
+                </button>
+              )}
             </article>
           )
         })}
@@ -120,8 +133,8 @@ export function Recorder({ running, onClose, onToast }: {
 
         {data?.present && (
           <p className="hint fine">
-            手动处理会忽略时间范围和大小限制。「重新处理」会重新转写并重写纪要,要花一次转写费用;
-            只想换一版纪要的话,在纪要页用「重新生成」。
+            手动处理会忽略时间范围限制。太短、太小、没有人声的录音没有可处理的内容,所以不提供按钮。
+            「重新处理」会重新转写并重写纪要,要花一次转写费用;只想换一版纪要的话,在纪要页用「重新生成」。
           </p>
         )}
       </main>

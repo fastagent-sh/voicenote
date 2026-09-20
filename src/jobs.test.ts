@@ -416,3 +416,21 @@ test('old unusable-audio failures are reclassified on read', () => {
   expect(parsed.jobs.a).toMatchObject({ state: 'filtered', code: 'no_speech', attempts: 0 })
   expect(parsed.jobs.b).toMatchObject({ state: 'error', code: 'transcribe_failed', attempts: 1 })
 })
+
+// A 14-second button press that is also old used to be reported as "too old",
+// which reads like "process it if you want" — and the file browser duly
+// offered a button for work that could never produce a note.
+test('a scrap recording is scrap first, old second', () => {
+  const old = new Date(NOW - 400 * 3600_000)
+  const limits = { maxAgeHours: 72, minBytes: 100_000, minDurationSeconds: 60 }
+  const scrap = classify({ recordedAt: old, sizeBytes: 58_000, durationSeconds: 14 }, undefined, limits, opts())
+  expect(scrap).toMatchObject({ run: false, code: 'too_small' })
+
+  const shortButBig = classify({ recordedAt: old, sizeBytes: 5_000_000, durationSeconds: 14 }, undefined, limits, opts())
+  expect(shortButBig).toMatchObject({ run: false, code: 'too_short' })
+
+  // A real meeting that is merely old still reports as old, so the UI can
+  // offer to process it.
+  const realMeeting = classify({ recordedAt: old, sizeBytes: 5_000_000, durationSeconds: 3600 }, undefined, limits, opts())
+  expect(realMeeting).toMatchObject({ run: false, code: 'too_old' })
+})
