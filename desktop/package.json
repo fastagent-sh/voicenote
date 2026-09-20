@@ -1,0 +1,29 @@
+{
+  "name": "voicenote-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "tsc --noEmit -p tsconfig.json && electron-vite build",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.86.0",
+    "undici": "^8"
+  },
+  "devDependencies": {
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^5",
+    "electron": "44.4.3",
+    "electron-builder": "^26",
+    "electron-vite": "^4",
+    "react": "^19",
+    "react-dom": "^19",
+    "typescript": "^5",
+    "vite": "^7"
+  }
+}

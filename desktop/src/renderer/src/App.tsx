@@ -1,0 +1,214 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { vn, type Job, type JobsResponse, type LoginEvent, type Status } from './api.ts'
+import { explainFailure, topProblem } from './problems.ts'
+import { Settings } from './Settings.tsx'
+
+const STEP_ORDER = ['Copy audio', 'Transcribe audio', 'Generate', 'Write outputs']
+
+/** Progress the state file can express: which of the four steps is running. */
+function stepIndex(step: string | null): number {
+  if (!step) return 0
+  const found = STEP_ORDER.findIndex(prefix => step.toLowerCase().startsWith(prefix.toLowerCase()))
+  return found < 0 ? 0 : found
+}
+
+function Timer({ since }: { since: number }) {
+  const [, tick] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => tick(n => n + 1), 1000)
+    return () => clearInterval(id)
+  }, [])
+  const seconds = Math.floor((Date.now() - since) / 1000)
+  const mm = String(Math.floor(seconds / 60)).padStart(2, '0')
+  const ss = String(seconds % 60).padStart(2, '0')
+  return <span className="timer">{mm}:{ss}</span>
+}
+
+function ActiveCard({ job, note, tool, startedAt }: { job: Job; note: string; tool: string | null; startedAt: number }) {
+  const bodyRef = useRef<HTMLPreElement>(null)
+  useEffect(() => { bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight }) }, [note])
+  const index = stepIndex(job.step)
+  return (
+    <article className="card card-active">
+      <header>
+        <div>
+          <div className="card-title">{job.title || job.name}</div>
+          <div className="card-sub">{job.time ?? ''}</div>
+        </div>
+        <Timer since={startedAt} />
+      </header>
+      <ol className="steps">
+        {['拷贝音频', '转写', '生成纪要', '写入'].map((label, i) => (
+          <li key={label} className={i < index ? 'done' : i === index ? 'active' : ''}>{label}</li>
+        ))}
+      </ol>
+      {tool && <div className="tool-hint">正在查阅 {tool}</div>}
+      {note
+        ? <pre className="note-stream" ref={bodyRef}>{note}</pre>
+        : <div className="waiting">{job.step ?? '准备中…'}</div>}
+    </article>
+  )
+}
+
+function JobCard({ job, onRetry, onOpen, onLogin, onSettings }: {
+  job: Job
+  onRetry: (job: Job) => void
+  onOpen: (path: string) => void
+  onLogin: () => void
+  onSettings: () => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  if (job.status === 'filtered') {
+    return (
+      <article className="card card-muted">
+        <div className="card-title">{job.name}</div>
+        <div className="card-sub">{job.detail}</div>
+        <div className="card-actions"><button onClick={onSettings}>调整处理范围</button></div>
+      </article>
+    )
+  }
+  const failed = job.status === 'error' || job.status === 'notes_failed' || job.status === 'gave_up'
+  if (failed) {
+    const problem = explainFailure(job.detail)
+    return (
+      <article className="card card-failed">
+        <div className="card-title">{job.title || job.name}</div>
+        <div className="card-sub">{job.time ?? ''}</div>
+        <p className="problem">{problem.message}</p>
+        <div className="card-actions">
+          {problem.action?.kind === 'login' && <button className="primary" onClick={onLogin}>{problem.action.label}</button>}
+          {problem.action?.kind === 'settings' && <button className="primary" onClick={onSettings}>{problem.action.label}</button>}
+          {problem.action?.kind === 'retry' && job.id && <button className="primary" onClick={() => onRetry(job)}>{problem.action.label}</button>}
+          {job.notes && <button onClick={() => onOpen(job.notes!)}>打开转写稿</button>}
+          {job.detail && <button className="link" onClick={() => setExpanded(v => !v)}>{expanded ? '收起' : '详情'}</button>}
+        </div>
+        {expanded && <pre className="raw-error">{job.detail}</pre>}
+      </article>
+    )
+  }
+  return (
+    <article className="card" onDoubleClick={() => job.notes && onOpen(job.notes)}>
+      <div className="card-row">
+        <div>
+          <div className="card-title">{job.title || job.name}</div>
+          <div className="card-sub">{job.time ?? ''}{job.status === 'queued' ? ' · 排队中' : ''}</div>
+        </div>
+        {job.notes && <button onClick={() => onOpen(job.notes!)}>打开</button>}
+      </div>
+    </article>
+  )
+}
+
+export function App() {
+  const [status, setStatus] = useState<Status | null>(null)
+  const [jobs, setJobs] = useState<JobsResponse | null>(null)
+  const [note, setNote] = useState('')
+  const [tool, setTool] = useState<string | null>(null)
+  const [running, setRunning] = useState(false)
+  const [startedAt, setStartedAt] = useState(Date.now())
+  const [query, setQuery] = useState('')
+  const [screen, setScreen] = useState<'timeline' | 'settings'>('timeline')
+  const [banner, setBanner] = useState<string | null>(null)
+
+  const refresh = useCallback(async () => {
+    const [nextStatus, nextJobs] = await Promise.all([vn.status(), vn.jobs(50)])
+    setStatus(nextStatus)
+    setJobs(nextJobs)
+  }, [])
+
+  useEffect(() => {
+    void refresh()
+    const id = setInterval(() => { void vn.jobs(50).then(setJobs) }, 2000)
+    const off = [
+      vn.on('pipeline:event', (event) => {
+        if (event.type === 'note_delta') setNote(prev => prev + event.delta)
+        else setTool(event.name)
+      }),
+      vn.on('run:state', (state: { running: boolean }) => {
+        setRunning(state.running)
+        if (state.running) { setNote(''); setTool(null); setStartedAt(Date.now()) }
+        void refresh()
+      }),
+      vn.on('run:error', (message: string) => setBanner(message)),
+      vn.on('recorder:connected', () => setBanner('检测到录音笔,开始处理')),
+      vn.on('login:event', (event: LoginEvent) => {
+        if (event.event === 'success') { setBanner('已登录 ChatGPT'); void refresh() }
+        if (event.event === 'error') setBanner(`登录失败：${event.message}`)
+        if (event.event === 'auth_url') setBanner('已打开浏览器,授权后自动继续')
+      }),
+      vn.on('login:event', () => {}),
+    ]
+    return () => { clearInterval(id); off.forEach(fn => fn()) }
+  }, [refresh])
+
+  useEffect(() => {
+    if (!banner) return
+    const id = setTimeout(() => setBanner(null), 6000)
+    return () => clearTimeout(id)
+  }, [banner])
+
+  const onDrop = useCallback(async (event: React.DragEvent) => {
+    event.preventDefault()
+    const file = event.dataTransfer.files[0] as (File & { path?: string }) | undefined
+    if (!file?.path) return
+    await vn.importRecording(file.path)
+  }, [])
+
+  const items = jobs?.items ?? []
+  const active = items.find(job => job.status === 'running') ?? null
+  const rest = useMemo(() => {
+    const filtered = items.filter(job => job !== active)
+    if (!query.trim()) return filtered
+    const needle = query.trim().toLowerCase()
+    return filtered.filter(job => `${job.title ?? ''} ${job.name}`.toLowerCase().includes(needle))
+  }, [items, active, query])
+
+  const problem = topProblem(status)
+
+  if (screen === 'settings') {
+    return <Settings onClose={() => { setScreen('timeline'); void refresh() }} onLogin={() => vn.login()} status={status} />
+  }
+
+  return (
+    <div className="app" onDragOver={e => e.preventDefault()} onDrop={onDrop}>
+      <header className="titlebar">
+        <div className="brand">VoiceNote</div>
+        <div className="grow" />
+        <input className="search" placeholder="搜索纪要" value={query} onChange={e => setQuery(e.target.value)} />
+        <button onClick={() => void vn.run()} disabled={running}>{running ? '处理中' : '立即处理'}</button>
+        <button onClick={async () => { const path = await vn.pickAudio(); if (path) await vn.importRecording(path) }}>导入音频</button>
+        <button onClick={() => setScreen('settings')}>设置</button>
+      </header>
+
+      {banner && <div className="banner">{banner}</div>}
+      {problem && (
+        <div className="banner banner-problem">
+          <span>{problem.message}</span>
+          {problem.action?.kind === 'login' && <button onClick={() => void vn.login()}>{problem.action.label}</button>}
+          {problem.action?.kind === 'settings' && <button onClick={() => setScreen('settings')}>{problem.action.label}</button>}
+        </div>
+      )}
+      {!problem && status && (
+        <div className="subtle-bar">
+          {status.recorder.exists ? '录音笔已连接' : '录音笔未连接'}
+          {jobs && jobs.queued_total > 0 ? ` · ${jobs.queued_total} 个待处理` : ''}
+        </div>
+      )}
+
+      <main className="timeline">
+        {active && <ActiveCard job={active} note={note} tool={tool} startedAt={startedAt} />}
+        {!active && !rest.length && <div className="empty">还没有纪要。插上录音笔,或把音频拖进这个窗口。</div>}
+        {rest.map(job => (
+          <JobCard
+            key={job.id ?? job.name}
+            job={job}
+            onRetry={(target) => { if (target.id) void vn.retry(target.id) }}
+            onOpen={(path) => void vn.openPath(path)}
+            onLogin={() => void vn.login()}
+            onSettings={() => setScreen('settings')}
+          />
+        ))}
+      </main>
+    </div>
+  )
+}
