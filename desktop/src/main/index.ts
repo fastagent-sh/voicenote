@@ -22,6 +22,13 @@ let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 /** One pipeline run at a time in this process; the file lock guards the rest. */
 let running: Promise<void> | null = null
+/**
+ * Retries asked for while a run holds the lock. They are app state, not job
+ * state — the record on disk cannot be touched until the lock frees — so the
+ * window is told about them separately, or a queued retry looks like a click
+ * that did nothing.
+ */
+const pendingRetries = new Set<string>()
 let autoProcess = true
 let lastRecorderSeen = false
 
@@ -151,13 +158,18 @@ function registerIpc(): void {
   ipcMain.handle('retry', async (_e, id: string) => {
     const active = running
     if (active) {
+      pendingRetries.add(id)
+      broadcast('retry:pending', [...pendingRetries])
       void active.then(async () => {
         try {
           await retryRecording(id)
-          await startRun('retry')
         } catch (error) {
           broadcast('run:error', String((error as Error)?.message ?? error))
+        } finally {
+          pendingRetries.delete(id)
+          broadcast('retry:pending', [...pendingRetries])
         }
+        await startRun('retry')
       })
       return { queued: true }
     }
@@ -172,6 +184,7 @@ function registerIpc(): void {
   ipcMain.handle('login', async () => {
     await loginChatGPT({ json: true, emit: (event) => broadcast('login:event', event) })
   })
+  ipcMain.handle('pending-retries', () => [...pendingRetries])
   ipcMain.handle('open-path', (_e, path: string) => shell.openPath(path))
   ipcMain.handle('note:read', (_e, path: string) => readFile(path, 'utf8'))
   ipcMain.handle('reveal-path', (_e, path: string) => { shell.showItemInFolder(path) })

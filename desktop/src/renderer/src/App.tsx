@@ -96,8 +96,9 @@ function ActiveDetail({ job, live }: { job: Job; live: Live }) {
   )
 }
 
-function FailureDetail({ job, onRetry, onLogin, onSettings, onOpen }: {
+function FailureDetail({ job, pending, onRetry, onLogin, onSettings, onOpen }: {
   job: Job
+  pending: boolean
   onRetry: () => void
   onLogin: () => void
   onSettings: () => void
@@ -113,13 +114,14 @@ function FailureDetail({ job, onRetry, onLogin, onSettings, onOpen }: {
           <div className="detail-meta">{friendlyTime(job.time)}{job.durationSeconds ? ` · ${spokenDuration(job.durationSeconds)}` : ''}</div>
         </div>
       </header>
-      <div className="callout">
-        <p className="callout-title">{problem.message}</p>
-        {problem.attempts && <p className="hint">{problem.attempts}</p>}
+      <div className={pending ? 'callout callout-pending' : 'callout'}>
+        <p className="callout-title">{pending ? '已排队重试,当前任务完成后自动开始。' : problem.message}</p>
+        {!pending && problem.attempts && <p className="hint">{problem.attempts}</p>}
+        {pending && <p className="hint">原因：{problem.message}</p>}
         <div className="row-actions">
-          {problem.action?.kind === 'login' && <button className="primary" onClick={onLogin}>{problem.action.label}</button>}
-          {problem.action?.kind === 'settings' && <button className="primary" onClick={onSettings}>{problem.action.label}</button>}
-          {problem.action?.kind === 'retry' && job.id && <button className="primary" onClick={onRetry}>重试</button>}
+          {!pending && problem.action?.kind === 'login' && <button className="primary" onClick={onLogin}>{problem.action.label}</button>}
+          {!pending && problem.action?.kind === 'settings' && <button className="primary" onClick={onSettings}>{problem.action.label}</button>}
+          {!pending && problem.action?.kind === 'retry' && job.id && <button className="primary" onClick={onRetry}>重试</button>}
           {job.transcript && <button onClick={() => onOpen(job.transcript!)}>打开转写稿</button>}
           {job.detail && <button className="link" onClick={() => setRaw(v => !v)}>{raw ? '收起原始错误' : '原始错误'}</button>}
         </div>
@@ -142,6 +144,7 @@ export function App() {
   const [skipSetup, setSkipSetup] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [dropping, setDropping] = useState(false)
+  const [pendingRetries, setPendingRetries] = useState<string[]>([])
 
   /** Every user action goes through here: a failure must be visible. */
   const act = useCallback(async (work: () => Promise<unknown>, done?: string) => {
@@ -163,6 +166,7 @@ export function App() {
 
   useEffect(() => {
     void refresh()
+    void vn.pendingRetries().then(setPendingRetries)
     const poll = setInterval(() => { void vn.jobs(200).then(setJobs) }, 2000)
     const off = [
       vn.on('pipeline:event', (event: PipelineEvent) => {
@@ -179,6 +183,7 @@ export function App() {
         void refresh()
       }),
       vn.on('run:error', (message: string) => setToast(message)),
+      vn.on('retry:pending', (ids: string[]) => setPendingRetries(ids)),
       vn.on('recorder:connected', () => setToast('检测到录音笔,开始处理')),
       vn.on('login:event', (event: LoginEvent) => {
         if (event.event === 'success') { setToast('已登录 ChatGPT'); void refresh() }
@@ -298,10 +303,10 @@ export function App() {
 
           {attention.length > 0 && <div className="group-head">需要处理</div>}
           {attention.map(job => (
-            <button key={job.id} className={selected?.kind === 'job' && selected.id === job.id ? 'row row-failed selected' : 'row row-failed'} onClick={() => setSelected({ kind: 'job', id: job.id! })}>
+            <button key={job.id} className={`row ${job.id && pendingRetries.includes(job.id) ? 'row-pending' : 'row-failed'}${selected?.kind === 'job' && selected.id === job.id ? ' selected' : ''}`} onClick={() => setSelected({ kind: 'job', id: job.id! })}>
               <span className="row-main">
                 <span className="row-title">{job.title || job.name}</span>
-                <span className="row-sub">{explainFailure(job).message}</span>
+                <span className="row-sub">{job.id && pendingRetries.includes(job.id) ? '等待重试,当前任务完成后开始' : explainFailure(job).message}</span>
               </span>
             </button>
           ))}
@@ -361,6 +366,7 @@ export function App() {
         {selectedJob && ['error', 'notes_failed', 'gave_up'].includes(selectedJob.status) && (
           <FailureDetail
             job={selectedJob}
+            pending={!!selectedJob.id && pendingRetries.includes(selectedJob.id)}
             onRetry={() => { if (selectedJob.id) void act(() => vn.retry(selectedJob.id!), '已加入重试队列') }}
             onLogin={() => void act(() => vn.login())}
             onSettings={() => setScreen('settings')}

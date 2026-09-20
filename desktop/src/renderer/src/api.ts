@@ -55,6 +55,7 @@ type Api = {
   configSet: (payload: unknown) => Promise<{ ok: true }>
   run: () => Promise<void>
   retry: (id: string) => Promise<{ queued: boolean }>
+  pendingRetries: () => Promise<string[]>
   importRecording: (path: string) => Promise<void>
   pathForFile: (file: File) => string
   pickAudio: () => Promise<string | null>
@@ -66,7 +67,7 @@ type Api = {
   search: (query: string) => Promise<{ path: string; title: string; snippet: string }[]>
   openNoteAsHtml: (title: string, html: string) => Promise<string>
   setAutoProcess: (enabled: boolean) => Promise<boolean>
-  on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'recorder:connected', listener: (payload: any) => void) => () => void
+  on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'recorder:connected' | 'retry:pending', listener: (payload: any) => void) => () => void
 }
 
 export const vn = (window as unknown as { vn: Api }).vn
