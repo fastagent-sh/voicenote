@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { marked } from 'marked'
 import { vn, type Job, type JobsResponse, type LoginEvent, type PipelineEvent, type Status } from './api.ts'
+import { parseDraft } from './draft.ts'
 import { clock, estimateRemaining, friendlyTime, spokenDuration, timeGroup } from './format.ts'
 import { explainFailure, topProblem } from './problems.ts'
 import { NoteDetail } from './NoteDetail.tsx'
@@ -50,8 +52,19 @@ function Elapsed({ since }: { since: number }) {
 
 /** The running recording: what it is, where it is, and what it has written. */
 function ActiveDetail({ job, live }: { job: Job; live: Live }) {
-  const bodyRef = useRef<HTMLPreElement>(null)
-  useEffect(() => { bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight }) }, [live.note])
+  const endRef = useRef<HTMLDivElement>(null)
+  // The draft grows in place in the page; follow it only while the user is
+  // already at the bottom, so scrolling back to re-read is not fought.
+  useEffect(() => {
+    const pane = document.querySelector('.main')
+    if (!pane) return
+    const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 120
+    if (atBottom) endRef.current?.scrollIntoView({ block: 'end' })
+  }, [live.note])
+
+  // The body opens with its own H1, so the title field is not rendered again.
+  const draft = parseDraft(live.note)
+  const draftHtml = draft.body ? marked.parse(draft.body, { async: false }) : ''
 
   const index = stepIndex(live.step ?? job.step)
   const duration = live.durationSeconds ?? job.durationSeconds
@@ -88,10 +101,15 @@ function ActiveDetail({ job, live }: { job: Job; live: Live }) {
       </ol>
 
       {live.tool && <div className="tool-hint">正在查阅历史笔记,对齐人名和项目称呼…</div>}
-      {live.note
-        ? <pre className="note-stream" ref={bodyRef}>{live.note}</pre>
+      {draft.body
+        ? (
+          <>
+            <article className="note-body draft" dangerouslySetInnerHTML={{ __html: draftHtml + '<span class="caret"></span>' }} />
+            <div ref={endRef} />
+            <p className="hint fine">正在实时生成,写完后会自动保存。</p>
+          </>
+        )
         : <div className="waiting"><span className="pulse" />{waiting}</div>}
-      <p className="hint fine">纪要在模型写完后一次性保存,这里显示的是实时草稿。</p>
     </div>
   )
 }
