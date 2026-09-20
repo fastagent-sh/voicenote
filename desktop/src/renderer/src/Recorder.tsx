@@ -66,7 +66,11 @@ export function Recorder({ running, onClose, onToast }: {
 
       <main className="sheet wide">
         {error && <p className="problem">{error}</p>}
-        {!data && !error && <p className="hint">正在读取录音笔…</p>}
+        {!data && !error && (
+          <p className="hint">
+            正在读取录音笔…首次读取需要逐个校验文件,可能要几十秒;之后会直接使用缓存。
+          </p>
+        )}
         {data && !data.present && <p className="hint">没检测到录音笔({data.dir})。插上后点刷新。</p>}
         {data?.present && shown.length === 0 && <p className="hint">{filter === 'pending' ? '没有待处理的录音,全部处理过了。' : '这个目录里没有录音文件。'}</p>}
 

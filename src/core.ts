@@ -701,14 +701,59 @@ function isCandidateFile(path: string): boolean {
  * treating a half-read device as authoritative would delete live queue entries
  * along with their retry counters.
  */
-async function toRecording(config: Config, file: string, imported = false): Promise<Recording> {
+/**
+ * Scan cache. Identifying a recording means hashing the whole file and asking
+ * ffprobe for its duration — on a recorder holding a gigabyte of audio over
+ * USB that is minutes, and every scan (the 60s tick, the file browser, every
+ * run) paid it again. Size and mtime settle the question of whether a file
+ * changed, so the expensive answers are kept keyed by them.
+ *
+ * The cache only ever saves work: a miss recomputes, and the ids it feeds are
+ * byte-identical to the uncached ones, so existing job records still match.
+ */
+type ScanCacheEntry = { size: number; mtimeMs: number; hash: string; duration: number | null }
+type ScanCache = { entries: Record<string, ScanCacheEntry>; dirty: boolean }
+
+const scanCachePathFor = (config: Config) => join(config.workspace, '_state', 'scan-cache.json')
+
+async function loadScanCache(config: Config): Promise<ScanCache> {
+  const path = scanCachePathFor(config)
+  if (!existsSync(path)) return { entries: {}, dirty: false }
+  try {
+    const parsed = JSON.parse(await readFile(path, 'utf8'))
+    return { entries: parsed?.entries && typeof parsed.entries === 'object' ? parsed.entries : {}, dirty: false }
+  } catch (e) {
+    warnSideEffect(`read ${path}`, e)
+    return { entries: {}, dirty: false }
+  }
+}
+
+async function saveScanCache(config: Config, cache: ScanCache): Promise<void> {
+  if (!cache.dirty) return
+  const path = scanCachePathFor(config)
+  try {
+    await mkdir(dirname(path), { recursive: true })
+    const tmp = `${path}.tmp-${process.pid}`
+    await writeFile(tmp, JSON.stringify({ entries: cache.entries }), 'utf8')
+    await rename(tmp, path)
+  } catch (e) { warnSideEffect(`write ${path}`, e) }
+}
+
+async function toRecording(config: Config, file: string, imported = false, cache?: ScanCache): Promise<Recording> {
   const st = await stat(file)
-  const contentHash = await sha256File(file)
+  const cached = cache?.entries[file]
+  const fresh = cached && cached.size === st.size && cached.mtimeMs === st.mtimeMs
+  const contentHash = fresh ? cached.hash : await sha256File(file)
+  const durationSeconds = fresh ? cached.duration : await ffprobeDuration(config, file)
+  if (cache && !fresh) {
+    cache.entries[file] = { size: st.size, mtimeMs: st.mtimeMs, hash: contentHash, duration: durationSeconds }
+    cache.dirty = true
+  }
   return {
     sourcePath: file,
     sizeBytes: st.size,
     modifiedAt: st.mtime.toISOString(),
-    durationSeconds: await ffprobeDuration(config, file),
+    durationSeconds,
     sourceId: sourceIdFor(file, st.size, st.mtimeMs, contentHash, imported),
     contentHash,
     recordedAt: parseRecordedAt(file),
@@ -718,6 +763,8 @@ async function toRecording(config: Config, file: string, imported = false): Prom
 
 export async function scanRecordings(config: Config): Promise<{ recordings: Recording[]; complete: boolean }> {
   const recordings: Recording[] = []
+  const cache = await loadScanCache(config)
+  const seen = new Set<string>()
   const recorderPresent = existsSync(config.recordDir)
   let complete = recorderPresent
   const roots = [
@@ -734,7 +781,8 @@ export async function scanRecordings(config: Config): Promise<{ recordings: Reco
         if (!st) { complete = false; continue }
         if (!st.isFile()) continue
         try {
-          recordings.push(await toRecording(config, file, root.imported))
+          seen.add(file)
+          recordings.push(await toRecording(config, file, root.imported, cache))
         } catch (e) { complete = false; warnSideEffect(`read ${basename(file)} during scan`, e) }
       }
     } catch (e) {
@@ -742,6 +790,14 @@ export async function scanRecordings(config: Config): Promise<{ recordings: Reco
       warnSideEffect(`scan ${root.imported ? 'import inbox' : 'recorder'}`, e)
     }
   }
+  // Drop cache entries for files that are gone, but only when the listing was
+  // trustworthy — an unplugged recorder must not wipe the cache it fills.
+  if (complete) {
+    for (const path of Object.keys(cache.entries)) {
+      if (!seen.has(path)) { delete cache.entries[path]; cache.dirty = true }
+    }
+  }
+  await saveScanCache(config, cache)
   // Explicit imports go first; each group remains oldest-first.
   recordings.sort((a, b) => Number(b.imported) - Number(a.imported) || a.recordedAt.getTime() - b.recordedAt.getTime())
   return { recordings, complete }
