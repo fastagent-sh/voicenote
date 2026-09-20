@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { marked } from 'marked'
 import { vn, type Job, type JobsResponse, type LoginEvent, type PipelineEvent, type Status } from './api.ts'
 import { parseDraft } from './draft.ts'
-import { clock, estimateRemaining, friendlyTime, spokenDuration, timeGroup } from './format.ts'
+import { clock, estimateRemaining, friendlyTime, isFresh, spokenDuration, timeGroup } from './format.ts'
 import { explainFailure, topProblem } from './problems.ts'
 import { NoteDetail } from './NoteDetail.tsx'
 import { Onboarding } from './Onboarding.tsx'
@@ -211,7 +211,14 @@ export function App() {
         else if (event.type === 'job_step') setLive(prev => ({ ...prev, step: event.step, note: event.step.toLowerCase().startsWith('generate') ? '' : prev.note }))
         else if (event.type === 'note_delta') setLive(prev => ({ ...prev, note: prev.note + event.delta }))
         else if (event.type === 'note_tool') setLive(prev => ({ ...prev, tool: event.name }))
-        else if (event.type === 'job_done') { setToast(event.stub ? '转写完成,但纪要没能生成' : `已完成：${event.title ?? ''}`); void refresh() }
+        else if (event.type === 'job_done') {
+          setToast(event.stub ? '转写完成,但纪要没能生成' : `已完成：${event.title ?? ''}`)
+          // The list is ordered by recording date, so a note made from an old
+          // recording appears far down it. Show it instead of making the user
+          // hunt for what just finished.
+          if (!event.stub) setSelected({ kind: 'job', id: event.id })
+          void refresh()
+        }
         else if (event.type === 'job_failed') { setToast('处理失败,见列表中的提示'); void refresh() }
       }),
       vn.on('run:state', (state: { running: boolean }) => {
@@ -387,7 +394,10 @@ export function App() {
               {groupJobs.map(job => (
                 <button key={job.id} className={selected?.kind === 'job' && selected.id === job.id ? 'row selected' : 'row'} onClick={() => setSelected({ kind: 'job', id: job.id! })}>
                   <span className="row-main">
-                    <span className="row-title">{job.title || job.name}</span>
+                    <span className="row-title">
+                      {isFresh(job.finishedAt) && <span className="fresh">刚生成</span>}
+                      {job.title || job.name}
+                    </span>
                     <span className="row-sub">{friendlyTime(job.time)}{job.durationSeconds ? ` · ${spokenDuration(job.durationSeconds)}` : ''}</span>
                   </span>
                 </button>

@@ -65,3 +65,14 @@ export function timeGroup(raw: string | null): string {
   if (days < 30) return '本月'
   return '更早'
 }
+
+/**
+ * Was this written in the last ten minutes? Notes are listed by recording
+ * date, so one made from an old recording sits far down the list; this marks
+ * it as new without disturbing the order.
+ */
+export function isFresh(finishedAt: string | null): boolean {
+  if (!finishedAt) return false
+  const at = new Date(finishedAt).getTime()
+  return Number.isFinite(at) && Date.now() - at < 10 * 60_000
+}

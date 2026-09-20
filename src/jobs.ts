@@ -327,6 +327,8 @@ type JobView = {
   /** Machine-readable failure reason, for a UI that wants its own wording. */
   code: string | null
   notes: string | null
+  /** ISO timestamp of the last state change; null on the folded rows. */
+  finishedAt: string | null
   /** Saved alongside the note: the copied audio and the transcript. */
   audio: string | null
   transcript: string | null
@@ -480,7 +482,7 @@ function foldFiltered(records: JobRecord[]): JobView | null {
     id: null,
     status: 'filtered',
     name: `${records.length} recording${records.length > 1 ? 's' : ''} filtered out`,
-    title: null, time: null, step: null, detail, code: null, notes: null, audio: null, transcript: null, durationSeconds: null,
+    title: null, time: null, finishedAt: null, step: null, detail, code: null, notes: null, audio: null, transcript: null, durationSeconds: null,
     history_filtered: records.some(r => r.code === 'too_old'), imported: false,
     filtered: { total: records.length, byCode },
   }
@@ -511,6 +513,8 @@ export function buildJobsView(
       name: j.name,
       title: j.title ?? null,
       time: displayTime(j.recorded_at),
+      /** When this record last changed — i.e. when the notes were written. */
+      finishedAt: j.updated_at ?? null,
       step: null,
       detail: null as string | null,
       code: null as string | null,

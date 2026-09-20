@@ -16,6 +16,7 @@ export type Job = {
   name: string
   title: string | null
   time: string | null
+  finishedAt: string | null
   step: string | null
   detail: string | null
   code: string | null
