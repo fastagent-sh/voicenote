@@ -259,6 +259,8 @@ type JobView = {
   detail: string | null
   notes: string | null
   history_filtered: boolean
+  /** Only on the folded "filtered out" row: how many, and why. */
+  filtered?: { total: number; byCode: Record<string, number> }
   imported: boolean
 }
 
@@ -361,9 +363,14 @@ function displayTime(recordedAt: string | null): string | null {
 
 function foldFiltered(records: JobRecord[]): JobView | null {
   if (!records.length) return null
+  // Counts by raw code as well as the English summary: the CLI prints the
+  // summary, a UI renders the codes in its own language.
+  const byCode: Record<string, number> = {}
   const counts = new Map<string, number>()
   for (const r of records) {
-    const key = FILTER_LABELS[r.code ?? ''] ?? r.code ?? 'filtered'
+    const code = r.code ?? 'filtered'
+    byCode[code] = (byCode[code] ?? 0) + 1
+    const key = FILTER_LABELS[code] ?? code
     counts.set(key, (counts.get(key) ?? 0) + 1)
   }
   const detail = [...counts].map(([label, n]) => `${label} ×${n}`).join(', ')
@@ -373,6 +380,7 @@ function foldFiltered(records: JobRecord[]): JobView | null {
     name: `${records.length} recording${records.length > 1 ? 's' : ''} filtered out`,
     title: null, time: null, step: null, detail, notes: null,
     history_filtered: records.some(r => r.code === 'too_old'), imported: false,
+    filtered: { total: records.length, byCode },
   }
 }
 

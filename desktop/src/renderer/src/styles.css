@@ -93,3 +93,19 @@ input {
 .sheet label input { flex: 1; }
 .row { display: flex; align-items: center; justify-content: space-between; }
 .hint { color: var(--muted); font-size: 12.5px; margin: 0 0 10px; }
+
+.card-openable { cursor: pointer; }
+.card-openable:hover { border-color: #ccd6ee; }
+.chevron { color: var(--muted); font-size: 20px; line-height: 1; }
+.reader-title { font-weight: 600; max-width: 60vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reader { flex: 1; overflow: auto; padding: 24px 32px 64px; }
+.note-body { max-width: 780px; margin: 0 auto; line-height: 1.7; }
+.note-body h1 { font-size: 24px; border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+.note-body h2 { font-size: 19px; margin-top: 1.8em; }
+.note-body h3 { font-size: 16px; margin-top: 1.5em; }
+.note-body code { background: #f3f4f6; padding: .15em .35em; border-radius: 4px; }
+.note-body pre { background: #f6f7f9; padding: 12px; border-radius: 8px; overflow: auto; }
+.note-body blockquote { border-left: 3px solid var(--line); margin: 1em 0; padding-left: 14px; color: var(--muted); }
+.note-body table { border-collapse: collapse; width: 100%; }
+.note-body th, .note-body td { border: 1px solid var(--line); padding: 6px 10px; }
+.note-body details { color: var(--muted); font-size: 13px; margin-top: 2em; }

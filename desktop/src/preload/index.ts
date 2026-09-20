@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
 /** The renderer's whole surface onto the pipeline. */
 const api = {
@@ -9,9 +9,14 @@ const api = {
   run: () => ipcRenderer.invoke('run'),
   retry: (id: string) => ipcRenderer.invoke('retry', id),
   importRecording: (path: string) => ipcRenderer.invoke('import', path),
+  // Electron removed File.path; this is the supported way to get the real path
+  // of a dropped file.
+  pathForFile: (file: File) => webUtils.getPathForFile(file),
   pickAudio: () => ipcRenderer.invoke('pick-audio'),
   login: () => ipcRenderer.invoke('login'),
   openPath: (path: string) => ipcRenderer.invoke('open-path', path),
+  readNote: (path: string) => ipcRenderer.invoke('note:read', path),
+  openNoteAsHtml: (title: string, html: string) => ipcRenderer.invoke('note:open-html', { title, html }),
   setAutoProcess: (enabled: boolean) => ipcRenderer.invoke('auto-process', enabled),
   on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'recorder:connected', listener: (payload: any) => void) => {
     const wrapped = (_event: unknown, payload: unknown) => listener(payload)

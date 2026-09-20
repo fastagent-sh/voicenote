@@ -3,10 +3,12 @@
 // background daemon, no stdout parsing.
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { readFile, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import {
   collectDoctor, configGetData, configSetData, getConfig, importRecording, jobsListData,
-  loginChatGPT, resetConfigCache, retryRecording, runPipeline, VERSION,
+  loginChatGPT, NOTE_HTML_CSS, resetConfigCache, retryRecording, runPipeline, VERSION,
 } from '../../../src/core.ts'
 import { onPipelineEvent } from '../../../src/progress.ts'
 
@@ -58,16 +60,17 @@ function watchRecorder(): void {
 
 function updateTray(): void {
   if (!tray) return
-  tray.setToolTip(running ? 'VoiceNote — processing' : 'VoiceNote — idle')
+  tray.setTitle(running ? '◐' : '◉')
+  tray.setToolTip(running ? 'VoiceNote — 处理中' : 'VoiceNote — 空闲')
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: running ? 'Processing…' : 'Idle', enabled: false },
+    { label: running ? '处理中…' : '空闲', enabled: false },
     { type: 'separator' },
-    { label: 'Show VoiceNote', click: () => showWindow() },
-    { label: 'Process now', enabled: !running, click: () => { void startRun('manual') } },
-    { label: 'Process automatically when the recorder is plugged in', type: 'checkbox', checked: autoProcess, click: (item) => { autoProcess = item.checked; updateTray() } },
+    { label: '显示主窗口', click: () => showWindow() },
+    { label: '立即处理', enabled: !running, click: () => { void startRun('manual') } },
+    { label: '插入录音笔时自动处理', type: 'checkbox', checked: autoProcess, click: (item) => { autoProcess = item.checked; updateTray() } },
     { type: 'separator' },
-    { label: 'Open notes folder', click: () => { void shell.openPath(getConfig().workspace) } },
-    { label: `Quit VoiceNote ${VERSION}`, click: () => app.quit() },
+    { label: '打开笔记文件夹', click: () => { void shell.openPath(getConfig().workspace) } },
+    { label: `退出 VoiceNote ${VERSION}`, click: () => app.quit() },
   ]))
 }
 
@@ -116,6 +119,15 @@ function registerIpc(): void {
     await loginChatGPT({ json: true, emit: (event) => broadcast('login:event', event) })
   })
   ipcMain.handle('open-path', (_e, path: string) => shell.openPath(path))
+  ipcMain.handle('note:read', (_e, path: string) => readFile(path, 'utf8'))
+  // The renderer already turned the note into HTML for the reading view;
+  // writing it out and handing it to the browser is the whole "open as HTML".
+  ipcMain.handle('note:open-html', async (_e, payload: { title: string; html: string }) => {
+    const file = join(tmpdir(), `voicenote-${Date.now()}.html`)
+    await writeFile(file, `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${payload.title}</title><style>${NOTE_HTML_CSS}</style></head><body>${payload.html}</body></html>`, 'utf8')
+    await shell.openExternal(pathToFileURL(file).href)
+    return file
+  })
   ipcMain.handle('pick-audio', async () => {
     const picked = await dialog.showOpenDialog({
       properties: ['openFile'],
@@ -132,7 +144,6 @@ app.whenReady().then(() => {
   // A 1x1 transparent image keeps the tray alive until real art exists; the
   // title text is what the user reads on macOS.
   tray = new Tray(nativeImage.createEmpty())
-  tray.setTitle('◉')
   updateTray()
   watchRecorder()
   createWindow()

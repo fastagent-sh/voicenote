@@ -1347,12 +1347,11 @@ function markdownNotes(meta: Json, audioPath: string, transcriptPath: string): s
   return `${body.trim()}\n`
 }
 
-async function markdownToPdf(markdownPath: string): Promise<string> {
-  const pdfPath = markdownPath.replace(/\.md$/i, '.pdf')
-  const tempBase = join(os.tmpdir(), `voicenote-pdf-${Date.now()}-${Math.random().toString(36).slice(2)}`)
-  const htmlPath = `${tempBase}.html`
-  const cssPath = `${tempBase}.css`
-  const css = `
+/**
+ * Print/read stylesheet for a note rendered as HTML. Exported because the
+ * desktop app's "open as HTML" and the PDF export must look the same.
+ */
+export const NOTE_HTML_CSS = `
 :root { color-scheme: light; }
 body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; line-height: 1.68; color: #1f2328; max-width: 860px; margin: 40px auto; padding: 0 32px; font-size: 15px; }
 h1, h2, h3 { line-height: 1.32; margin-top: 1.8em; color: #111827; }
@@ -1369,7 +1368,13 @@ details { margin-top: 2em; color: #57606a; font-size: 13px; }
 @page { size: A4; margin: 18mm 16mm; }
 @media print { body { margin: 0; padding: 0; max-width: none; } h1, h2, h3 { break-after: avoid; } table, blockquote { break-inside: avoid; } }
 `
-  await writeFile(cssPath, css, 'utf8')
+
+async function markdownToPdf(markdownPath: string): Promise<string> {
+  const pdfPath = markdownPath.replace(/\.md$/i, '.pdf')
+  const tempBase = join(os.tmpdir(), `voicenote-pdf-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  const htmlPath = `${tempBase}.html`
+  const cssPath = `${tempBase}.css`
+  await writeFile(cssPath, NOTE_HTML_CSS, 'utf8')
   try {
     const title = basename(markdownPath, extname(markdownPath))
     const pandoc = await runCommand('pandoc', [markdownPath, '--from', 'markdown+smart', '--to', 'html5', '--standalone', '--metadata', `title=${title}`, '--css', cssPath, '-o', htmlPath], 120000)

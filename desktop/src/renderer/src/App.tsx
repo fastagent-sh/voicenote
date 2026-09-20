@@ -1,9 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { vn, type Job, type JobsResponse, type LoginEvent, type Status } from './api.ts'
 import { explainFailure, topProblem } from './problems.ts'
+import { NoteReader } from './NoteReader.tsx'
 import { Settings } from './Settings.tsx'
 
 const STEP_ORDER = ['Copy audio', 'Transcribe audio', 'Generate', 'Write outputs']
+
+/** Why a recording was never processed, in the user's words. */
+const FILTER_REASONS: Record<string, string> = {
+  too_old: '早于设定的时间范围',
+  too_small: '文件太小',
+  too_short: '时长太短',
+}
 
 /** Progress the state file can express: which of the four steps is running. */
 function stepIndex(step: string | null): number {
@@ -45,25 +53,28 @@ function ActiveCard({ job, note, tool, startedAt }: { job: Job; note: string; to
       {tool && <div className="tool-hint">正在查阅 {tool}</div>}
       {note
         ? <pre className="note-stream" ref={bodyRef}>{note}</pre>
-        : <div className="waiting">{job.step ?? '准备中…'}</div>}
+        : <div className="waiting">{['正在拷贝音频…', '正在转写,长录音需要几分钟…', '正在生成纪要…', '正在写入文件…'][index]}</div>}
     </article>
   )
 }
 
-function JobCard({ job, onRetry, onOpen, onLogin, onSettings }: {
+function JobCard({ job, onRetry, onRead, onLogin, onSettings }: {
   job: Job
   onRetry: (job: Job) => void
-  onOpen: (path: string) => void
+  onRead: (job: Job) => void
   onLogin: () => void
   onSettings: () => void
 }) {
   const [expanded, setExpanded] = useState(false)
   if (job.status === 'filtered') {
+    const reasons = Object.entries(job.filtered?.byCode ?? {})
+      .map(([code, count]) => `${FILTER_REASONS[code] ?? code} ${count} 个`)
+      .join('、')
     return (
       <article className="card card-muted">
-        <div className="card-title">{job.name}</div>
-        <div className="card-sub">{job.detail}</div>
-        <div className="card-actions"><button onClick={onSettings}>调整处理范围</button></div>
+        <div className="card-title">{job.filtered?.total ?? 0} 个录音被跳过</div>
+        <div className="card-sub">{reasons || job.detail}</div>
+        {job.history_filtered && <div className="card-actions"><button onClick={onSettings}>放宽时间范围</button></div>}
       </article>
     )
   }
@@ -79,7 +90,7 @@ function JobCard({ job, onRetry, onOpen, onLogin, onSettings }: {
           {problem.action?.kind === 'login' && <button className="primary" onClick={onLogin}>{problem.action.label}</button>}
           {problem.action?.kind === 'settings' && <button className="primary" onClick={onSettings}>{problem.action.label}</button>}
           {problem.action?.kind === 'retry' && job.id && <button className="primary" onClick={() => onRetry(job)}>{problem.action.label}</button>}
-          {job.notes && <button onClick={() => onOpen(job.notes!)}>打开转写稿</button>}
+          {job.notes && <button onClick={() => onRead(job)}>查看已保存内容</button>}
           {job.detail && <button className="link" onClick={() => setExpanded(v => !v)}>{expanded ? '收起' : '详情'}</button>}
         </div>
         {expanded && <pre className="raw-error">{job.detail}</pre>}
@@ -87,13 +98,13 @@ function JobCard({ job, onRetry, onOpen, onLogin, onSettings }: {
     )
   }
   return (
-    <article className="card" onDoubleClick={() => job.notes && onOpen(job.notes)}>
+    <article className={job.notes ? 'card card-openable' : 'card'} onClick={() => job.notes && onRead(job)}>
       <div className="card-row">
         <div>
           <div className="card-title">{job.title || job.name}</div>
           <div className="card-sub">{job.time ?? ''}{job.status === 'queued' ? ' · 排队中' : ''}</div>
         </div>
-        {job.notes && <button onClick={() => onOpen(job.notes!)}>打开</button>}
+        {job.notes && <span className="chevron">›</span>}
       </div>
     </article>
   )
@@ -108,6 +119,7 @@ export function App() {
   const [startedAt, setStartedAt] = useState(Date.now())
   const [query, setQuery] = useState('')
   const [screen, setScreen] = useState<'timeline' | 'settings'>('timeline')
+  const [reading, setReading] = useState<Job | null>(null)
   const [banner, setBanner] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
@@ -149,9 +161,10 @@ export function App() {
 
   const onDrop = useCallback(async (event: React.DragEvent) => {
     event.preventDefault()
-    const file = event.dataTransfer.files[0] as (File & { path?: string }) | undefined
-    if (!file?.path) return
-    await vn.importRecording(file.path)
+    const file = event.dataTransfer.files[0]
+    if (!file) return
+    const path = vn.pathForFile(file)
+    if (path) await vn.importRecording(path)
   }, [])
 
   const items = jobs?.items ?? []
@@ -164,6 +177,8 @@ export function App() {
   }, [items, active, query])
 
   const problem = topProblem(status)
+
+  if (reading) return <NoteReader job={reading} onClose={() => setReading(null)} />
 
   if (screen === 'settings') {
     return <Settings onClose={() => { setScreen('timeline'); void refresh() }} onLogin={() => vn.login()} status={status} />
@@ -203,7 +218,7 @@ export function App() {
             key={job.id ?? job.name}
             job={job}
             onRetry={(target) => { if (target.id) void vn.retry(target.id) }}
-            onOpen={(path) => void vn.openPath(path)}
+            onRead={(target) => setReading(target)}
             onLogin={() => void vn.login()}
             onSettings={() => setScreen('settings')}
           />
