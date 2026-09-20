@@ -2,6 +2,7 @@
 import { cac } from 'cac'
 import packageJson from '../package.json' with { type: 'json' }
 import { parseLockOwner } from './runLock'
+import { loginWithBrowser, loginWithDeviceCode, PI_PROVIDER_ID } from './chatgptAuth'
 import { tosObject, type TosConfig as VolcanoTosConfig } from './tos'
 import { applyOutcome, buildJobsView, classify, emptyState, localIso, MAX_ATTEMPTS, migrateLegacyState, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -234,12 +235,35 @@ function settingNumber(s: Settings, key: string, fallback: number): number {
   return value
 }
 
+/**
+ * Path to the pi CLI that ships with this package. pi is a pinned dependency
+ * so every install runs the same version instead of whatever `pi` happens to
+ * be on PATH; resolution walks up from this source file, which covers both a
+ * repo checkout and a global `bun add` install. Returns null for the compiled
+ * sidecar (no node_modules on disk) — there the GUI passes VOICENOTE_PI_BIN /
+ * VOICENOTE_PI_CLI for its staged copy — and for a source tree with no
+ * dependencies installed, where `pi` from PATH is the remaining option.
+ */
+function bundledPiCli(): string | null {
+  let dir = import.meta.dir
+  for (;;) {
+    const candidate = join(dir, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'cli.js')
+    if (existsSync(candidate)) return candidate
+    const parent = dirname(dir)
+    if (parent === dir) return null
+    dir = parent
+  }
+}
+
 let configCache: Config | null = null
 
 function getConfig(): Config {
   if (configCache) return configCache
   const file = loadConfigJson()
   const s = readSettings(file)
+  // An explicit VOICENOTE_PI_BIN means the user picked their own pi; don't
+  // second-guess it with the bundled copy.
+  const piCli = s.VOICENOTE_PI_CLI ? expandHome(s.VOICENOTE_PI_CLI) : (s.VOICENOTE_PI_BIN ? null : bundledPiCli())
   const proxy = proxyEnv(s)
   // vn's own fetch (the ChatGPT OAuth flow) reads the proxy from the process
   // environment, so the derived values have to land there as well.
@@ -270,8 +294,8 @@ function getConfig(): Config {
     // detection); a configurable path lets the GUI point at its bundled copy.
     ffprobeBin: expandHome(s.VOICENOTE_FFPROBE_BIN || 'ffprobe'),
     pi: {
-      bin: expandHome(s.VOICENOTE_PI_BIN || 'pi'),
-      cli: s.VOICENOTE_PI_CLI ? expandHome(s.VOICENOTE_PI_CLI) : null,
+      bin: expandHome(s.VOICENOTE_PI_BIN || (piCli ? process.execPath : 'pi')),
+      cli: piCli,
       // pi's --model accepts "provider/id" (e.g. openai-codex/gpt-5.6-sol), so
       // this one setting pins both. Null = whatever pi is configured to use.
       model: (s.VOICENOTE_PI_MODEL || '').trim() || null,
@@ -1163,9 +1187,9 @@ function piInvocation(pi: PiConfig, args: string[]): { bin: string; args: string
 // ───────────────────────────────────────────────────────────────────────
 // ChatGPT (OpenAI Codex) OAuth login. The browser callback is the default;
 // --device-code is available for accounts that opted into that flow. This
-// exposes pi's login as a plain command for non-TUI and GUI users.
-// We reuse pi's own OAuth implementation (@earendil-works/pi-ai) and persist
-// to pi's auth.json in the exact shape it reads: { type: 'oauth', ...creds }.
+// exposes the login as a plain command for non-TUI and GUI users.
+// The flow lives in chatgptAuth.ts; here we only persist the result to pi's
+// auth.json in the exact shape it reads: { type: 'oauth', ...creds }.
 // ───────────────────────────────────────────────────────────────────────
 
 async function persistPiOAuth(authPath: string, providerId: string, creds: Record<string, unknown>): Promise<void> {
@@ -1187,46 +1211,32 @@ async function loginChatGPT(opts: { json?: boolean; deviceCode?: boolean; emit?:
   const json = !!opts.json
   const emit = opts.emit ?? ((o: Record<string, unknown>) => { if (json) console.log(JSON.stringify(o)) })
   try {
-    const oauth = await import('@earendil-works/pi-ai/oauth')
-    let creds: Record<string, unknown>
-    if (opts.deviceCode) {
+    const creds = opts.deviceCode
       // Device-code flow: no localhost server, but the account must first enable
       // "device code authorization for Codex" in ChatGPT > Settings > Security.
-      creds = await oauth.loginOpenAICodexDeviceCode({
-        onDeviceCode: (info) => {
-          if (json) emit({ event: 'device_code', userCode: info.userCode, verificationUri: info.verificationUri, intervalSeconds: info.intervalSeconds, expiresInSeconds: info.expiresInSeconds })
-          else {
-            console.log('\nTo sign in to ChatGPT (device code):')
-            console.log(`  1. Open ${info.verificationUri}`)
-            console.log(`  2. Enter code: ${info.userCode}`)
-            console.log('\nIf you see "Enable device code authorization", turn it on in')
-            console.log('ChatGPT > Settings > Security — or just rerun `vn login` (browser flow).')
-            console.log('\nWaiting for authorization…')
-          }
-        },
-      }) as Record<string, unknown>
-    } else {
-      // Default: browser-callback flow (same as pi `/login` and the official Codex
-      // CLI). Spins up localhost:1455/auth/callback; no account setting required.
-      creds = await oauth.loginOpenAICodex({
-        onAuth: ({ url }) => {
-          if (json) emit({ event: 'auth_url', url })
-          else {
-            console.log('\nOpening your browser to sign in to ChatGPT…')
-            console.log(`If it doesn't open, paste this into a browser on THIS machine:\n  ${url}`)
-          }
-          // Best-effort auto-open; the URL is printed/emitted above as fallback.
-          void openPath(url)
-        },
-        onPrompt: async ({ message }) => {
-          // Only reached if the localhost:1455 callback can't complete (port busy,
-          // or browser on another machine). Fail loudly rather than hang.
-          throw new Error(`${message} — automatic callback failed (is localhost:1455 free, and is your browser on this machine?). Retry, or use --device-code.`)
-        },
-      }) as Record<string, unknown>
-    }
-    await persistPiOAuth(authPath, oauth.openaiCodexOAuthProvider.id, creds)
-    if (json) emit({ event: 'success', provider: oauth.openaiCodexOAuthProvider.id })
+      ? await loginWithDeviceCode((info) => {
+        if (json) emit({ event: 'device_code', userCode: info.userCode, verificationUri: info.verificationUri, intervalSeconds: info.intervalSeconds, expiresInSeconds: info.expiresInSeconds })
+        else {
+          console.log('\nTo sign in to ChatGPT (device code):')
+          console.log(`  1. Open ${info.verificationUri}`)
+          console.log(`  2. Enter code: ${info.userCode}`)
+          console.log('\nIf you see "Enable device code authorization", turn it on in')
+          console.log('ChatGPT > Settings > Security — or just rerun `vn login` (browser flow).')
+          console.log('\nWaiting for authorization…')
+        }
+      })
+      // Default: browser-callback flow (same as the official Codex CLI).
+      : await loginWithBrowser((url) => {
+        if (json) emit({ event: 'auth_url', url })
+        else {
+          console.log('\nOpening your browser to sign in to ChatGPT…')
+          console.log(`If it doesn't open, paste this into a browser on THIS machine:\n  ${url}`)
+        }
+        // Best-effort auto-open; the URL is printed/emitted above as fallback.
+        void openPath(url)
+      })
+    await persistPiOAuth(authPath, PI_PROVIDER_ID, creds as unknown as Record<string, unknown>)
+    if (json) emit({ event: 'success', provider: PI_PROVIDER_ID })
     else console.log(`\n✓ Signed in. Credentials saved to ${authPath}. Verify with: vn doctor`)
   } catch (e: any) {
     let message = String(e?.message || e)
@@ -2613,7 +2623,7 @@ async function collectDoctor() {
     // Provider/model/credentials are pi's own configuration; `pi.available` is
     // all we can honestly report about whether a summary can run.
     summary: { backend: 'pi', model: pi.model, thinking: pi.thinking, tools: pi.tools || null, contextDir: pi.tools ? pi.contextDir : null },
-    pi: { bin: pi.bin, version: piCheck.code === 0 ? (piCheck.stdout.trim() || piCheck.stderr.trim() || null) : null, available: piCheck.code === 0, auth: existsSync(pi.authPath), authPath: pi.authPath },
+    pi: { bin: pi.bin, cli: pi.cli, version: piCheck.code === 0 ? (piCheck.stdout.trim() || piCheck.stderr.trim() || null) : null, available: piCheck.code === 0, auth: existsSync(pi.authPath), authPath: pi.authPath },
     // Outbound proxy for HTTPS endpoints (updater/GitHub). The GUI reads this to
     // route its own update check, so it reports the resolved value.
     proxy: { url: config.childEnv.https_proxy ?? null },
@@ -2680,6 +2690,7 @@ async function doctor(opts: { json?: boolean } = {}): Promise<void> {
   }
   console.log(`summaryBackend=${s.summary.backend}`)
   console.log(`pi.bin=${s.pi.bin} model=${s.summary.model || "<pi's own default>"}`)
+  if (s.pi.cli) console.log(`pi.cli=${s.pi.cli}`)
   console.log(`pi.thinking=${s.summary.thinking}`)
   console.log(`pi.summaryTools=${s.summary.tools || '<disabled>'}`)
   if (s.summary.contextDir) console.log(`pi.contextDir=${s.summary.contextDir} (summary agent cwd + read/grep cross-reference root)`)

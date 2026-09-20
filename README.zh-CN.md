@@ -78,7 +78,7 @@ bun add -g @fastagent-sh/voicenote
 ## 依赖
 
 - **Bun >= 1.3(运行时必需)** -- 代码用到 `Bun.Glob` / `Bun.file`,纯 Node 无法运行
-- Node / npm -- 仅用于安装 pi CLI(纪要后端)
+- pi(纪要后端)-- 作为本包的固定版本依赖一起安装,不需要全局 `pi`
 - ffmpeg / ffprobe(音频时长检测):
 
 ```bash
@@ -290,7 +290,7 @@ workflow 位于 `.github/workflows/release.yml`:CI 显式跑 typecheck、测试�
 
 ### 打包内容
 
-`bun build --compile` 把 `vn` CLI(含 bun 运行时 + pi-ai)编成单文件 sidecar;pi 不能 compile(运行时读磁盘数据文件),故整包随行,用一个随包的 `bun` 运行:
+`bun build --compile` 把 `vn` CLI(含 bun 运行时)编成单文件 sidecar;pi 不能 compile(运行时读磁盘数据文件),故整包随行,用一个随包的 `bun` 运行:
 
 | 组件 | 形式 | 用途 |
 |------|------|------|
@@ -303,7 +303,9 @@ workflow 位于 `.github/workflows/release.yml`:CI 显式跑 typecheck、测试�
 
 ### 构建
 
-前置:Rust + cargo、bun、node/npm、Xcode CLT,且**本机全局装有 pi**(`npm i -g @earendil-works/pi-coding-agent`,构建脚本从这里取 pi 整包)。
+前置:Rust + cargo、node/npm、Xcode CLT,以及 `app/scripts/build-vn-sidecar.sh` 里 `BUN_VERSION` 指定的那个 bun 版本(版本不符脚本直接报错退出,因为 `bun build --compile` 会把当前 bun 的运行时编进产物)。
+
+打包进 App 的东西全部固定版本,不从构建机器上取:pi 来自 `package.json` 的 `dependencies["@earendil-works/pi-coding-agent"]`(与 CLI 包安装的是同一版本),bun 运行时和 ffprobe 来自构建脚本里的 `BUN_VERSION` / `FFPROBE_*_VERSION`。下载产物缓存在 `app/.build-cache/`,改动固定版本号后会重新下载。
 
 ```bash
 cd app

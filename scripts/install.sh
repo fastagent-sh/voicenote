@@ -17,6 +17,7 @@ set -euo pipefail
 #   bash scripts/install.sh
 
 PACKAGE="@fastagent-sh/voicenote"
+MIN_BUN="1.3.0"   # keep in sync with package.json engines.bun
 LEGACY_PACKAGES=("@kid7st/voicenote")  # pre-rebrand names; same `vn` bin → must be removed to avoid a stale symlink
 INSTALL_LAUNCH_AGENT="${VOICENOTE_INSTALL_LAUNCH_AGENT:-}"
 # Keys the editable template lists. Their default VALUES live in src/cli.ts — an
@@ -127,20 +128,16 @@ install_deps() {
   else
     log "bun already installed: $(bun --version)"
   fi
-  if ! command -v npm >/dev/null 2>&1; then
-    brew install node
-  else
-    log "npm already installed: $(npm --version)"
+  # vn runs on bun (Bun.Glob / Bun.file), so an older bun fails at runtime with
+  # confusing errors. Check here instead, and let the user own their bun.
+  local bun_version
+  bun_version="$(bun --version)"
+  if [ "$(printf '%s\n%s\n' "$MIN_BUN" "$bun_version" | sort -V | head -1)" != "$MIN_BUN" ]; then
+    err "bun $bun_version is too old; voicenote needs >= $MIN_BUN. Upgrade with: bun upgrade"
+    exit 1
   fi
-  if ! command -v pi >/dev/null 2>&1; then
-    log "Installing pi CLI"
-    npm i -g @earendil-works/pi-coding-agent
-  fi
-  if command -v pi >/dev/null 2>&1; then
-    log "pi found: $(command -v pi)"
-  else
-    warn "pi not found. Install or add it to PATH before using pi-codex."
-  fi
+  # pi is a pinned dependency of the voicenote package, installed with it below;
+  # nothing global to install here.
 }
 
 remove_legacy() {

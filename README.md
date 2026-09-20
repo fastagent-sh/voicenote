@@ -78,7 +78,7 @@ bun add -g @fastagent-sh/voicenote
 ## Dependencies
 
 - **Bun >= 1.3 (required at runtime)** — the code uses `Bun.Glob` / `Bun.file`; plain Node cannot run it
-- Node / npm — only used to install the pi CLI (the notes backend)
+- pi (the notes backend) — a pinned dependency of this package, installed with it; no global `pi` needed
 - ffmpeg / ffprobe (audio duration detection):
 
 ```bash
@@ -295,7 +295,7 @@ A self-contained macOS `.app` (Tauri v2) for **non-terminal users**: the target 
 
 ### What's bundled
 
-`bun build --compile` compiles the `vn` CLI (bun runtime + pi-ai included) into a single-file sidecar; pi cannot be compiled (it reads data files from disk at runtime), so the whole package ships alongside and runs with a bundled `bun`:
+`bun build --compile` compiles the `vn` CLI (bun runtime included) into a single-file sidecar; pi cannot be compiled (it reads data files from disk at runtime), so the whole package ships alongside and runs with a bundled `bun`:
 
 | Component | Form | Purpose |
 |------|------|------|
@@ -308,7 +308,9 @@ At runtime, Rust invokes the bundled `vn` directly and injects `VOICENOTE_PI_BIN
 
 ### Build
 
-Prerequisites: Rust + cargo, bun, node/npm, Xcode CLT, and **pi installed globally on the build machine** (`npm i -g @earendil-works/pi-coding-agent`; the build script stages pi from there).
+Prerequisites: Rust + cargo, node/npm, Xcode CLT, and the exact bun version pinned in `app/scripts/build-vn-sidecar.sh` (`BUN_VERSION`; the script aborts on a mismatch because `bun build --compile` embeds the compiling bun's runtime).
+
+Everything the app ships is pinned, nothing is taken from the build machine: pi from `package.json` (`dependencies["@earendil-works/pi-coding-agent"]`, the same version the CLI package installs), the bun runtime and ffprobe from `BUN_VERSION` / `FFPROBE_*_VERSION` in the build script. Downloads are cached under `app/.build-cache/` and re-fetched when a pin changes.
 
 ```bash
 cd app

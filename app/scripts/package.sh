@@ -6,9 +6,9 @@ set -euo pipefail
 #   bash scripts/package.sh                                  # ad-hoc (internal)
 #   bash scripts/package.sh "Developer ID Application: …"    # for notarization
 #
-# Builder prerequisites: Rust+cargo, bun, node/npm, Xcode CLT, and pi installed
-# globally (npm i -g @earendil-works/pi-coding-agent) — build-vn-sidecar.sh
-# stages pi from there. End users need none of this; it's all bundled.
+# Builder prerequisites: Rust+cargo, bun, node/npm, Xcode CLT. pi is staged by
+# build-vn-sidecar.sh at the version pinned in package.json (no global install
+# involved). End users need none of this; it's all bundled.
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 APP="$(dirname "$HERE")"

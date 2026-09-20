@@ -28,6 +28,7 @@
   },
   "files": [
     "src/cli.ts",
+    "src/chatgptAuth.ts",
     "src/jobs.ts",
     "src/runLock.ts",
     "src/tos.ts",
@@ -45,7 +46,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.79.3",
+    "@earendil-works/pi-coding-agent": "0.86.0",
     "cac": "latest"
   },
   "devDependencies": {
