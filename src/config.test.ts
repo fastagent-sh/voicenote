@@ -6,12 +6,8 @@ import { dirname, join } from 'node:path'
 test('GUI config persists DeepSeek credentials for subsequent CLI calls', async () => {
   const home = await mkdtemp(join(tmpdir(), 'voicenote-config-'))
   const configDir = join(home, process.platform === 'win32' ? 'voicenote' : '.config/voicenote')
-  const fakePi = join(home, 'pi.ts')
   await mkdir(configDir, { recursive: true })
-  await writeFile(fakePi, `console.log('test-pi')`)
   await writeFile(join(configDir, 'config.json'), JSON.stringify({
-    VOICENOTE_PI_BIN: process.execPath,
-    VOICENOTE_PI_CLI: fakePi,
     VOICENOTE_FFPROBE_BIN: process.execPath,
     VOICENOTE_WORKSPACE: join(home, 'notes'),
   }))
@@ -43,7 +39,7 @@ test.skipIf(process.platform === 'win32')('scheduler carries only what config.js
   try {
     await mkdir(configDir, { recursive: true })
     await writeFile(join(configDir, 'config.json'), JSON.stringify({
-      LOCAL_PROXY_HOST: '127.0.0.1', LOCAL_PROXY_PORT: '7890', VOICENOTE_PI_BIN: process.execPath,
+      LOCAL_PROXY_HOST: '127.0.0.1', LOCAL_PROXY_PORT: '7890', VOICENOTE_FFPROBE_BIN: process.execPath,
     }))
     const env = { HOME: home, PATH: dirname(process.execPath), http_proxy: 'http://127.0.0.1:9999' }
     const result = spawnSync(process.execPath, [join(import.meta.dir, 'cli.ts'), 'install-launch-agent'], { env, encoding: 'utf8', timeout: 10_000 })
@@ -51,7 +47,7 @@ test.skipIf(process.platform === 'win32')('scheduler carries only what config.js
     const contents = await readFile(join(home, 'Library/LaunchAgents/sh.fastagent.voicenote.plist'), 'utf8')
     // config.json is read by the scheduled run itself, so copying its values
     // into the plist would only create a second, silently stale source.
-    for (const key of ['http_proxy', 'LOCAL_PROXY_HOST', 'VOLCANO_ASR_KEY', 'VOICENOTE_PI_BIN']) {
+    for (const key of ['http_proxy', 'LOCAL_PROXY_HOST', 'VOLCANO_ASR_KEY', 'VOICENOTE_FFPROBE_BIN']) {
       expect(contents).not.toContain(`<key>${key}</key>`)
     }
   } finally {
@@ -59,26 +55,22 @@ test.skipIf(process.platform === 'win32')('scheduler carries only what config.js
   }
 })
 
-// `<bun> <pi/dist/cli.js>` only works as a pair. A plist that carried the bun
-// path without the script started bun with no program, and every scheduled run
-// failed while the GUI (which injects both) looked fine.
-test.skipIf(process.platform === 'win32')('scheduler keeps the pi runtime and script together', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'voicenote-scheduler-pair-'))
+// The notes model is a library call now, so no path to it belongs in the
+// plist. ffprobe is still an external binary, and launchd's PATH is not the
+// login shell's, so a path handed to us through the environment must survive.
+test.skipIf(process.platform === 'win32')('scheduler carries the ffprobe path it was given', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'voicenote-scheduler-ffprobe-'))
   const configDir = join(home, '.config/voicenote')
   try {
     await mkdir(configDir, { recursive: true })
     await writeFile(join(configDir, 'config.json'), '{}')
-    const piCli = join(home, 'pi-cli.js')
-    await writeFile(piCli, '')
-    const env = {
-      HOME: home, PATH: dirname(process.execPath),
-      VOICENOTE_PI_BIN: process.execPath, VOICENOTE_PI_CLI: piCli,
-    }
+    const env = { HOME: home, PATH: dirname(process.execPath), VOICENOTE_FFPROBE_BIN: process.execPath }
     const result = spawnSync(process.execPath, [join(import.meta.dir, 'cli.ts'), 'install-launch-agent'], { env, encoding: 'utf8', timeout: 10_000 })
     expect(result.status).toBe(0)
     const contents = await readFile(join(home, 'Library/LaunchAgents/sh.fastagent.voicenote.plist'), 'utf8')
+    expect(contents).toContain('<key>VOICENOTE_FFPROBE_BIN</key>')
     expect(contents).toContain(`<string>${process.execPath}</string>`)
-    expect(contents).toContain(`<string>${piCli}</string>`)
+    for (const key of ['VOICENOTE_PI_BIN', 'VOICENOTE_PI_CLI']) expect(contents).not.toContain(key)
   } finally {
     await rm(home, { recursive: true, force: true })
   }

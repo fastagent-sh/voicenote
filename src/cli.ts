@@ -3,6 +3,8 @@ import { cac } from 'cac'
 import packageJson from '../package.json' with { type: 'json' }
 import { parseLockOwner } from './runLock.ts'
 import { loginWithBrowser, loginWithDeviceCode, PI_PROVIDER_ID } from './chatgptAuth.ts'
+import { runAgentPrompt } from './piAgent.ts'
+import { parseSummaryJson } from './summaryJson.ts'
 import { applyOutcome, buildJobsView, classify, emptyState, localIso, MAX_ATTEMPTS, migrateLegacyState, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs.ts'
 import { createHash, randomUUID } from 'node:crypto'
 import { appendFile, chmod, mkdir, readFile, writeFile, copyFile, rename, unlink, stat, readdir, rmdir, utimes } from 'node:fs/promises'
@@ -74,17 +76,16 @@ type VolcanoConfig = {
   language?: string
 }
 
-/** How this install runs pi: which binary, which model, what it may read. */
+/** How this install runs pi: which model, what it may read, where its config is. */
 type PiConfig = {
-  bin: string
-  /** Set when pi ships as plain JS next to a bundled bun: `<bin> <cli> <args>`. */
-  cli: string | null
   model: string | null
   thinking: string
   /** Comma-separated tool list; empty = run the summary without tools. */
   tools: string
   contextDir: string
   retries: number
+  /** pi's config dir; holds auth.json (credentials) and models.json. */
+  agentDir: string
   authPath: string
 }
 
@@ -124,8 +125,6 @@ const ENV_KEYS = [
   'VOLCANO_ASR_KEY',
   'VOLCANO_ASR_RESOURCE_ID',
   'VOLCANO_ASR_LANGUAGE',
-  'VOICENOTE_PI_BIN',
-  'VOICENOTE_PI_CLI',
   'PI_CODING_AGENT_DIR',
   'VOICENOTE_FFPROBE_BIN',
   'VOICENOTE_PI_MODEL',
@@ -219,35 +218,12 @@ function settingNumber(s: Settings, key: string, fallback: number): number {
   return value
 }
 
-/**
- * Path to the pi CLI that ships with this package. pi is a pinned dependency
- * so every install runs the same version instead of whatever `pi` happens to
- * be on PATH; resolution walks up from this source file, which covers both a
- * repo checkout and a global npm install. Returns null for the compiled
- * sidecar (no node_modules on disk) — there the GUI passes VOICENOTE_PI_BIN /
- * VOICENOTE_PI_CLI for its staged copy — and for a source tree with no
- * dependencies installed, where `pi` from PATH is the remaining option.
- */
-function bundledPiCli(): string | null {
-  let dir = dirname(fileURLToPath(import.meta.url))
-  for (;;) {
-    const candidate = join(dir, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'cli.js')
-    if (existsSync(candidate)) return candidate
-    const parent = dirname(dir)
-    if (parent === dir) return null
-    dir = parent
-  }
-}
-
 let configCache: Config | null = null
 
 function getConfig(): Config {
   if (configCache) return configCache
   const file = loadConfigJson()
   const s = readSettings(file)
-  // An explicit VOICENOTE_PI_BIN means the user picked their own pi; don't
-  // second-guess it with the bundled copy.
-  const piCli = s.VOICENOTE_PI_CLI ? expandHome(s.VOICENOTE_PI_CLI) : (s.VOICENOTE_PI_BIN ? null : bundledPiCli())
   const proxy = proxyEnv(s)
   // vn's own fetch (the ChatGPT OAuth flow) reads the proxy from the process
   // environment, so the derived values have to land there as well.
@@ -280,8 +256,6 @@ function getConfig(): Config {
     // detection); a configurable path lets the GUI point at its bundled copy.
     ffprobeBin: expandHome(s.VOICENOTE_FFPROBE_BIN || 'ffprobe'),
     pi: {
-      bin: expandHome(s.VOICENOTE_PI_BIN || (piCli ? process.execPath : 'pi')),
-      cli: piCli,
       // pi's --model accepts "provider/id" (e.g. openai-codex/gpt-5.6-sol), so
       // this one setting pins both. Null = whatever pi is configured to use.
       model: (s.VOICENOTE_PI_MODEL || '').trim() || null,
@@ -293,6 +267,7 @@ function getConfig(): Config {
       // reach outside the configured workspace.
       contextDir: expandHome(s.VOICENOTE_CONTEXT_DIR || workspace),
       retries: Math.max(1, Math.floor(settingNumber(s, 'VOICENOTE_PI_RETRIES', 3))),
+      agentDir: piAgentDir,
       authPath: join(piAgentDir, 'auth.json'),
     },
     childEnv,
@@ -1092,16 +1067,6 @@ ${transcript}`
 // the notes. VoiceNote does not implement a provider fallback chain.
 // ───────────────────────────────────────────────────────────────────────
 
-// pi can't be `bun build --compile`'d (it reads data files from disk), so the
-// bundled GUI ships pi as plain JS and runs it under a bundled bun. When
-// `pi.cli` is set, `pi.bin` is the runtime (bun) and the cli.js is prepended to
-// pi's args — `<bun> <cli.js> <args>`, no wrapper script and no shell (critical
-// on Windows, where pi args include a huge --system-prompt that a .cmd/%*
-// wrapper would mangle). CLI users with a real `pi` on PATH leave it unset.
-function piInvocation(pi: PiConfig, args: string[]): { bin: string; args: string[] } {
-  return pi.cli ? { bin: pi.bin, args: [pi.cli, ...args] } : { bin: pi.bin, args }
-}
-
 // ───────────────────────────────────────────────────────────────────────
 // ChatGPT (OpenAI Codex) OAuth login. The browser callback is the default;
 // --device-code is available for accounts that opted into that flow. This
@@ -1243,89 +1208,34 @@ async function configSet(): Promise<void> {
   let payload: ConfigSetPayload
   try { payload = JSON.parse(await readStdin()) }
   catch (e: any) { console.error(`Invalid JSON on stdin: ${e?.message || e}`); process.exitCode = 1; return }
-  // Every other key is re-read by the agent on each run, but VOICENOTE_PI_BIN
-  // is snapshotted into the scheduler as a resolved absolute path at install
-  // time (launchd's fixed PATH can't find it otherwise). The GUI reinstalls on
-  // save; the CLI path must be told — but only when the value actually CHANGES.
-  // A GUI-style client resubmits every field on every save, so `in payload`
-  // alone would nag on every unrelated edit.
-  const PI_BIN = 'VOICENOTE_PI_BIN'
-  const before = String(loadConfigJson()[PI_BIN] ?? '')
   console.log(JSON.stringify(await configSetData(payload)))
-  const piBinChanged = payload.env && PI_BIN in payload.env && String(payload.env[PI_BIN] ?? '') !== before
-  if (piBinChanged) {
-    console.error(`Note: ${PI_BIN} changed — re-run \`vn install-launch-agent\` to apply it to the background scheduler.`)
-  }
-}
-
-function extractFirstJsonObject(text: string): string {
-  const raw = text.trim()
-  // Models often wrap JSON in a ```json fence; strip it before looking inside.
-  const trimmed = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```\s*$/i)?.[1]?.trim() ?? raw
-  if (trimmed.startsWith('{') && trimmed.endsWith('}')) return trimmed
-  // Find the first balanced {...}
-  let depth = 0, start = -1, inString = false, escape = false
-  for (let i = 0; i < trimmed.length; i++) {
-    const ch = trimmed[i]!
-    if (escape) { escape = false; continue }
-    if (inString) {
-      if (ch === '\\') { escape = true; continue }
-      if (ch === '"') inString = false
-      continue
-    }
-    if (ch === '"') { inString = true; continue }
-    if (ch === '{') { if (depth === 0) start = i; depth++ }
-    else if (ch === '}') { depth--; if (depth === 0 && start !== -1) return trimmed.slice(start, i + 1) }
-  }
-  return trimmed
 }
 
 type PiRunOptions = {
   systemPrompt: string
   userPrompt: string
-  timeoutMs?: number
+  timeoutMs: number
   thinking?: string
-  tools?: string  // e.g. 'read,grep'; empty/undefined = --no-tools
+  /** Built-in tool names; empty = run the summary without tools. */
+  tools: string[]
   appendSystemPrompt?: string
-  cwd?: string  // agent working dir: the knowledge base, so read/grep/find default there
+  /** Agent working dir: the knowledge base, so read/grep default there. */
+  cwd: string
 }
 
 async function runPi(config: Config, opts: PiRunOptions): Promise<string> {
-  const args = [
-    '-p',
-    '--mode', 'text',
-    '--no-extensions', '--no-skills', '--no-context-files', '--no-session', '--no-prompt-templates', '--no-themes',
-    '--system-prompt', opts.systemPrompt,
-  ]
-  // Unset means pi's own default model and provider. There is no second
-  // provider to fall back to either way.
-  if (config.pi.model) args.push('--model', config.pi.model)
-  if (opts.thinking) args.push('--thinking', opts.thinking)
-  if (opts.tools && opts.tools.trim()) args.push('--tools', opts.tools.trim())
-  else args.push('--no-tools')
-  if (opts.appendSystemPrompt) args.push('--append-system-prompt', opts.appendSystemPrompt)
-  return new Promise<string>((resolve, reject) => {
-    const inv = piInvocation(config.pi, args)
-    const child = spawn(inv.bin, inv.args, { stdio: ['pipe', 'pipe', 'pipe'], cwd: opts.cwd, windowsHide: true, env: { ...process.env, ...config.childEnv } })
-    let stdout = '', stderr = ''
-    const timer = opts.timeoutMs ? setTimeout(() => child.kill('SIGKILL'), opts.timeoutMs) : null
-    child.stdout.on('data', d => stdout += String(d))
-    child.stderr.on('data', d => stderr += String(d))
-    child.on('error', err => { if (timer) clearTimeout(timer); reject(err) })
-    child.on('close', code => {
-      if (timer) clearTimeout(timer)
-      if (code !== 0) return reject(new Error(`pi exited ${code}: ${(stderr || stdout).slice(0, 800)}`))
-      const text = stdout.trim()
-      if (!text) return reject(new Error('pi returned empty output'))
-      resolve(text)
-    })
-    // A pi that dies before draining stdin (bad flags, crash on startup) closes the
-    // pipe mid-write. Without this handler the EPIPE is an unhandled 'error' event
-    // that kills the whole run, hiding pi's actual error; 'close' below reports it.
-    child.stdin.on('error', (e: NodeJS.ErrnoException) => {
-      if (e.code !== 'EPIPE') warnSideEffect('write prompt to pi stdin', e)
-    })
-    child.stdin.end(opts.userPrompt)
+  return runAgentPrompt({
+    agentDir: config.pi.agentDir,
+    cwd: opts.cwd,
+    // Unset means pi's own default model. There is no second provider to fall
+    // back to either way.
+    model: config.pi.model,
+    ...(opts.thinking ? { thinking: opts.thinking } : {}),
+    tools: opts.tools,
+    systemPrompt: opts.systemPrompt,
+    ...(opts.appendSystemPrompt ? { appendSystemPrompt: opts.appendSystemPrompt } : {}),
+    userPrompt: opts.userPrompt,
+    timeoutMs: opts.timeoutMs,
   })
 }
 
@@ -1356,24 +1266,26 @@ function piSummaryToolsHint(contextDir: string): string {
   return `Before writing the notes you have two read-only tools: read and grep. Your current working directory (cwd) is \`${contextDir}\` (the configured notes/reference directory); use relative paths for grep/read.\n\nGoal: use existing context to align names, speakers, client/project names, product names, and domain terms in this note; do not maintain or assume a separate glossary.\n\nSuggested flow:\n- First extract the most likely client/project/product keywords from the title, filename, and transcript.\n- If a clear topic matches, prefer grep/read on related index pages, project docs, status records, or the 3-5 most recent related notes in the same directory; use them to identify Speaker B/C/F etc., common aliases, product names, and term spellings.\n- If no clear topic matches, grep the current directory with keywords and read only the few most relevant files.\n- Before output, do one names/terms lint pass: eliminate leftover Speaker A/B/C, obviously misheard names, product-name variants, and outdated names; when context is insufficient, keep the uncertainty — never guess.\n\nConstraints:\n- At most 10 tool calls total; if the transcript alone is sufficient, make none.\n- Read only within \`${contextDir}\`; skip directories that clearly involve personal privacy/credentials/finance (e.g. identity / credentials / finance).\n- Found information is only for consistency and background calibration; never write content absent from this transcript into the notes as new meeting facts.\n- Do not attempt to write files or call bash (those tools are not enabled).`
 }
 
-// Summary runs through pi. The agent's working dir IS the knowledge
-// base, so read/grep/find operate there directly. If a configured context dir is
-// missing, say so loudly and run without tools rather than searching the wrong
-// tree (tools, the cwd hint, and the spawn cwd move together).
+// Summary runs through pi. The agent's working dir IS the knowledge base, so
+// read/grep operate there directly. If a configured context dir is missing, say
+// so loudly and run without tools rather than searching the wrong tree (tools,
+// the cwd hint, and the working dir move together).
 async function chatComplete(opts: { systemPrompt: string; userPrompt: string; config: Config }): Promise<string> {
   const { pi } = opts.config
-  const ctx = pi.tools ? pi.contextDir : undefined
-  const ctxExists = ctx ? existsSync(ctx) : false
-  if (ctx && !ctxExists) console.error(`Warning: context dir ${ctx} does not exist; summary agent runs WITHOUT read/grep cross-reference.`)
-  const toolsActive = !!ctx && ctxExists
+  const wanted = pi.tools ? pi.tools.split(',').map(t => t.trim()).filter(Boolean) : []
+  const ctxExists = wanted.length ? existsSync(pi.contextDir) : false
+  if (wanted.length && !ctxExists) console.error(`Warning: context dir ${pi.contextDir} does not exist; summary agent runs WITHOUT read/grep cross-reference.`)
+  const toolsActive = wanted.length > 0 && ctxExists
   return chatCompleteViaPi(opts.config, {
     systemPrompt: opts.systemPrompt,
     userPrompt: opts.userPrompt,
     timeoutMs: 60 * 60 * 1000,
     thinking: pi.thinking,
-    tools: toolsActive ? pi.tools : undefined,
-    appendSystemPrompt: toolsActive ? piSummaryToolsHint(ctx!) : undefined,
-    cwd: toolsActive ? ctx : undefined,
+    tools: toolsActive ? wanted : [],
+    ...(toolsActive ? { appendSystemPrompt: piSummaryToolsHint(pi.contextDir) } : {}),
+    // Without tools the agent never touches the filesystem, but the session
+    // still needs a directory that exists.
+    cwd: toolsActive ? pi.contextDir : opts.config.workspace,
   })
 }
 
@@ -1382,9 +1294,8 @@ async function summarizeTranscript(config: Config, transcript: string, rec: Reco
   const systemPrompt = String(messages[0]!.content)
   const userPrompt = String(messages[1]!.content)
   const text = await chatComplete({ systemPrompt, userPrompt, config })
-  const jsonText = extractFirstJsonObject(text)
   try {
-    return JSON.parse(jsonText || '{}') as Json
+    return parseSummaryJson(text) as Json
   } catch (e: any) {
     throw new Error(`summary returned non-JSON output (${e?.message || e}). First 400 chars: ${text.slice(0, 400)}`)
   }
@@ -1943,23 +1854,12 @@ async function launchAgentEnv(config: Config): Promise<Record<string, string>> {
     PATH: `${os.homedir()}/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
   }
   // Provenance matters here, so this reads the raw sources rather than Config:
-  // only paths the GUI injected into our environment (and that config.json does
-  // not already carry) have to be written into the plist. VOICENOTE_PI_BIN and
-  // VOICENOTE_PI_CLI travel as a pair — `<bun> <cli.js>` with the script half
-  // missing would start bun with no program. A pi that vn resolves from its own
-  // node_modules needs no entry at all: the scheduled run resolves it the same
-  // way, and it stays correct when bun or pi is upgraded underneath.
+  // only a path that was handed to us through the environment (and that
+  // config.json does not already carry) has to be written into the plist. The
+  // notes model needs no entry at all — pi is a library call now.
   const fileEnv = configFileEnv()
-  for (const key of ['VOICENOTE_PI_BIN', 'VOICENOTE_PI_CLI', 'VOICENOTE_FFPROBE_BIN'] as const) {
-    if (process.env[key] && process.env[key] !== fileEnv[key]) env[key] = process.env[key]!
-  }
-  // A bare `pi` resolves only through PATH, and launchd's PATH is not the login
-  // shell's — pin it now, while the user's environment is still available.
-  if (!config.pi.cli && !config.pi.bin.startsWith('/') && !env.VOICENOTE_PI_BIN) {
-    const found = await runCommand(IS_WINDOWS ? 'where' : 'which', [config.pi.bin], 5000)
-    const path = found.code === 0 ? (found.stdout.trim().split(/\r?\n/)[0] || '') : ''
-    if (path && existsSync(path)) env.VOICENOTE_PI_BIN = path
-  }
+  const ffprobe = process.env.VOICENOTE_FFPROBE_BIN
+  if (ffprobe && ffprobe !== fileEnv.VOICENOTE_FFPROBE_BIN) env.VOICENOTE_FFPROBE_BIN = ffprobe
   return env
 }
 
@@ -2051,18 +1951,15 @@ function schedulerProgramArgs(): { command: string; argLine: string } {
 async function installScheduledTask(opts: { load?: boolean } = {}): Promise<void> {
   await mkdir(STATE_DIR, { recursive: true })
   await mkdir(LOG_DIR, { recursive: true })
-  // The task carries no env (Task Scheduler has no per-task env block), so the
-  // bundled CLI paths the GUI injected via process env (pi runtime + cli.js +
-  // ffprobe) must be persisted to config.json, which `vn run` reads on startup.
-  // (On mac these ride in the LaunchAgent plist instead.)
-  const persist: Record<string, string> = {}
-  for (const k of ['VOICENOTE_PI_BIN', 'VOICENOTE_PI_CLI', 'VOICENOTE_FFPROBE_BIN'] as const) {
-    if (process.env[k]) persist[k] = process.env[k]!
-  }
-  if (Object.keys(persist).length) {
+  // The task carries no env (Task Scheduler has no per-task env block), so an
+  // ffprobe path handed to us through the environment must be persisted to
+  // config.json, which `vn run` reads on startup. (On mac it rides in the
+  // LaunchAgent plist instead.)
+  const ffprobe = process.env.VOICENOTE_FFPROBE_BIN
+  if (ffprobe) {
     await mkdir(CONFIG_DIR, { recursive: true })
     const current = loadConfigJson()
-    Object.assign(current, persist)
+    current.VOICENOTE_FFPROBE_BIN = ffprobe
     await writeConfigJson(current)
   }
   const { command, argLine } = schedulerProgramArgs()
@@ -2514,20 +2411,33 @@ async function agentStatus() {
   return { installed: await schedulerInstalledAtAll(), scheduler: IS_WINDOWS ? taskXmlPath() : plistPath(), logAt, logTail }
 }
 
+/** pi's version as installed with this package, or null when it cannot load. */
+async function piPackageVersion(): Promise<string | null> {
+  try {
+    // The package exports map has no "./package.json" entry (and only an
+    // "import" condition, so require.resolve fails), hence resolving the entry
+    // point and reading the manifest above its dist directory.
+    const entry = fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent'))
+    const pkg = JSON.parse(readFileSync(join(dirname(dirname(entry)), 'package.json'), 'utf8'))
+    return typeof pkg?.version === 'string' ? pkg.version : null
+  } catch (e) {
+    warnSideEffect('resolve pi package version', e)
+    return null
+  }
+}
+
 // Structured health/config snapshot. Single source for both `vn doctor` (text)
 // and `vn doctor --json` (consumed by the GUI status dashboard).
 async function collectDoctor() {
   const config = getConfig()
-  // pi is a bun-based CLI; cold start (esp. behind a proxy) can take >5s, so
-  // give --version a generous timeout to avoid a false 'missing' on a healthy pi.
-  const piInv = piInvocation(config.pi, ['--version'])
-  const piCheck = await runCommand(piInv.bin, piInv.args, 15000)
+  // pi is a library now, so "available" is whether its SDK loads from this
+  // install — not whether some binary answers --version.
+  const piVersion = await piPackageVersion()
   const ff = await runCommand(config.ffprobeBin, ['-version'], 5000)
   const v = config.volcano
   const { pi } = config
   return {
     version: VERSION,
-    bun: process.versions.bun || null,
     node: process.version,
     recorder: { dir: config.recordDir, exists: existsSync(config.recordDir) },
     workspace: config.workspace,
@@ -2542,7 +2452,7 @@ async function collectDoctor() {
     // Provider/model/credentials are pi's own configuration; `pi.available` is
     // all we can honestly report about whether a summary can run.
     summary: { backend: 'pi', model: pi.model, thinking: pi.thinking, tools: pi.tools || null, contextDir: pi.tools ? pi.contextDir : null },
-    pi: { bin: pi.bin, cli: pi.cli, version: piCheck.code === 0 ? (piCheck.stdout.trim() || piCheck.stderr.trim() || null) : null, available: piCheck.code === 0, auth: existsSync(pi.authPath), authPath: pi.authPath },
+    pi: { version: piVersion, available: !!piVersion, auth: existsSync(pi.authPath), authPath: pi.authPath, agentDir: pi.agentDir },
     // Outbound proxy for HTTPS endpoints (updater/GitHub). The GUI reads this to
     // route its own update check, so it reports the resolved value.
     proxy: { url: config.childEnv.https_proxy ?? null },
@@ -2593,7 +2503,6 @@ async function doctor(opts: { json?: boolean } = {}): Promise<void> {
   const s = await collectDoctor()
   if (opts.json) { console.log(JSON.stringify(s, null, 2)); return }
   console.log(`version=${s.version}`)
-  console.log(`bun=${s.bun || 'not-bun'}`)
   console.log(`node=${s.node}`)
   console.log(`recordDir=${s.recorder.dir} exists=${s.recorder.exists}`)
   console.log(`workspace=${s.workspace}`)
@@ -2606,12 +2515,11 @@ async function doctor(opts: { json?: boolean } = {}): Promise<void> {
     console.log(`volcano=not configured`)
   }
   console.log(`summaryBackend=${s.summary.backend}`)
-  console.log(`pi.bin=${s.pi.bin} model=${s.summary.model || "<pi's own default>"}`)
-  if (s.pi.cli) console.log(`pi.cli=${s.pi.cli}`)
+  console.log(`summaryModel=${s.summary.model || "<pi's own default>"}`)
   console.log(`pi.thinking=${s.summary.thinking}`)
   console.log(`pi.summaryTools=${s.summary.tools || '<disabled>'}`)
   if (s.summary.contextDir) console.log(`pi.contextDir=${s.summary.contextDir} (summary agent cwd + read/grep cross-reference root)`)
-  console.log(`pi.version=${s.pi.version || 'missing'}`)
+  console.log(`pi.version=${s.pi.version || 'missing (the notes model cannot run)'}`)
   // Neutral fact, not an instruction: an API-key user has no auth.json and needs
   // nothing fixed.
   console.log(`pi.auth=${s.pi.authPath} ${s.pi.auth ? '(present)' : '(missing — fine if a provider API key is set)'}`)

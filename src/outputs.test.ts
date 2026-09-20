@@ -1,9 +1,9 @@
 import { expect, test } from 'bun:test'
-import { spawnSync } from 'node:child_process'
 import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { runAsync, startFakeModel } from './testing/fakeModel.ts'
 
 // A failed summary leaves outputs under the untitled (timestamp) names; the
 // retry that succeeds has to move ALL of them to the titled names and drop what
@@ -13,39 +13,38 @@ test('a successful retry moves every output to its titled name', async () => {
   const home = await mkdtemp(join(tmpdir(), 'voicenote-outputs-'))
   const configDir = join(home, process.platform === 'win32' ? 'voicenote' : '.config/voicenote')
   const workspace = join(home, 'ws')
-  const fakePi = join(home, 'pi.ts')
   const month = join(workspace, '2026-09')
   const audio = join(home, '20260908103805.mp3')
   const untitled = '2026-09-08-10-38'
   const titled = '2026-09-08-10-38-Fake-note'
+  const fake = await startFakeModel(join(home, '.pi', 'agent'))
   try {
     await mkdir(configDir, { recursive: true })
     await mkdir(join(workspace, '_transcripts', '2026-09'), { recursive: true })
     await writeFile(join(configDir, 'config.json'), JSON.stringify({
-      VOICENOTE_PI_BIN: process.execPath,
-      VOICENOTE_PI_CLI: fakePi,
       VOICENOTE_FFPROBE_BIN: process.execPath,
       VOICENOTE_WORKSPACE: workspace,
+      VOICENOTE_PI_MODEL: fake.modelRef,
+      // The failing attempt below is deliberate; without this the run spends
+      // its retry budget on a model that is never coming back.
+      VOICENOTE_PI_RETRIES: '1',
     }))
     await writeFile(audio, 'audio')
     // Already-transcribed: the run resumes at the summary, no ASR is spent.
     await writeFile(join(workspace, '_transcripts', '2026-09', `${untitled}-transcript.md`),
       '# Transcript\n\n---\n\n## Raw transcript (no lossy cleanup)\n\nhello world\n')
 
-    const run = () => spawnSync(process.execPath, [join(import.meta.dir, 'cli.ts'), 'run', audio], {
+    const run = () => runAsync(process.execPath, [join(import.meta.dir, 'cli.ts'), 'run', audio], {
       env: { HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home, PATH: dirname(process.execPath), SystemRoot: process.env.SystemRoot },
-      encoding: 'utf8',
-      timeout: 30_000,
+      timeoutMs: 60_000,
     })
 
-    await writeFile(fakePi, `if (process.argv.includes('--version')) console.log('fake-pi')
-      else { console.error('summary backend is down'); process.exit(1) }`)
-    expect(run().stdout).toContain('Stub notes')
+    fake.reply = null
+    expect((await run()).stdout).toContain('Stub notes')
     expect(existsSync(join(month, `${untitled}-note.md`))).toBe(true)
 
-    await writeFile(fakePi, `if (process.argv.includes('--version')) console.log('fake-pi')
-      else console.log(JSON.stringify({ title: 'Fake note', markdown: '# Fake note' }))`)
-    expect(run().stdout).toContain('✓ Completed')
+    fake.reply = JSON.stringify({ title: 'Fake note', markdown: '# Fake note' })
+    expect((await run()).stdout).toContain('✓ Completed')
 
     for (const [dir, name] of [
       [month, `${titled}.md`],
@@ -56,6 +55,7 @@ test('a successful retry moves every output to its titled name', async () => {
       expect(await readdir(dir)).toEqual([name])
     }
   } finally {
+    await fake.stop()
     await rm(home, { recursive: true, force: true })
   }
-}, 30_000)
+}, 120_000)

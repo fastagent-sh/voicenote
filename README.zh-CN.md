@@ -98,7 +98,6 @@ brew install ffmpeg
   "VOICENOTE_DEVICE_VOLUME": "VTR6500",
   "VOICENOTE_RECORD_DIR": "/Volumes/VTR6500/RECORD",
   "VOICENOTE_MAX_AGE_HOURS": "48",
-  "VOICENOTE_PI_BIN": "pi",
   "VOICENOTE_PI_MODEL": "openai-codex/gpt-5.6-sol",
   "PI_CODING_AGENT_DIR": "$HOME/.config/voicenote/pi-agent",
   "VOICENOTE_PI_THINKING": "high",
@@ -229,7 +228,7 @@ vn status
 
 LaunchAgent 每 60 秒调用 `vn run`。没插录音笔时仍会处理本地导入队列；插上 VTR6500 后也会自动处理录音笔里的新录音。
 
-> 后台 agent 会在下一次运行时读取 `config.json` 的改动。plist 只保存固定 PATH 和可执行文件路径：**改了 `VOICENOTE_PI_BIN` 后需重跑 `vn install-launch-agent --load`**（`vn upgrade` 会自动处理）。shell 中临时设置的值不会复制进 scheduler，请用 `vn config set` 持久化。未配置 pi / ASR 时，agent 会在支付 ASR 成本前跳过。
+> 后台 agent 会在下一次运行时读取 `config.json` 的改动。plist 只保存固定 PATH,以及安装时通过环境变量传入的 ffprobe 路径。shell 中临时设置的值不会复制进 scheduler,请用 `vn config set` 持久化。未配置纪要模型 / ASR 时,agent 会在支付 ASR 成本前跳过。
 
 日志:
 

@@ -99,7 +99,6 @@ Optional settings:
   "VOICENOTE_DEVICE_VOLUME": "VTR6500",
   "VOICENOTE_RECORD_DIR": "/Volumes/VTR6500/RECORD",
   "VOICENOTE_MAX_AGE_HOURS": "48",
-  "VOICENOTE_PI_BIN": "pi",
   "VOICENOTE_PI_MODEL": "openai-codex/gpt-5.6-sol",
   "PI_CODING_AGENT_DIR": "$HOME/.config/voicenote/pi-agent",
   "VOICENOTE_PI_THINKING": "high",
@@ -235,7 +234,7 @@ vn status
 
 The LaunchAgent invokes `vn run` every 60 seconds. Without a recorder it still processes queued local imports; once the VTR6500 is connected, new recorder items are processed automatically too.
 
-> `config.json` changes are picked up by the background agent on its next run. The plist stores only a fixed PATH and executable paths: **after changing `VOICENOTE_PI_BIN`, re-run `vn install-launch-agent --load`** (`vn upgrade` does this automatically). Shell-only settings are deliberately not copied into the scheduler; persist them with `vn config set`. If pi or ASR is not configured, the agent skips before spending ASR.
+> `config.json` changes are picked up by the background agent on its next run. The plist stores only a fixed PATH and, when one was handed to the installer through the environment, the ffprobe path. Shell-only settings are deliberately not copied into the scheduler; persist them with `vn config set`. If the notes model or ASR is not configured, the agent skips before spending ASR.
 
 Logs:
 

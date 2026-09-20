@@ -216,8 +216,7 @@ Next steps:
        vn list
 
 Config lives in ~/.config/voicenote/config.json. Env vars override it for the current CLI process only.
-Optional knobs (picked up automatically on the agent's next run; only
-VOICENOTE_PI_BIN changes need \`vn install-launch-agent\` re-run):
+Optional knobs (picked up automatically on the agent's next run):
   VOICENOTE_PI_THINKING=high          # summary reasoning effort
   VOICENOTE_PI_SUMMARY_TOOLS=""       # empty to disable read/grep cross-reference
   VOICENOTE_CONTEXT_DIR="\$HOME/vault" # read/grep root + agent cwd (default: workspace)
