@@ -73,10 +73,34 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$PASSWORD" "$RUNNER_TEMP/build.keychain"
           security list-keychains -d user -s "$RUNNER_TEMP/build.keychain" $(security list-keychains -d user | tr -d '"')
 
-      - name: Build, sign and publish
+      - name: Build and sign
         working-directory: desktop
         env:
           VN_SIGN_IDENTITY: VoiceNote Self Signed
           VN_SIGN_KEYCHAIN: ${{ runner.temp }}/build.keychain
+        run: npx electron-builder --mac --arm64 --publish never
+
+      # Published under our own `app-v*` tag rather than electron-builder's
+      # `v*`, which collides with the CLI's tags. The updater reads whatever
+      # the latest release is, so the tag name does not matter to it — but
+      # `latest-mac.yml` must be among the assets, and the release must not be
+      # a draft or nothing sees it.
+      - name: Publish the release
+        env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --mac --arm64 --publish always
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "VoiceNote ${GITHUB_REF_NAME#app-v}" \
+            --notes "macOS (Apple silicon). First launch: right-click the app → Open, because the signature is self-signed. Updates after that are automatic." \
+            desktop/release/*.dmg \
+            desktop/release/*.zip \
+            desktop/release/*.blockmap \
+            desktop/release/latest-mac.yml
+
+      - name: Verify the release can be updated to
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[].name' | grep -q '^latest-mac.yml$'
