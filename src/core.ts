@@ -15,10 +15,29 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
 
-// Read rather than imported: the published package compiles src/ to dist/,
-// and a JSON import would have to sit inside the compiler's rootDir. Both
-// layouts put package.json one level above this file.
-export const VERSION: string = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
+/**
+ * The version, read from the nearest package.json. A fixed relative path does
+ * not work: this file runs from `src/` in a checkout, from `dist/` in the
+ * published CLI, and from `out/main/` inside the desktop app's asar — where
+ * `../package.json` pointed at nothing and crashed the app on launch.
+ */
+function readVersion(): string {
+  let dir = dirname(fileURLToPath(import.meta.url))
+  for (;;) {
+    const candidate = join(dir, 'package.json')
+    if (existsSync(candidate)) {
+      try {
+        const version = JSON.parse(readFileSync(candidate, 'utf8')).version
+        if (typeof version === 'string') return version
+      } catch { /* keep walking: a malformed file is not our package */ }
+    }
+    const parent = dirname(dir)
+    if (parent === dir) return 'unknown'
+    dir = parent
+  }
+}
+
+export const VERSION: string = readVersion()
 const LAUNCH_AGENT_LABEL = 'sh.fastagent.voicenote'
 const LAUNCH_AGENT_LABEL_LEGACY = 'com.kid7st.voicenote' // pre-fastagent installs; cleaned up on install
 const TASK_NAME = 'VoiceNote'   // Windows Task Scheduler name (mac uses LAUNCH_AGENT_LABEL)

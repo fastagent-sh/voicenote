@@ -86,6 +86,30 @@ jobs:
           VN_SIGN_KEYCHAIN: ${{ runner.temp }}/build.keychain
         run: npx electron-builder --mac --arm64 --publish never
 
+      # Launch the packaged app. Type checks and unit tests all pass on code
+      # that dies on startup inside the asar — that is exactly how 1.0.0 and
+      # 1.0.1 shipped, crashing before the updater could even run, which also
+      # meant they could never update themselves out of it.
+      - name: Smoke test the packaged app
+        working-directory: desktop
+        run: |
+          APP=release/mac-arm64/VoiceNote.app/Contents/MacOS/VoiceNote
+          set +e
+          timeout 40 "$APP" > launch.log 2>&1
+          STATUS=$?
+          set -e
+          cat launch.log
+          # 124 = still running when the timeout fired, which is what a
+          # healthy app does. Anything else means it exited on its own.
+          if [ "$STATUS" != "124" ]; then
+            echo "::error::the packaged app exited on its own (status $STATUS)"
+            exit 1
+          fi
+          if grep -qi "A JavaScript error occurred\|Uncaught Exception" launch.log; then
+            echo "::error::the packaged app raised an exception on startup"
+            exit 1
+          fi
+
       # Published under our own `app-v*` tag rather than electron-builder's
       # `v*`, which collides with the CLI's tags. The updater reads whatever
       # the latest release is, so the tag name does not matter to it — but
