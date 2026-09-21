@@ -22,6 +22,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write   # OIDC for npm trusted publishing of the installer package
 
 jobs:
   build:
@@ -36,6 +37,11 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+
+      # Trusted publishing needs npm >= 11.5.1, newer than what Node ships.
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest
 
       # The main process bundles ../src, whose imports resolve from the repo
       # root — type checking and bundling both need those dependencies.
@@ -104,3 +110,13 @@ jobs:
         run: |
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets \
             --jq '.assets[].name' | grep -q '^latest-mac.yml$'
+
+      # The installer package carries the same version as the app it installs,
+      # so "which version of VoiceNote is this" has one answer. It is published
+      # from here, with the app, rather than on its own schedule.
+      - name: Publish the installer package
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: installer
+        run: |
+          npm version "${GITHUB_REF_NAME#app-v}" --no-git-tag-version --allow-same-version
+          npm publish

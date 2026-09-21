@@ -11,11 +11,20 @@
     "url": "git+https://github.com/fastagent-sh/voicenote.git",
     "directory": "installer"
   },
-  "keywords": ["voicenote", "installer", "macos", "transcription", "meeting-notes"],
+  "keywords": [
+    "voicenote",
+    "installer",
+    "macos",
+    "transcription",
+    "meeting-notes"
+  ],
   "bin": {
     "voicenote": "install.mjs"
   },
-  "files": ["install.mjs", "README.md"],
+  "files": [
+    "install.mjs",
+    "README.md"
+  ],
   "publishConfig": {
     "access": "public"
   },

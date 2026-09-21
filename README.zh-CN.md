@@ -287,7 +287,9 @@ npm run dist    # 打包(electron-builder)
 ```
 
 用户用 `npx @fastagent-sh/voicenote` 安装(这个包是个小安装器:拉取最新发布版并把
-`VoiceNote.app` 放进 `/Applications`),或者从发布页下载 dmg。
+`VoiceNote.app` 放进 `/Applications`),或者从发布页下载 dmg。安装器由客户端的发布流程
+一起发出,版本号和应用一致 —— `app-v1.0.0`、`VoiceNote 1.0.0`、
+`@fastagent-sh/voicenote@1.0.0` 是同一个数字。CLI 的版本独立。
 
 ### 发布与自动更新
 

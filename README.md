@@ -296,7 +296,11 @@ npm run dist    # package (electron-builder)
 
 Users install it with `npx @fastagent-sh/voicenote` (that package is a small
 installer: it fetches the latest release and puts `VoiceNote.app` in
-`/Applications`) or by downloading the dmg from the releases page.
+`/Applications`) or by downloading the dmg from the releases page. The
+installer is published from the app's own release workflow and carries the
+same version number, so the app, its GitHub release and its npm installer are
+always one number — `app-v1.0.0`, `VoiceNote 1.0.0`,
+`@fastagent-sh/voicenote@1.0.0`. The CLI versions separately.
 
 ### Releases and auto-update
 
