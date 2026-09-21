@@ -8,7 +8,12 @@ CLI 命令:`vn`
 
 当前主要适配 PHILIPS VTR6500 录音设备,但工作流通用:扫描某个挂载点下的录音 → 转写并按说话人分离 → GPT 在纪要生成阶段内部完成必要清理与过程还原 → 生成智能纪要。
 
-目前提供 CLI(`vn`)。桌面客户端正在用 Electron 重写,见下方[桌面客户端](#桌面客户端)。
+两种用法:
+
+```bash
+npx @fastagent-sh/voicenote   # 桌面客户端(macOS)
+npm i -g @fastagent-sh/vn     # 命令行工具
+```
 
 ## 安装(CLI)
 
@@ -280,6 +285,9 @@ npm install
 npm run dev     # 开发
 npm run dist    # 打包(electron-builder)
 ```
+
+用户用 `npx @fastagent-sh/voicenote` 安装(这个包是个小安装器:拉取最新发布版并把
+`VoiceNote.app` 放进 `/Applications`),或者从发布页下载 dmg。
 
 ### 发布与自动更新
 

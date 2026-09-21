@@ -8,8 +8,12 @@ CLI command: `vn`
 
 Currently tuned for the PHILIPS VTR6500 voice recorder, but the workflow is generic: scan recordings under a mount point → transcribe with speaker diarization → the selected summary model performs cleanup and process reconstruction → produce smart notes.
 
-Today this is a CLI (`vn`). The desktop app is being rewritten on Electron; see
-[Desktop app](#desktop-app) below.
+Two ways to use it:
+
+```bash
+npx @fastagent-sh/voicenote   # the desktop app (macOS)
+npm i -g @fastagent-sh/vn     # the command line tool
+```
 
 ## Install (CLI)
 
@@ -289,6 +293,10 @@ npm install
 npm run dev     # develop
 npm run dist    # package (electron-builder)
 ```
+
+Users install it with `npx @fastagent-sh/voicenote` (that package is a small
+installer: it fetches the latest release and puts `VoiceNote.app` in
+`/Applications`) or by downloading the dmg from the releases page.
 
 ### Releases and auto-update
 

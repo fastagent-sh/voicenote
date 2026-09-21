@@ -1,0 +1,25 @@
+{
+  "name": "@fastagent-sh/voicenote",
+  "version": "1.0.0",
+  "description": "Installs the VoiceNote desktop app (macOS). The command line tool is @fastagent-sh/vn.",
+  "type": "module",
+  "license": "MIT",
+  "author": "fastagent-sh",
+  "homepage": "https://github.com/fastagent-sh/voicenote",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fastagent-sh/voicenote.git",
+    "directory": "installer"
+  },
+  "keywords": ["voicenote", "installer", "macos", "transcription", "meeting-notes"],
+  "bin": {
+    "voicenote": "install.mjs"
+  },
+  "files": ["install.mjs", "README.md"],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
