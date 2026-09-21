@@ -1,6 +1,6 @@
 {
   "name": "@fastagent-sh/vn",
-  "version": "0.23.1",
+  "version": "0.23.2",
   "description": "CLI: voice recordings → diarized transcripts → integrated semantic Markdown notes. The desktop app ships separately.",
   "type": "module",
   "license": "MIT",
