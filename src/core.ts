@@ -1,7 +1,6 @@
 // The pipeline as a library: scanning, transcription, notes, job state,
 // scheduling and config, with no command parsing and no process exit. `vn`
 // (cli.ts) and the desktop app are both callers.
-import packageJson from '../package.json' with { type: 'json' }
 import { parseLockOwner } from './runLock.ts'
 import { loginWithBrowser, loginWithDeviceCode, PI_PROVIDER_ID } from './chatgptAuth.ts'
 import { runAgentPrompt } from './piAgent.ts'
@@ -16,7 +15,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
 
-export const VERSION = packageJson.version
+// Read rather than imported: the published package compiles src/ to dist/,
+// and a JSON import would have to sit inside the compiler's rootDir. Both
+// layouts put package.json one level above this file.
+export const VERSION: string = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 const LAUNCH_AGENT_LABEL = 'sh.fastagent.voicenote'
 const LAUNCH_AGENT_LABEL_LEGACY = 'com.kid7st.voicenote' // pre-fastagent installs; cleaned up on install
 const TASK_NAME = 'VoiceNote'   // Windows Task Scheduler name (mac uses LAUNCH_AGENT_LABEL)

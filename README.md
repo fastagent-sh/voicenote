@@ -258,7 +258,7 @@ bun run typecheck
 bun src/cli.ts doctor
 ```
 
-Distribution: `vn` ships as **source** with no build step. Node >= 24 strips types on the fly, so `bin` points straight at `src/cli.ts` and the npm tarball carries the `src/*.ts` files it needs. The install script and `vn upgrade` install from npm (`npm i -g @fastagent-sh/vn`); a `git+https` install also works (the git tree carries the source).
+Distribution: the package ships compiled JavaScript (`dist/`). Node strips types on the fly for a source checkout, but refuses to do so for files under `node_modules` — shipping `src/*.ts` produced a package that installed and then failed to start. The install script and `vn upgrade` install from npm (`npm i -g @fastagent-sh/vn`); a `git+https` install also works (the git tree carries the source).
 
 The desktop app lives in `desktop/` and is built with electron-vite + electron-builder (`cd desktop && npm run dist`). It bundles `src/core.ts` into its main process, so a change to the pipeline reaches both products; their version numbers are independent.
 

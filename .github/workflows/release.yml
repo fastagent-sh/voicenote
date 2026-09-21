@@ -40,11 +40,17 @@ jobs:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
-      # Smoke the published entry point (bin -> src/cli.ts) on the runtime users
-      # get: a bad shebang, a devDep mistaken for a runtime dep, or TypeScript
-      # that Node cannot strip passes typecheck+test yet fails to start.
+      # Node refuses to strip types under node_modules, so the package ships
+      # compiled JavaScript. `npm publish --ignore-scripts` below skips
+      # prepublishOnly, hence the explicit build.
+      - name: Build
+        run: bun run build
+
+      # Smoke the published entry point (bin -> dist/cli.js) on the runtime
+      # users get: a bad shebang, a devDep mistaken for a runtime dep, or a
+      # missing build step passes typecheck+test yet fails to start.
       - name: Smoke test CLI
-        run: node src/cli.ts --version
+        run: node dist/cli.js --version
 
       # Trusted publishing needs npm >= 11.5.1, newer than what Node ships.
       - name: Upgrade npm for trusted publishing

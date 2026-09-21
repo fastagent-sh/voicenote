@@ -251,7 +251,7 @@ bun run typecheck
 bun src/cli.ts doctor
 ```
 
-分发:`vn` 以**源码**分发,没有构建步骤。Node >= 24 会即时剥离类型,所以 `bin` 直接指向 `src/cli.ts`,npm tarball 带上它需要的 `src/*.ts`。安装脚本和 `vn upgrade` 从 npm 安装(`npm i -g @fastagent-sh/vn`);`git+https` 安装也能直接用(git 树自带源码)。
+分发:包里发的是编译后的 JavaScript(`dist/`)。Node 只对源码目录即时剥离类型,**不会**处理 `node_modules` 下的文件 —— 直接发 `src/*.ts` 的包装得上但起不来。安装脚本和 `vn upgrade` 从 npm 安装(`npm i -g @fastagent-sh/vn`);`git+https` 安装也能直接用(git 树自带源码)。
 
 桌面客户端在 `desktop/`,用 electron-vite + electron-builder 构建(`cd desktop && npm run dist`)。它把 `src/core.ts` 打进主进程,因此 pipeline 的改动对两个产品同时生效;版本号各自独立。
 

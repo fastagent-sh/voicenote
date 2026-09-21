@@ -1,6 +1,6 @@
 {
   "name": "@fastagent-sh/vn",
-  "version": "0.23.0",
+  "version": "0.23.1",
   "description": "CLI: voice recordings → diarized transcripts → integrated semantic Markdown notes. The desktop app ships separately.",
   "type": "module",
   "license": "MIT",
@@ -23,17 +23,10 @@
     "cli"
   ],
   "bin": {
-    "vn": "src/cli.ts"
+    "vn": "dist/cli.js"
   },
   "files": [
-    "src/cli.ts",
-    "src/core.ts",
-    "src/chatgptAuth.ts",
-    "src/piAgent.ts",
-    "src/progress.ts",
-    "src/summaryJson.ts",
-    "src/jobs.ts",
-    "src/runLock.ts",
+    "dist",
     "README.md",
     "LICENSE"
   ],
@@ -42,7 +35,8 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "doctor": "node src/cli.ts doctor",
-    "prepublishOnly": "bun run typecheck && bun test ./src"
+    "prepublishOnly": "bun run typecheck && bun test ./src && bun run build",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json"
   },
   "publishConfig": {
     "access": "public"
