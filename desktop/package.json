@@ -1,7 +1,7 @@
 {
   "name": "voicenote",
   "private": true,
-  "version": "1.0.2",
+  "version": "1.1.0",
   "type": "module",
   "main": "./out/main/index.js",
   "scripts": {
@@ -59,7 +59,13 @@
           ]
         }
       ],
-      "gatekeeperAssess": false
+      "gatekeeperAssess": false,
+      "extraResources": [
+        {
+          "from": "node_modules/@ffprobe-installer/darwin-arm64/ffprobe",
+          "to": "ffprobe"
+        }
+      ]
     },
     "electronLanguages": [
       "en",
@@ -75,6 +81,31 @@
         "repo": "voicenote"
       }
     ],
-    "afterPack": "build/afterPack.cjs"
+    "afterPack": "build/afterPack.cjs",
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "extraResources": [
+        {
+          "from": "node_modules/@ffprobe-installer/win32-x64/ffprobe.exe",
+          "to": "ffprobe.exe"
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false
+    }
+  },
+  "optionalDependencies": {
+    "@ffprobe-installer/darwin-arm64": "^5.0.1",
+    "@ffprobe-installer/win32-x64": "^5.1.0"
   }
 }

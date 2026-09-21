@@ -6,6 +6,8 @@ import { vn, type LoginEvent, type Status } from './api.ts'
  * and somewhere to put the notes. Each step reports its own state, so a
  * half-finished setup is obvious instead of failing later on a real recording.
  */
+const isWindows = navigator.userAgent.includes('Windows')
+
 export function Onboarding({ status, onDone, onRefresh }: {
   status: Status | null
   onDone: () => void
@@ -13,6 +15,7 @@ export function Onboarding({ status, onDone, onRefresh }: {
 }) {
   const [asrKey, setAsrKey] = useState('')
   const [workspace, setWorkspace] = useState('')
+  const [recordDir, setRecordDir] = useState('')
   const [saving, setSaving] = useState(false)
   const [loginState, setLoginState] = useState<'idle' | 'waiting' | 'failed'>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -21,6 +24,7 @@ export function Onboarding({ status, onDone, onRefresh }: {
     void vn.configGet().then(config => {
       setAsrKey(config.env.VOLCANO_ASR_KEY ?? '')
       setWorkspace(config.env.VOICENOTE_WORKSPACE ?? '')
+      setRecordDir(config.env.VOICENOTE_RECORD_DIR ?? '')
     })
     return vn.on('login:event', (event: LoginEvent) => {
       if (event.event === 'success') { setLoginState('idle'); onRefresh() }
@@ -35,7 +39,13 @@ export function Onboarding({ status, onDone, onRefresh }: {
     setSaving(true)
     setError(null)
     try {
-      await vn.configSet({ env: { VOLCANO_ASR_KEY: asrKey.trim(), VOICENOTE_WORKSPACE: workspace.trim() } })
+      await vn.configSet({
+        env: {
+          VOLCANO_ASR_KEY: asrKey.trim(),
+          VOICENOTE_WORKSPACE: workspace.trim(),
+          VOICENOTE_RECORD_DIR: recordDir.trim(),
+        },
+      })
       onRefresh()
       onDone()
     } catch (e) {
@@ -69,7 +79,20 @@ export function Onboarding({ status, onDone, onRefresh }: {
         </section>
 
         <section>
-          <h3><span className={workspace ? 'step-dot done' : 'step-dot'}>3</span> 选择笔记目录</h3>
+          <h3><span className={recordDir ? 'step-dot done' : 'step-dot'}>3</span> 录音笔位置</h3>
+          <p className="hint">
+            {isWindows
+              ? '插上录音笔后它是一个盘符,比如 E:\\RECORD。填录音文件所在的文件夹。'
+              : '默认是 /Volumes/VTR6500/RECORD。用别的录音笔就改成它挂载后的录音文件夹。'}
+          </p>
+          <div className="sheet-row">
+            <span className="path">{recordDir || (isWindows ? '（未设置,Windows 必填）' : '（默认：/Volumes/VTR6500/RECORD）')}</span>
+            <button onClick={async () => { const dir = await vn.pickDirectory(); if (dir) setRecordDir(dir) }}>选择文件夹…</button>
+          </div>
+        </section>
+
+        <section>
+          <h3><span className={workspace ? 'step-dot done' : 'step-dot'}>4</span> 选择笔记目录</h3>
           <p className="hint">纪要、转写稿和音频都会存在这里。留空则用默认目录。</p>
           <div className="sheet-row">
             <span className="path">{workspace || '（默认：~/Documents/meetings）'}</span>

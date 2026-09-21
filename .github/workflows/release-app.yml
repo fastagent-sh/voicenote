@@ -1,18 +1,20 @@
 name: Release desktop app
 
-# Builds, signs and publishes the VoiceNote app to GitHub Releases, which is
-# also the feed electron-updater reads. Trigger with an `app-v*` tag, kept
-# separate from the CLI's `v*` tags:
+# Builds VoiceNote for macOS and Windows, then publishes both to one GitHub
+# release — which is also the feed electron-updater reads — and pushes the
+# installer package to npm with the same version. Trigger with an `app-v*`
+# tag, kept separate from the CLI's `v*` tags:
 #   cd desktop && npm version patch && cd ..
-#   git commit -am "Release app 0.1.1" && git tag app-v0.1.1 && git push --follow-tags
+#   git commit -am "Release app 1.1.0" && git tag app-v1.1.0
+#   git push origin main app-v1.1.0        # the tag is lightweight: push it by name
 #
-# Signing: the app is signed with a self-signed certificate stored as the
-# secrets MAC_SIGNING_P12 (base64 of the .p12) and MAC_SIGNING_PASSWORD. It is
-# not a Developer ID, so Gatekeeper still asks the user to approve the first
-# launch — but macOS refuses to INSTALL an update to an app it cannot verify,
-# so some stable signature is required for auto-update to work at all.
-# The same certificate must sign every release; a new one strands everyone on
-# the old version.
+# Signing: macOS is signed with a self-signed certificate held in the secrets
+# MAC_SIGNING_P12 / MAC_SIGNING_PASSWORD. It is not a Developer ID, so
+# Gatekeeper still asks the user to approve a manual download — but macOS
+# refuses to INSTALL an update to an app it cannot verify, so some stable
+# signature is required for auto-update to work at all. The same certificate
+# must sign every release; a new one strands everyone on the old version.
+# Windows is unsigned: updates work regardless, SmartScreen warns on first run.
 
 on:
   push:
@@ -26,22 +28,26 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: mac
+          - os: windows-latest
+            platform: win
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Verify tag matches the app version
         if: startsWith(github.ref, 'refs/tags/')
-        run: test "${GITHUB_REF_NAME#app-v}" = "$(jq -r .version desktop/package.json)"
+        shell: bash
+        run: test "${GITHUB_REF_NAME#app-v}" = "$(node -p "require('./desktop/package.json').version")"
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
-          registry-url: 'https://registry.npmjs.org'
-
-      # Trusted publishing needs npm >= 11.5.1, newer than what Node ships.
-      - name: Upgrade npm for trusted publishing
-        run: npm install -g npm@latest
 
       # The main process bundles ../src, whose imports resolve from the repo
       # root — type checking and bundling both need those dependencies.
@@ -54,19 +60,20 @@ jobs:
 
       - name: Install app dependencies
         working-directory: desktop
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       - name: Type check and bundle
         working-directory: desktop
         run: npm run build
 
-      # Fail here rather than shipping a build that can never auto-update.
       - name: Check signing secrets are present
+        if: matrix.platform == 'mac'
         env:
           P12: ${{ secrets.MAC_SIGNING_P12 }}
         run: test -n "$P12" || { echo "MAC_SIGNING_P12 is not set; see desktop/scripts/create-signing-cert.sh" >&2; exit 1; }
 
       - name: Import the signing certificate
+        if: matrix.platform == 'mac'
         env:
           P12: ${{ secrets.MAC_SIGNING_P12 }}
           PASSWORD: ${{ secrets.MAC_SIGNING_PASSWORD }}
@@ -79,26 +86,30 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$PASSWORD" "$RUNNER_TEMP/build.keychain"
           security list-keychains -d user -s "$RUNNER_TEMP/build.keychain" $(security list-keychains -d user | tr -d '"')
 
-      - name: Build and sign
+      - name: Build and sign (macOS)
+        if: matrix.platform == 'mac'
         working-directory: desktop
         env:
           VN_SIGN_IDENTITY: VoiceNote Self Signed
           VN_SIGN_KEYCHAIN: ${{ runner.temp }}/build.keychain
         run: npx electron-builder --mac --arm64 --publish never
 
-      # Launch the packaged app. Type checks and unit tests all pass on code
-      # that dies on startup inside the asar — that is exactly how 1.0.0 and
-      # 1.0.1 shipped, crashing before the updater could even run, which also
-      # meant they could never update themselves out of it.
-      - name: Smoke test the packaged app
+      - name: Build (Windows)
+        if: matrix.platform == 'win'
+        working-directory: desktop
+        run: npx electron-builder --win --x64 --publish never
+
+      # Type checks and unit tests pass on code that dies on startup inside
+      # the asar — that is how 1.0.0 and 1.0.1 shipped, crashing before the
+      # updater could run, so they could never update themselves out of it.
+      - name: Smoke test the packaged app (macOS)
+        if: matrix.platform == 'mac'
         working-directory: desktop
         run: |
           APP=release/mac-arm64/VoiceNote.app/Contents/MacOS/VoiceNote
           "$APP" > launch.log 2>&1 &
           PID=$!
           sleep 40
-          # Still running after 40s is what a healthy app looks like; a crash
-          # on startup exits within a second.
           if ! kill -0 "$PID" 2>/dev/null; then
             cat launch.log
             echo "::error::the packaged app exited on its own"
@@ -111,42 +122,84 @@ jobs:
             exit 1
           fi
 
-      # Published under our own `app-v*` tag rather than electron-builder's
-      # `v*`, which collides with the CLI's tags. The updater reads whatever
-      # the latest release is, so the tag name does not matter to it — but
-      # `latest-mac.yml` must be among the assets, and the release must not be
-      # a draft or nothing sees it.
+      - name: Smoke test the packaged app (Windows)
+        if: matrix.platform == 'win'
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          $app = "release/win-unpacked/VoiceNote.exe"
+          $proc = Start-Process -FilePath $app -PassThru -RedirectStandardOutput launch.log -RedirectStandardError launch.err.log
+          Start-Sleep -Seconds 40
+          if ($proc.HasExited) {
+            Get-Content launch.log, launch.err.log -ErrorAction SilentlyContinue
+            Write-Error "the packaged app exited on its own (code $($proc.ExitCode))"
+            exit 1
+          }
+          Stop-Process -Id $proc.Id -Force
+          Get-Content launch.log, launch.err.log -ErrorAction SilentlyContinue
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: |
+            desktop/release/*.dmg
+            desktop/release/*.zip
+            desktop/release/*.exe
+            desktop/release/*.blockmap
+            desktop/release/latest*.yml
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # One release carries both platforms; the updater reads latest-mac.yml
+      # or latest.yml from whichever is newest, and a draft would be invisible
+      # to it. Published under our own `app-v*` tag rather than
+      # electron-builder's `v*`, which collides with the CLI's tags.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          ls -la artifacts
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --title "VoiceNote ${GITHUB_REF_NAME#app-v}" \
-            --notes "macOS (Apple silicon). First launch: right-click the app → Open, because the signature is self-signed. Updates after that are automatic." \
-            desktop/release/*.dmg \
-            desktop/release/*.zip \
-            desktop/release/*.blockmap \
-            desktop/release/latest-mac.yml
+            --notes "macOS (Apple silicon) and Windows (x64). macOS: a manual download needs right-click → Open the first time (self-signed). Windows: SmartScreen warns on first run (unsigned). Updates after that are automatic. Install with \`npx @fastagent-sh/voicenote\`." \
+            artifacts/*
 
-      - name: Verify the release can be updated to
+      - name: Verify both platforms can update
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets \
-            --jq '.assets[].name' | grep -q '^latest-mac.yml$'
+          names=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          echo "$names"
+          echo "$names" | grep -q '^latest-mac.yml$' || { echo "::error::latest-mac.yml is missing; macOS cannot update" >&2; exit 1; }
+          echo "$names" | grep -q '^latest.yml$'     || { echo "::error::latest.yml is missing; Windows cannot update" >&2; exit 1; }
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest
 
       # The installer package carries the same version as the app it installs,
-      # so "which version of VoiceNote is this" has one answer. It is published
-      # from here, with the app, rather than on its own schedule.
+      # so "which version of VoiceNote is this" has one answer.
       - name: Publish the installer package
-        if: startsWith(github.ref, 'refs/tags/')
         working-directory: installer
         run: |
           VERSION="${GITHUB_REF_NAME#app-v}"
           npm version "$VERSION" --no-git-tag-version --allow-same-version
-          # Re-running a release (or a version published by hand) must not
-          # fail the build: the app release is already out at this point.
           if npm view "@fastagent-sh/voicenote@$VERSION" version >/dev/null 2>&1; then
             echo "@fastagent-sh/voicenote@$VERSION is already published"
           else

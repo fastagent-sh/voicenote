@@ -3,6 +3,7 @@
 // background daemon, no stdout parsing.
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, shell, Tray } from 'electron'
 import electronUpdater from 'electron-updater'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
@@ -19,6 +20,21 @@ const dirname = fileURLToPath(new URL('.', import.meta.url))
 // light and dark menu bar.
 const resourcesDir = app.isPackaged ? join(process.resourcesPath, 'resources') : join(dirname, '../../resources')
 const trayIcon = (busy: boolean) => nativeImage.createFromPath(join(resourcesDir, busy ? 'trayBusyTemplate.png' : 'trayTemplate.png'))
+
+/**
+ * ffprobe reads a recording's length, which decides what gets skipped and
+ * what the UI can say about a file. It ships inside the app: relying on one
+ * being on PATH worked on this developer's machine and silently degraded
+ * everywhere else. The pipeline reads the path from the environment, the same
+ * override a CLI user has.
+ */
+function useBundledFfprobe(): void {
+  const name = process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe'
+  const bundled = app.isPackaged
+    ? join(process.resourcesPath, name)
+    : join(dirname, '../../node_modules/@ffprobe-installer', process.platform === 'win32' ? 'win32-x64' : 'darwin-arm64', name)
+  if (existsSync(bundled)) process.env.VOICENOTE_FFPROBE_BIN = bundled
+}
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -285,6 +301,8 @@ function registerIpc(): void {
 }
 
 app.whenReady().then(() => {
+  // Before anything reads the config: the pipeline caches it on first use.
+  useBundledFfprobe()
   registerIpc()
   onPipelineEvent((event) => {
     broadcast('pipeline:event', event)

@@ -23,18 +23,21 @@ function fail(message) {
   process.exit(1)
 }
 
-if (process.platform !== 'darwin') {
-  fail(`目前只有 macOS 版本（检测到 ${process.platform}）。`)
+if (process.platform !== 'darwin' && process.platform !== 'win32') {
+  fail(`目前只有 macOS 和 Windows 版本（检测到 ${process.platform}）。`)
 }
 
 const release = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
   headers: { accept: 'application/vnd.github+json' },
 }).then(r => r.ok ? r.json() : fail(`读取发布信息失败（HTTP ${r.status}）。`))
 
-// The zip is what ships the .app; the dmg is for people who download by hand.
+// macOS: the zip carries the .app (the dmg is for manual downloads).
+// Windows: the NSIS installer, which we hand to the system to run.
 const wanted = process.arch === 'arm64' ? 'arm64' : 'x64'
-const asset = (release.assets ?? []).find(a => a.name.endsWith('-mac.zip') && a.name.includes(wanted))
-if (!asset) fail(`这个版本没有 ${wanted} 的 macOS 包（${release.tag_name}）。`)
+const asset = (release.assets ?? []).find(a => process.platform === 'win32'
+  ? a.name.endsWith('.exe')
+  : a.name.endsWith('-mac.zip') && a.name.includes(wanted))
+if (!asset) fail(`这个版本没有 ${process.platform} 的安装包（${release.tag_name}）。`)
 
 console.log(`下载 VoiceNote ${release.tag_name.replace(/^app-v/, '')}（${(asset.size / 1e6).toFixed(0)} MB）…`)
 const work = await mkdtemp(join(tmpdir(), 'voicenote-install-'))
@@ -43,6 +46,15 @@ try {
   const download = await fetch(asset.browser_download_url)
   if (!download.ok) fail(`下载失败（HTTP ${download.status}）。`)
   await writeFile(zipPath, Buffer.from(await download.arrayBuffer()))
+
+  if (process.platform === 'win32') {
+    console.log('运行安装程序…')
+    // The NSIS installer is one-click: it installs and starts the app.
+    execFileSync(zipPath, [], { stdio: 'inherit' })
+    console.log('\n✓ 安装完成,VoiceNote 会自动启动。')
+    console.log('  首次运行如果 Windows 提示"未知发布者",点「更多信息 → 仍要运行」。\n')
+    process.exit(0)
+  }
 
   const target = join(APPS, 'VoiceNote.app')
   if (existsSync(target)) {

@@ -4,6 +4,7 @@ import { vn, type Status } from './api.ts'
 /** Everything the app needs to work, on one sheet. */
 const FIELDS: { key: string; label: string; hint?: string; secret?: boolean }[] = [
   { key: 'VOICENOTE_WORKSPACE', label: '笔记存放目录', hint: '留空使用默认目录' },
+  { key: 'VOICENOTE_RECORD_DIR', label: '录音笔文件夹', hint: 'Windows 填盘符路径,如 E:\\RECORD' },
   { key: 'VOLCANO_ASR_KEY', label: '火山 ASR 密钥', hint: '转写用,控制台的 API Key', secret: true },
   { key: 'VOICENOTE_MAX_AGE_HOURS', label: '处理多久以内的录音(小时)', hint: '0 表示不限' },
   { key: 'VOICENOTE_PI_MODEL', label: '纪要模型', hint: '例如 openai-codex/gpt-5.6-sol,留空用 pi 的默认模型' },
