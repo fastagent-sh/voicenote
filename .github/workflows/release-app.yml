@@ -94,17 +94,18 @@ jobs:
         working-directory: desktop
         run: |
           APP=release/mac-arm64/VoiceNote.app/Contents/MacOS/VoiceNote
-          set +e
-          timeout 40 "$APP" > launch.log 2>&1
-          STATUS=$?
-          set -e
-          cat launch.log
-          # 124 = still running when the timeout fired, which is what a
-          # healthy app does. Anything else means it exited on its own.
-          if [ "$STATUS" != "124" ]; then
-            echo "::error::the packaged app exited on its own (status $STATUS)"
+          "$APP" > launch.log 2>&1 &
+          PID=$!
+          sleep 40
+          # Still running after 40s is what a healthy app looks like; a crash
+          # on startup exits within a second.
+          if ! kill -0 "$PID" 2>/dev/null; then
+            cat launch.log
+            echo "::error::the packaged app exited on its own"
             exit 1
           fi
+          kill "$PID" || true
+          cat launch.log
           if grep -qi "A JavaScript error occurred\|Uncaught Exception" launch.log; then
             echo "::error::the packaged app raised an exception on startup"
             exit 1
