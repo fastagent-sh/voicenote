@@ -3,7 +3,7 @@
 // (cli.ts) and the desktop app are both callers.
 import { parseLockOwner } from './runLock.ts'
 import { loginWithBrowser, loginWithDeviceCode, PI_PROVIDER_ID } from './chatgptAuth.ts'
-import { runAgentPrompt } from './piAgent.ts'
+import { installProxyFromEnv, runAgentPrompt } from './piAgent.ts'
 import { parseSummaryJson } from './summaryJson.ts'
 import { emitPipelineEvent } from './progress.ts'
 import { applyOutcome, buildJobsView, classify, emptyState, ignoreRecording, localIso, MAX_ATTEMPTS, migrateLegacyState, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, requeueForRegenerate, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs.ts'
@@ -1178,9 +1178,13 @@ async function persistPiOAuth(authPath: string, providerId: string, creds: Recor
 }
 
 export async function loginChatGPT(opts: { json?: boolean; deviceCode?: boolean; emit?: (o: Record<string, unknown>) => void }): Promise<void> {
-  // OpenAI's OAuth endpoint is geo-blocked in some regions; getConfig() resolves
-  // the proxy into this process's env before any request goes out.
+  // OpenAI's OAuth endpoint is geo-blocked in some regions. getConfig() resolves
+  // the proxy into this process's env, but Node's fetch ignores those variables,
+  // so the dispatcher has to be installed too — without it the token exchange
+  // went direct and failed (403) while the browser, using the system proxy, had
+  // already shown the callback page.
   const authPath = getConfig().pi.authPath
+  await installProxyFromEnv()
   const json = !!opts.json
   const emit = opts.emit ?? ((o: Record<string, unknown>) => { if (json) console.log(JSON.stringify(o)) })
   try {

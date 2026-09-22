@@ -311,7 +311,10 @@ export function App() {
     return <Recorder running={running} onClose={() => { setScreen('main'); void refresh() }} onToast={setToast} />
   }
   if (!skipSetup && status !== null && (!status.volcano.configured || !status.pi.auth)) {
-    return <Onboarding status={status} onDone={() => setSkipSetup(true)} onRefresh={() => void refresh()} />
+    // `refresh` itself, not a fresh arrow per render: Onboarding keys an effect
+    // on this prop, and a new identity every render reloaded the saved config
+    // over whatever the user was typing.
+    return <Onboarding status={status} onDone={() => setSkipSetup(true)} onRefresh={refresh} />
   }
 
   const onDrop = async (event: React.DragEvent) => {

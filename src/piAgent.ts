@@ -37,7 +37,7 @@ export type AgentRunOptions = {
  * honours no_proxy — which is how the Volcano ASR host stays direct.
  */
 let proxyInstalled = false
-async function installProxyFromEnv(): Promise<void> {
+export async function installProxyFromEnv(): Promise<void> {
   if (proxyInstalled) return
   proxyInstalled = true
   const proxy = process.env.https_proxy || process.env.HTTPS_PROXY || process.env.http_proxy || process.env.HTTP_PROXY

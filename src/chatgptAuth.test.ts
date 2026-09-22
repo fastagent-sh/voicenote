@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { accountIdFromAccessToken, buildAuthorizeUrl } from './chatgptAuth.ts'
+import { createServer } from 'node:http'
+import { accountIdFromAccessToken, buildAuthorizeUrl, loginWithBrowser } from './chatgptAuth.ts'
 
 // Every param below is validated server-side against OpenAI's allowlist for
 // the shared Codex client_id. Drift breaks sign-in with a generic
@@ -28,6 +29,28 @@ describe('buildAuthorizeUrl', () => {
       state: 'test-state',
       originator: 'codex_cli_rs',
     })
+  })
+})
+
+// OpenAI only allows 1455 and 1457 as callback ports, so a second sign-in
+// attempt (or another Codex client) holding one must not sink the flow. Both
+// halves are local: no code reaches the token endpoint.
+describe('browser flow callback', () => {
+  it('falls back to 1457 and rejects a state that does not match', async () => {
+    const squatter = createServer()
+    await new Promise<void>(resolve => squatter.listen(1455, '127.0.0.1', resolve))
+    try {
+      let redirectUri = ''
+      const login = loginWithBrowser(url => {
+        redirectUri = new URL(url).searchParams.get('redirect_uri') ?? ''
+        // Stand in for the browser landing on the callback, with a stale state.
+        void fetch(`${redirectUri}?code=abc&state=stale`).catch(() => {})
+      })
+      await expect(login).rejects.toThrow(/state mismatch/)
+      expect(redirectUri).toBe('http://localhost:1457/auth/callback')
+    } finally {
+      squatter.close()
+    }
   })
 })
 

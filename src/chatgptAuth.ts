@@ -131,7 +131,10 @@ export async function loginWithBrowser(onAuthUrl: (url: string) => void): Promis
     const ok = !error && !!code && url.searchParams.get('state') === state
     res.statusCode = ok ? 200 : 400
     res.setHeader('Content-Type', 'text/plain; charset=utf-8')
-    res.end(ok ? 'Signed in. You can close this window.' : 'Sign-in failed. Return to VoiceNote for details.')
+    // Not "signed in": the token exchange still has to run, and it is the step
+    // that fails on a proxy-only network. Say so, or the app showing "not
+    // signed in" after this page looks like the app is wrong.
+    res.end(ok ? 'Authorization received. Return to VoiceNote — it finishes sign-in there.' : 'Sign-in failed. Return to VoiceNote for details.')
     if (error) rejectCode(new Error(`Authorization denied: ${error}`))
     else if (!code) rejectCode(new Error('Callback carried no authorization code'))
     else if (!ok) rejectCode(new Error('Callback state mismatch (stale sign-in tab?)'))
