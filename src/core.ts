@@ -168,16 +168,60 @@ const ENV_KEYS = [
 // overseas proxy is slower and less reliable.
 const VOLCANO_NO_PROXY_HOSTS = ['openspeech.bytedance.com']
 
+/**
+ * The proxy the OS is configured with, for users who set one globally and
+ * never touch VoiceNote's settings. A GUI launched from Finder or the Start
+ * menu inherits no shell environment, so this is the only proxy it can find
+ * on its own. PAC (automatic configuration) is deliberately not supported:
+ * deciding whether one host is proxied means running the PAC script.
+ */
 function systemProxyUrl(): string | null {
-  if (process.platform !== 'darwin') return null
   try {
-    const out = spawnSync('scutil', ['--proxy'], { encoding: 'utf8', timeout: 3000 })
-    if (out.status !== 0 || !out.stdout) return null
-    const get = (k: string) => out.stdout.match(new RegExp(`\\b${k}\\s*:\\s*(\\S+)`))?.[1]
-    if (get('HTTPSEnable') === '1' && get('HTTPSProxy') && get('HTTPSPort')) return `http://${get('HTTPSProxy')}:${get('HTTPSPort')}`
-    if (get('HTTPEnable') === '1' && get('HTTPProxy') && get('HTTPPort')) return `http://${get('HTTPProxy')}:${get('HTTPPort')}`
+    if (process.platform === 'darwin') {
+      const out = spawnSync('scutil', ['--proxy'], { encoding: 'utf8', timeout: 3000 })
+      return out.status === 0 && out.stdout ? macProxyFromScutil(out.stdout) : null
+    }
+    if (IS_WINDOWS) {
+      const key = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'
+      const out = spawnSync('reg', ['query', key], { encoding: 'utf8', timeout: 3000 })
+      return out.status === 0 && out.stdout ? windowsProxyFromRegistry(out.stdout) : null
+    }
     return null
   } catch { return null }
+}
+
+/** `scutil --proxy` output → proxy URL. Exported for the tests only. */
+export function macProxyFromScutil(stdout: string): string | null {
+  const get = (k: string) => stdout.match(new RegExp(`\\b${k}\\s*:\\s*(\\S+)`))?.[1]
+  if (get('HTTPSEnable') === '1' && get('HTTPSProxy') && get('HTTPSPort')) return `http://${get('HTTPSProxy')}:${get('HTTPSPort')}`
+  if (get('HTTPEnable') === '1' && get('HTTPProxy') && get('HTTPPort')) return `http://${get('HTTPProxy')}:${get('HTTPPort')}`
+  // Last, because SOCKS support in Node's fetch is still marked experimental.
+  if (get('SOCKSEnable') === '1' && get('SOCKSProxy') && get('SOCKSPort')) return `socks5://${get('SOCKSProxy')}:${get('SOCKSPort')}`
+  return null
+}
+
+/**
+ * `reg query "…\Internet Settings"` output → proxy URL. Exported for the tests
+ * only. ProxyServer is either a bare "host:port" or per-protocol
+ * "http=host:port;https=host:port;socks=host:port"; an HTTP or HTTPS entry
+ * names a proxy that is itself reached over plain HTTP.
+ */
+export function windowsProxyFromRegistry(stdout: string): string | null {
+  const enabled = stdout.match(/ProxyEnable\s+REG_DWORD\s+0x([0-9a-f]+)/i)?.[1]
+  if (!enabled || parseInt(enabled, 16) === 0) return null
+  const server = stdout.match(/ProxyServer\s+REG_SZ\s+(\S+)/i)?.[1]
+  if (!server) return null
+  const withScheme = (host: string, scheme: string) => host.includes('://') ? host : `${scheme}://${host}`
+  if (!server.includes('=')) return withScheme(server, 'http')
+  const byProtocol = new Map<string, string>()
+  for (const part of server.split(';')) {
+    const eq = part.indexOf('=')
+    if (eq > 0) byProtocol.set(part.slice(0, eq).trim().toLowerCase(), part.slice(eq + 1).trim())
+  }
+  const overHttp = byProtocol.get('https') || byProtocol.get('http')
+  if (overHttp) return withScheme(overHttp, 'http')
+  const socks = byProtocol.get('socks')
+  return socks ? withScheme(socks, 'socks5') : null
 }
 
 type Settings = Record<string, string>
