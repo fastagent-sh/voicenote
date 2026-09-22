@@ -1,7 +1,7 @@
 // The desktop app's main process. It owns the pipeline directly: the same
 // functions the `vn` CLI calls, running in this process. No sidecar binary, no
 // background daemon, no stdout parsing.
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, shell, Tray } from 'electron'
+import { app, autoUpdater as squirrel, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, shell, Tray } from 'electron'
 import electronUpdater from 'electron-updater'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
@@ -114,7 +114,7 @@ function updateTray(): void {
   tray.setToolTip(running ? 'VoiceNote — 处理中' : 'VoiceNote — 空闲')
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: running ? '处理中…' : '空闲', enabled: false },
-    ...(updateReady ? [{ label: `重启以更新到 ${updateReady}`, click: () => autoUpdater.quitAndInstall() } as const] : []),
+    ...(updateReady ? [{ label: manualUpdateOnly ? `下载 ${updateReady}（需手动安装）` : `重启以更新到 ${updateReady}`, click: () => { void installUpdate() } } as const] : []),
     { type: 'separator' },
     { label: '显示主窗口', click: () => showWindow() },
     { label: '立即处理', enabled: !running, click: () => { requestRun({ reason: 'manual' }) } },
@@ -191,7 +191,36 @@ async function searchNotes(query: string): Promise<{ path: string; title: string
  * restart — better than silently never updating.
  */
 const { autoUpdater } = electronUpdater
+const RELEASES_URL = 'https://github.com/fastagent-sh/voicenote/releases/latest'
 let updateReady: string | null = null
+/**
+ * macOS installs through Squirrel.Mac, which refuses — silently, with no error
+ * event — any update whose code signature does not satisfy the running app's
+ * designated requirement (a build signed with a different self-signed cert, for
+ * instance). electron-updater reports "downloaded" before that check runs, so
+ * `quitAndInstall()` would hang forever and the button would look dead. Squirrel
+ * staging the update is the only reliable signal that a restart will install it.
+ */
+let squirrelStaged = false
+/** Set once Squirrel has had long enough and still has not taken the update. */
+let manualUpdateOnly = false
+/**
+ * How long Squirrel gets to pull the update from the local proxy and check its
+ * signature before the window stops promising a restart. Measured at a couple of
+ * seconds for a 250 MB build; a minute is slack, not a deadline.
+ * ponytail: fixed timeout, because a refused signature produces no event at all.
+ */
+const SQUIRREL_STAGE_TIMEOUT_MS = 60_000
+
+/** Restarts into the update, or opens the download page when Squirrel refused it. */
+async function installUpdate(): Promise<{ installable: boolean }> {
+  if (process.platform === 'darwin' && !squirrelStaged) {
+    await shell.openExternal(RELEASES_URL)
+    return { installable: false }
+  }
+  autoUpdater.quitAndInstall()
+  return { installable: true }
+}
 
 function setupUpdates(): void {
   if (!app.isPackaged) return
@@ -207,19 +236,27 @@ function setupUpdates(): void {
     updateReady = info.version
     broadcast('update:ready', info.version)
     updateTray()
+    if (process.platform !== 'darwin') return
+    setTimeout(() => {
+      if (squirrelStaged || manualUpdateOnly) return
+      manualUpdateOnly = true
+      broadcast('update:manual', info.version)
+      updateTray()
+    }, SQUIRREL_STAGE_TIMEOUT_MS)
   })
   autoUpdater.on('error', (error) => broadcast('update:error', String(error?.message ?? error)))
+  squirrel.on('update-downloaded', () => { squirrelStaged = true })
   const check = () => { void autoUpdater.checkForUpdates().catch(() => { /* reported through the error event */ }) }
   check()
   setInterval(check, 6 * 60 * 60 * 1000)
 }
 
 function registerIpc(): void {
-  ipcMain.handle('update:state', () => ({ version: app.getVersion(), ready: updateReady }))
+  ipcMain.handle('update:state', () => ({ version: app.getVersion(), ready: updateReady, manual: manualUpdateOnly }))
   // Quitting for an update while a recording is being processed would lose
   // the run, so the choice stays with the user and the window says as much.
-  ipcMain.handle('update:install', () => { autoUpdater.quitAndInstall() })
-  ipcMain.handle('update:open-releases', () => shell.openExternal('https://github.com/fastagent-sh/voicenote/releases/latest'))
+  ipcMain.handle('update:install', () => installUpdate())
+  ipcMain.handle('update:open-releases', () => shell.openExternal(RELEASES_URL))
   ipcMain.handle('search', (_e, query: string) => searchNotes(query))
   ipcMain.handle('status', () => collectDoctor())
   ipcMain.handle('jobs', (_e, limit: number) => jobsListData(limit ?? 50))

@@ -182,7 +182,7 @@ export function App() {
   const [dropping, setDropping] = useState(false)
   const [pendingRetries, setPendingRetries] = useState<string[]>([])
   const [queuedRuns, setQueuedRuns] = useState(0)
-  const [update, setUpdate] = useState<{ available: string | null; ready: string | null }>({ available: null, ready: null })
+  const [update, setUpdate] = useState<{ available: string | null; ready: string | null; manual: boolean }>({ available: null, ready: null, manual: false })
 
   /** Every user action goes through here: a failure must be visible. */
   const act = useCallback(async (work: () => Promise<unknown>, done?: string) => {
@@ -205,7 +205,7 @@ export function App() {
   useEffect(() => {
     void refresh()
     void vn.pendingRetries().then(setPendingRetries)
-    void vn.updateState().then(state => setUpdate(u => ({ ...u, ready: state.ready })))
+    void vn.updateState().then(state => setUpdate(u => ({ ...u, ready: state.ready, manual: state.manual })))
     const poll = setInterval(() => { void vn.jobs(200).then(setJobs) }, 2000)
     const off = [
       vn.on('pipeline:event', (event: PipelineEvent) => {
@@ -233,6 +233,8 @@ export function App() {
       vn.on('run:queued', (count: number) => setQueuedRuns(count)),
       vn.on('update:available', (version: string) => setUpdate(u => ({ ...u, available: version }))),
       vn.on('update:ready', (version: string) => setUpdate(u => ({ ...u, ready: version }))),
+      vn.on('update:error', (message: string) => setToast(`更新失败：${message}`)),
+      vn.on('update:manual', (version: string) => setUpdate(u => ({ ...u, ready: version, manual: true }))),
       vn.on('recorder:connected', () => setToast('检测到录音笔,开始处理')),
       vn.on('login:event', (event: LoginEvent) => {
         if (event.event === 'success') { setToast('已登录 ChatGPT'); void refresh() }
@@ -428,8 +430,13 @@ export function App() {
         <div className="titlebar-drag" />
         {update.ready && (
           <div className="callout callout-top callout-update">
-            <span>新版本 {update.ready} 已下载{running ? ',当前处理完成后再重启' : ''}。</span>
-            <button className="primary" onClick={() => void vn.installUpdate()} disabled={running}>重启以更新</button>
+            <span>{update.manual
+              ? `新版本 ${update.ready} 无法自动安装,需要手动下载一次。`
+              : `新版本 ${update.ready} 已下载${running ? ',当前处理完成后再重启' : ''}。`}</span>
+            <button className="primary" disabled={running && !update.manual} onClick={() => void act(async () => {
+              const { installable } = await vn.installUpdate()
+              if (!installable) setToast('已打开下载页,手动装一次即可')
+            })}>{update.manual ? '打开下载页' : '重启以更新'}</button>
           </div>
         )}
         {!update.ready && update.available && (

@@ -77,8 +77,8 @@ type Api = {
   recorderFiles: () => Promise<RecorderFiles>
   runFile: (path: string) => Promise<{ queued: boolean }>
   pendingRetries: () => Promise<string[]>
-  updateState: () => Promise<{ version: string; ready: string | null }>
-  installUpdate: () => Promise<void>
+  updateState: () => Promise<{ version: string; ready: string | null; manual: boolean }>
+  installUpdate: () => Promise<{ installable: boolean }>
   openReleases: () => Promise<void>
   importRecording: (path: string) => Promise<void>
   pathForFile: (file: File) => string
@@ -91,7 +91,7 @@ type Api = {
   search: (query: string) => Promise<{ path: string; title: string; snippet: string }[]>
   openNoteAsHtml: (title: string, html: string) => Promise<string>
   setAutoProcess: (enabled: boolean) => Promise<boolean>
-  on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'run:queued' | 'recorder:connected' | 'retry:pending' | 'update:available' | 'update:ready' | 'update:error', listener: (payload: any) => void) => () => void
+  on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'run:queued' | 'recorder:connected' | 'retry:pending' | 'update:available' | 'update:ready' | 'update:manual' | 'update:error', listener: (payload: any) => void) => () => void
 }
 
 export const vn = (window as unknown as { vn: Api }).vn

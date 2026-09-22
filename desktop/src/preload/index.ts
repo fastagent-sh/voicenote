@@ -13,8 +13,8 @@ const api = {
   recorderFiles: () => ipcRenderer.invoke('recorder-files'),
   runFile: (path: string) => ipcRenderer.invoke('run-file', path) as Promise<{ queued: boolean }>,
   pendingRetries: () => ipcRenderer.invoke('pending-retries') as Promise<string[]>,
-  updateState: () => ipcRenderer.invoke('update:state') as Promise<{ version: string; ready: string | null }>,
-  installUpdate: () => ipcRenderer.invoke('update:install'),
+  updateState: () => ipcRenderer.invoke('update:state') as Promise<{ version: string; ready: string | null; manual: boolean }>,
+  installUpdate: () => ipcRenderer.invoke('update:install') as Promise<{ installable: boolean }>,
   openReleases: () => ipcRenderer.invoke('update:open-releases'),
   importRecording: (path: string) => ipcRenderer.invoke('import', path),
   // Electron removed File.path; this is the supported way to get the real path
@@ -29,7 +29,7 @@ const api = {
   search: (query: string) => ipcRenderer.invoke('search', query),
   openNoteAsHtml: (title: string, html: string) => ipcRenderer.invoke('note:open-html', { title, html }),
   setAutoProcess: (enabled: boolean) => ipcRenderer.invoke('auto-process', enabled),
-  on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'run:queued' | 'recorder:connected' | 'retry:pending' | 'update:available' | 'update:ready' | 'update:error', listener: (payload: any) => void) => {
+  on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'run:queued' | 'recorder:connected' | 'retry:pending' | 'update:available' | 'update:ready' | 'update:manual' | 'update:error', listener: (payload: any) => void) => {
     const wrapped = (_event: unknown, payload: unknown) => listener(payload)
     ipcRenderer.on(channel, wrapped)
     return () => { ipcRenderer.removeListener(channel, wrapped) }
