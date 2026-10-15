@@ -3,9 +3,9 @@
 import { cac } from 'cac'
 import {
   VERSION,
-  configGet, configSet, doctor, ensureScheduler, forgetRecording, importRecording,
-  installScheduler, jobsList, lastMeeting, listMeetings, loginChatGPT, openTarget,
-  ignoreJob, printSchedulerStatus, regenerateNotes, retryRecording, runPipeline, showErrors, showLog,
+  configGet, configSet, doctor, ensureScheduler, forgetRecording, getConfig, importRecording,
+  installScheduler, jobsList, lastMeeting, listMeetings, loginChatGPT, loginPiProvider, openTarget,
+  ignoreJob, printSchedulerStatus, regenerateNotes, retryRecording, runPipeline, setPiApiKey, showErrors, showLog,
   uninstallScheduler, upgradeSelf,
 } from './core.ts'
 
@@ -59,10 +59,46 @@ cli.command('upgrade', 'Upgrade to the latest published version via npm i -g').a
 cli.command('doctor', 'Check environment')
   .option('--json', 'Output structured status as JSON (for the GUI)')
   .action((opts: { json?: boolean }) => doctor(opts))
-cli.command('login', 'Sign in to ChatGPT (Codex OAuth) for the pi summary backend')
+cli.command('login [provider]', 'Sign in to a provider (default: openai-codex / ChatGPT OAuth, or deepseek, openai, anthropic, etc.)')
   .option('--json', 'Emit machine-readable JSON events (for the GUI client)')
-  .option('--device-code', 'Use the device-code flow instead of the browser callback (needs the ChatGPT security-settings opt-in)')
-  .action((opts: { json?: boolean; deviceCode?: boolean }) => loginChatGPT(opts))
+  .option('--device-code', 'Use the device-code flow instead of the browser callback (OpenAI Codex only)')
+  .action(async (provider: string | undefined, opts: { json?: boolean; deviceCode?: boolean }) => {
+    const providerId = provider || 'openai-codex'
+    if (providerId === 'openai-codex') {
+      return loginChatGPT(opts)
+    }
+    const { ModelRuntime } = await import('@earendil-works/pi-coding-agent')
+    const config = getConfig()
+    const runtime = await ModelRuntime.create({ authPath: config.pi.authPath })
+    const p = runtime.getProvider(providerId)
+    if (!p) {
+      console.error(`Unknown provider '${providerId}'.`)
+      process.exitCode = 1
+      return
+    }
+    if (p.auth.oauth?.login) {
+      return loginPiProvider(providerId, opts)
+    }
+    if (p.auth.apiKey) {
+      const readline = await import('node:readline/promises')
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+      try {
+        const key = await rl.question(`Enter API key for ${p.name}: `)
+        if (!key.trim()) {
+          console.error('API key cannot be empty.')
+          process.exitCode = 1
+          return
+        }
+        await setPiApiKey(providerId, key.trim())
+        console.log(`\n✓ API key for ${p.name} saved to ${config.pi.authPath}.`)
+      } finally {
+        rl.close()
+      }
+      return
+    }
+    console.error(`Provider '${providerId}' does not support interactive login.`)
+    process.exitCode = 1
+  })
 cli.command('config <action>', 'Read/write file-based config. action: get (print JSON) | set (write from stdin JSON)')
   .action((action: string) => {
     if (action === 'set') return configSet()

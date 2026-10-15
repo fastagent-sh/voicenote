@@ -52,6 +52,18 @@ export type RecorderFile = {
 
 export type RecorderFiles = { dir: string; present: boolean; items: RecorderFile[] }
 
+export type ModelInfo = { id: string; name: string }
+export type ProviderInfo = {
+  id: string
+  name: string
+  configured: boolean
+  source?: string
+  hasApiKey: boolean
+  hasOAuth: boolean
+  models: ModelInfo[]
+  apiKey?: string
+}
+
 export type PipelineEvent =
   | { type: 'job_start'; id: string; name: string; durationSeconds: number | null }
   | { type: 'job_step'; step: string }
@@ -62,6 +74,7 @@ export type PipelineEvent =
 export type LoginEvent =
   | { event: 'auth_url'; url: string }
   | { event: 'device_code'; userCode: string; verificationUri: string }
+  | { event: 'progress'; message: string }
   | { event: 'success'; provider: string }
   | { event: 'error'; message: string }
 
@@ -84,7 +97,11 @@ type Api = {
   pathForFile: (file: File) => string
   pickAudio: () => Promise<string | null>
   pickDirectory: () => Promise<string | null>
-  login: () => Promise<void>
+  login: (providerId?: string) => Promise<void>
+  piProviders: () => Promise<ProviderInfo[]>
+  piSetApiKey: (providerId: string, apiKey: string) => Promise<{ ok: true }>
+  piRemoveAuth: (providerId: string) => Promise<{ ok: true }>
+  piLoginOAuth: (providerId: string) => Promise<{ ok: true }>
   openPath: (path: string) => Promise<string>
   revealPath: (path: string) => Promise<void>
   readNote: (path: string) => Promise<string>

@@ -67,6 +67,6 @@ export function topProblem(status: Status | null): Problem | null {
   if (!status) return null
   if (!status.volcano.configured) return { message: '还没填转写密钥,录音无法处理。', action: SETTINGS }
   if (!status.pi.available) return { message: '纪要引擎没能加载,请重新安装应用。' }
-  if (!status.pi.auth) return { message: '还没登录 ChatGPT,纪要无法生成。', action: { label: '登录', kind: 'login' } }
+  if (!status.pi.auth) return { message: '纪要模型尚未配置认证 (API Key 或登录)，纪要无法生成。', action: SETTINGS }
   return null
 }

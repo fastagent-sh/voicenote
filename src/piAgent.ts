@@ -60,9 +60,39 @@ export async function runAgentPrompt(opts: AgentRunOptions): Promise<string> {
   if (opts.model) {
     const slash = opts.model.indexOf('/')
     if (slash <= 0) throw new Error(`Invalid model '${opts.model}'; expected "provider/id", e.g. openai-codex/gpt-5.6-sol`)
-    const providerId = opts.model.slice(0, slash)
+    let providerId = opts.model.slice(0, slash)
     const modelId = opts.model.slice(slash + 1)
     model = modelRuntime.getModel(providerId, modelId)
+    if (!model && providerId === 'openai-codex') {
+      providerId = 'openai'
+      model = modelRuntime.getModel(providerId, modelId)
+    }
+    if (!model && modelRuntime.getProvider(providerId)) {
+      const existing = modelRuntime.getModels(providerId).map(m => ({
+        id: m.id,
+        name: m.name,
+        reasoning: (m as any).reasoning ?? false,
+        input: m.input,
+        cost: m.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: m.contextWindow,
+        maxTokens: m.maxTokens,
+      }))
+      modelRuntime.registerProvider(providerId, {
+        models: [
+          ...existing,
+          {
+            id: modelId,
+            name: modelId,
+            reasoning: modelId.includes('reasoner') || modelId.includes('r1') || modelId.includes('o1') || modelId.includes('o3'),
+            input: ['text'],
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            contextWindow: 128000,
+            maxTokens: 16384,
+          },
+        ],
+      })
+      model = modelRuntime.getModel(providerId, modelId)
+    }
     if (!model) throw new Error(`Unknown model '${opts.model}'. Check the provider/id spelling, or clear VOICENOTE_PI_MODEL to use pi's default.`)
   }
 

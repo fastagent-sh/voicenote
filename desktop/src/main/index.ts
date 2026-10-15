@@ -9,9 +9,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import {
-  collectDoctor, configGetData, configSetData, getConfig, ignoreJob, importRecording,
-  jobsListData, listRecorderFiles, loginChatGPT, NOTE_HTML_CSS, regenerateNotes,
-  resetConfigCache, retryRecording, runPipeline, VERSION,
+  collectDoctor, configGetData, configSetData, getConfig, getPiAuthProviders, ignoreJob, importRecording,
+  jobsListData, listRecorderFiles, loginChatGPT, loginPiProvider, NOTE_HTML_CSS, regenerateNotes,
+  removePiAuth, resetConfigCache, retryRecording, runPipeline, setPiApiKey, VERSION,
 } from '../../../src/core.ts'
 import { onPipelineEvent } from '../../../src/progress.ts'
 
@@ -308,8 +308,24 @@ function registerIpc(): void {
     await importRecording(path, { json: true })
     return requestRun({ reason: 'manual' })
   })
-  ipcMain.handle('login', async () => {
-    await loginChatGPT({ json: true, emit: (event) => broadcast('login:event', event) })
+  ipcMain.handle('login', async (_e, providerId?: string) => {
+    await loginPiProvider(providerId || 'openai-codex', { json: true, emit: (event) => broadcast('login:event', event) })
+  })
+  ipcMain.handle('pi:providers', () => getPiAuthProviders())
+  ipcMain.handle('pi:set-api-key', async (_e, providerId: string, apiKey: string) => {
+    await setPiApiKey(providerId, apiKey)
+    resetConfigCache()
+    return { ok: true }
+  })
+  ipcMain.handle('pi:remove-auth', async (_e, providerId: string) => {
+    await removePiAuth(providerId)
+    resetConfigCache()
+    return { ok: true }
+  })
+  ipcMain.handle('pi:login-oauth', async (_e, providerId: string) => {
+    await loginPiProvider(providerId, { json: true, emit: (event) => broadcast('login:event', event) })
+    resetConfigCache()
+    return { ok: true }
   })
   ipcMain.handle('pending-retries', () => [...pendingRetries])
   ipcMain.handle('open-path', (_e, path: string) => shell.openPath(path))

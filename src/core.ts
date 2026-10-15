@@ -318,7 +318,11 @@ export function getConfig(): Config {
   // directory, so every summary failed with "No API key found" while doctor
   // kept reporting the credentials as present.
   const childEnv: Record<string, string> = { ...proxy, PI_CODING_AGENT_DIR: piAgentDir }
-  for (const key of ['OPENAI_API_KEY', 'DEEPSEEK_API_KEY']) if (s[key]) childEnv[key] = s[key]!
+  for (const [key, value] of Object.entries(s)) {
+    if ((key.endsWith('_API_KEY') || key.endsWith('_KEY')) && typeof value === 'string' && value) {
+      childEnv[key] = value
+    }
+  }
   configCache = Object.freeze({
     recordDir: expandHome(s.VOICENOTE_RECORD_DIR || `/Volumes/${deviceVolume}/RECORD`),
     workspace,
@@ -1257,6 +1261,7 @@ export async function loginChatGPT(opts: { json?: boolean; deviceCode?: boolean;
         void openPath(url)
       })
     await persistPiOAuth(authPath, PI_PROVIDER_ID, creds as unknown as Record<string, unknown>)
+    await persistPiOAuth(authPath, 'openai', creds as unknown as Record<string, unknown>)
     if (json) emit({ event: 'success', provider: PI_PROVIDER_ID })
     else console.log(`\n✓ Signed in. Credentials saved to ${authPath}. Verify with: vn doctor`)
   } catch (e: any) {
@@ -1268,6 +1273,201 @@ export async function loginChatGPT(opts: { json?: boolean; deviceCode?: boolean;
     else console.error(`\nLogin failed: ${message}`)
     process.exitCode = 1
   }
+}
+
+export type PiModelItem = { id: string; name: string }
+
+export type PiProviderItem = {
+  id: string
+  name: string
+  configured: boolean
+  source?: string
+  hasApiKey: boolean
+  hasOAuth: boolean
+  models: PiModelItem[]
+  apiKey?: string
+}
+
+export async function getPiAuthProviders(): Promise<PiProviderItem[]> {
+  const { ModelRuntime } = await import('@earendil-works/pi-coding-agent')
+  const config = getConfig()
+  const runtime = await ModelRuntime.create({
+    authPath: config.pi.authPath,
+    modelsPath: join(config.pi.agentDir, 'models.json'),
+  })
+  let authData: Record<string, any> = {}
+  if (existsSync(config.pi.authPath)) {
+    try { authData = JSON.parse(readFileSync(config.pi.authPath, 'utf8')) } catch {}
+  }
+  const providers = runtime.getProviders()
+  const list: PiProviderItem[] = []
+  for (const p of providers) {
+    if (p.id === 'openai-codex' || p.id === 'google') continue
+    const hasApiKey = !!p.auth?.apiKey
+    const hasOAuth = !!p.auth?.oauth
+    if (!hasApiKey && !hasOAuth) continue
+
+    let status = runtime.getProviderAuthStatus(p.id)
+    if (p.id === 'openai' && !status.configured) {
+      if (runtime.getProviderAuthStatus('openai-codex').configured) {
+        status = { configured: true, source: 'stored' }
+      }
+    }
+    let models = runtime.getModels(p.id).map(m => ({ id: m.id, name: m.name }))
+    models.reverse()
+    if (p.id === 'deepseek') {
+      const extra = [
+        { id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash (推荐)' },
+        { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+        { id: 'deepseek-chat', name: 'DeepSeek-V3 (deepseek-chat)' },
+        { id: 'deepseek-reasoner', name: 'DeepSeek-R1 (deepseek-reasoner 深度思考)' },
+      ]
+      models = [...extra, ...models.filter(x => !extra.some(e => e.id === x.id))]
+    }
+    if (p.id === 'anthropic') {
+      const extra = [
+        { id: 'claude-3-5-sonnet', name: 'Claude 3.5 Sonnet' },
+        { id: 'claude-3-7-sonnet', name: 'Claude 3.7 Sonnet (推荐)' },
+      ]
+      for (const m of extra) {
+        models = [m, ...models.filter(x => x.id !== m.id)]
+      }
+    }
+    let apiKey: string | undefined
+    if (authData[p.id]?.type === 'api_key' && typeof authData[p.id].key === 'string') {
+      apiKey = authData[p.id].key
+    } else if (p.id === 'deepseek' && (process.env.DEEPSEEK_API_KEY || config.childEnv.DEEPSEEK_API_KEY)) {
+      apiKey = process.env.DEEPSEEK_API_KEY || config.childEnv.DEEPSEEK_API_KEY
+    } else if (p.id === 'openai' && (process.env.OPENAI_API_KEY || config.childEnv.OPENAI_API_KEY)) {
+      apiKey = process.env.OPENAI_API_KEY || config.childEnv.OPENAI_API_KEY
+    } else if (p.id === 'anthropic' && (process.env.ANTHROPIC_API_KEY || config.childEnv.ANTHROPIC_API_KEY)) {
+      apiKey = process.env.ANTHROPIC_API_KEY || config.childEnv.ANTHROPIC_API_KEY
+    }
+    list.push({
+      id: p.id,
+      name: p.name,
+      configured: status.configured,
+      source: status.source ?? (status.configured ? 'stored' : undefined),
+      hasApiKey,
+      hasOAuth,
+      models,
+      apiKey,
+    })
+  }
+
+  const priority = [
+    'deepseek',
+    'openai',
+    'anthropic',
+    'kimi-coding',
+    'minimax',
+    'qwen-token-plan-cn',
+    'openrouter',
+    'github-copilot',
+    'xai',
+  ]
+  list.sort((a, b) => {
+    const ai = priority.indexOf(a.id)
+    const bi = priority.indexOf(b.id)
+    if (ai !== -1 && bi !== -1) return ai - bi
+    if (ai !== -1) return -1
+    if (bi !== -1) return 1
+    return a.name.localeCompare(b.name)
+  })
+  return list
+}
+
+export async function setPiApiKey(providerId: string, apiKey: string): Promise<void> {
+  const trimmed = apiKey.trim()
+  if (!trimmed) throw new Error('API key cannot be empty')
+  const authPath = getConfig().pi.authPath
+  await mkdir(dirname(authPath), { recursive: true })
+  let existing: Record<string, unknown> = {}
+  if (existsSync(authPath)) {
+    try { existing = JSON.parse(await readFile(authPath, 'utf8')) } catch (e) { warnSideEffect(`parse ${authPath}`, e) }
+  }
+  existing[providerId] = { type: 'api_key', key: trimmed }
+  const tmp = `${authPath}.tmp-${process.pid}`
+  await writeFile(tmp, JSON.stringify(existing, null, 2) + '\n', { mode: 0o600 })
+  await rename(tmp, authPath)
+}
+
+export async function removePiAuth(providerId: string): Promise<void> {
+  const authPath = getConfig().pi.authPath
+  if (!existsSync(authPath)) return
+  let existing: Record<string, unknown> = {}
+  try { existing = JSON.parse(await readFile(authPath, 'utf8')) } catch { return }
+  delete existing[providerId]
+  if (providerId === 'openai') delete existing['openai-codex']
+  if (providerId === 'openai-codex') delete existing['openai']
+  const tmp = `${authPath}.tmp-${process.pid}`
+  await writeFile(tmp, JSON.stringify(existing, null, 2) + '\n', { mode: 0o600 })
+  await rename(tmp, authPath)
+}
+
+export async function loginPiProvider(providerId: string, opts: { json?: boolean; deviceCode?: boolean; emit?: (o: Record<string, unknown>) => void } = {}): Promise<void> {
+  if (providerId === 'openai-codex' || providerId === 'openai') {
+    return loginChatGPT(opts)
+  }
+  const authPath = getConfig().pi.authPath
+  await installProxyFromEnv()
+  const json = !!opts.json
+  const emit = opts.emit ?? ((o: Record<string, unknown>) => { if (json) console.log(JSON.stringify(o)) })
+  const { ModelRuntime } = await import('@earendil-works/pi-coding-agent')
+  const runtime = await ModelRuntime.create({ authPath })
+  const provider = runtime.getProvider(providerId)
+  if (!provider) throw new Error(`Unknown provider '${providerId}'`)
+  if (!provider.auth.oauth?.login) throw new Error(`Provider '${providerId}' does not support OAuth login`)
+
+  try {
+    await runtime.login(providerId, 'oauth', {
+      signal: new AbortController().signal,
+      prompt: async (prompt) => {
+        if (prompt.type === 'select') {
+          const browserOpt = prompt.options.find(o => o.id === 'browser') ?? prompt.options[0]
+          return browserOpt?.id ?? ''
+        }
+        return ''
+      },
+      notify: (event) => {
+        if (event.type === 'auth_url') {
+          emit({ event: 'auth_url', url: event.url })
+          void openPath(event.url)
+        } else if (event.type === 'device_code') {
+          emit({ event: 'device_code', userCode: event.userCode, verificationUri: event.verificationUri })
+        } else if (event.type === 'progress') {
+          emit({ event: 'progress', message: event.message })
+        }
+      },
+    })
+    if (json) emit({ event: 'success', provider: providerId })
+    else console.log(`\n✓ Signed in to ${provider.name}. Credentials saved to ${authPath}.`)
+  } catch (e: any) {
+    const message = String(e?.message || e)
+    if (json) emit({ event: 'error', message })
+    else console.error(`\nLogin failed: ${message}`)
+    throw e
+  }
+}
+
+export function isPiAuthConfigured(authPath: string, model: string | null): boolean {
+  let requiredProvider = (model ? model.split('/')[0] : 'openai') || 'openai'
+  if (requiredProvider === 'openai-codex') requiredProvider = 'openai'
+  if (requiredProvider === 'deepseek' && (process.env.DEEPSEEK_API_KEY || getConfig().childEnv.DEEPSEEK_API_KEY)) return true
+  if (requiredProvider === 'openai' && (process.env.OPENAI_API_KEY || getConfig().childEnv.OPENAI_API_KEY)) return true
+  if (requiredProvider === 'anthropic' && (process.env.ANTHROPIC_API_KEY || getConfig().childEnv.ANTHROPIC_API_KEY)) return true
+
+  if (existsSync(authPath)) {
+    try {
+      const data = JSON.parse(readFileSync(authPath, 'utf8'))
+      if (data && typeof data === 'object') {
+        if (data[requiredProvider]) return true
+        if (requiredProvider === 'openai' && data['openai-codex']) return true
+        if (!model && Object.keys(data).length > 0) return true
+      }
+    } catch {}
+  }
+  return false
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -1836,6 +2036,38 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   const { recordings, complete: scanComplete } = single
     ? { recordings: [await toRecording(config, single)], complete: false }
     : await scanRecordings(config)
+
+  // Queued jobs that already have local transcripts or local audio on disk do not
+  // require the physical recorder to be plugged in to retry or regenerate notes.
+  if (!single) {
+    const seenIds = new Set(recordings.map(r => r.sourceId))
+    for (const [id, job] of Object.entries(store.jobs)) {
+      if (job.state !== 'queued' || seenIds.has(id)) continue
+      const transcript = job.paths?.transcript
+      const audio = job.paths?.audio
+      const hasTranscript = typeof transcript === 'string' && existsSync(transcript)
+      const hasAudio = typeof audio === 'string' && existsSync(audio)
+      const hasSource = typeof job.source_path === 'string' && existsSync(job.source_path)
+      if (!hasTranscript && !hasAudio && !hasSource) continue
+
+      const sourcePath = hasAudio ? audio! : (hasSource ? job.source_path : transcript!)
+      const sizeBytes = job.size_bytes || (hasAudio ? statSync(audio!).size : 0)
+      const contentHash = job.content_hash || ''
+      const durationSeconds = job.duration_seconds
+      recordings.push({
+        sourcePath,
+        sizeBytes,
+        modifiedAt: job.updated_at,
+        durationSeconds,
+        sourceId: id,
+        contentHash,
+        recordedAt: job.recorded_at ? new Date(job.recorded_at) : new Date(),
+        imported: job.origin === 'import',
+      })
+      seenIds.add(id)
+    }
+  }
+
   if (!single && !recorderPresent && !recordings.length) {
     if (shouldLogIdleStatus(`missing:${config.recordDir}`)) {
       console.log(`Idle: recorder not mounted and no manual imports are queued: ${config.recordDir} (repeated idle logs suppressed for 30m)`)
@@ -2690,7 +2922,13 @@ export async function collectDoctor() {
     // Provider/model/credentials are pi's own configuration; `pi.available` is
     // all we can honestly report about whether a summary can run.
     summary: { backend: 'pi', model: pi.model, thinking: pi.thinking, tools: pi.tools || null, contextDir: pi.tools ? pi.contextDir : null },
-    pi: { version: piVersion, available: !!piVersion, auth: existsSync(pi.authPath), authPath: pi.authPath, agentDir: pi.agentDir },
+    pi: {
+      version: piVersion,
+      available: !!piVersion,
+      auth: isPiAuthConfigured(pi.authPath, pi.model),
+      authPath: pi.authPath,
+      agentDir: pi.agentDir,
+    },
     // Outbound proxy for HTTPS endpoints (updater/GitHub). The GUI reads this to
     // route its own update check, so it reports the resolved value.
     proxy: { url: config.childEnv.https_proxy ?? null },
