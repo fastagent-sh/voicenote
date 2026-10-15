@@ -21,7 +21,8 @@ type ProviderPreset = {
 
 const PROVIDER_RECOMMENDED_MODELS: Record<string, string> = {
   deepseek: 'deepseek/deepseek-flash',
-  openai: 'openai/gpt-6.1-sol',
+  'openai-codex': 'openai-codex/gpt-6.1-sol',
+  openai: 'openai/gpt-4o',
   anthropic: 'anthropic/claude-sonnet-5-5',
   'kimi-coding': 'kimi-coding/kimi-for-coding',
   minimax: 'minimax/MiniMax-Text-01',
@@ -43,18 +44,29 @@ const PROVIDERS: ProviderPreset[] = [
     ],
   },
   {
-    id: 'openai',
-    name: 'OpenAI',
-    hasApiKey: true,
+    id: 'openai-codex',
+    name: 'ChatGPT (Plus/Pro 账号)',
+    hasApiKey: false,
     hasOAuth: true,
-    oauthLabel: 'OpenAI / ChatGPT 账号授权',
+    oauthLabel: 'ChatGPT 账号授权',
     models: [
-      { id: 'openai/gpt-6.1-sol', label: 'GPT-6.1 Sol (最新最优推荐)' },
-      { id: 'openai/gpt-6-sol', label: 'GPT-6 Sol' },
-      { id: 'openai/gpt-5.6-sol', label: 'GPT-5.6 Sol' },
-      { id: 'openai/gpt-5.4', label: 'GPT-5.4' },
-      { id: 'openai/gpt-4o', label: 'GPT-4o' },
+      { id: 'openai-codex/gpt-6.1-sol', label: 'GPT-6.1 Sol (最新推荐)' },
+      { id: 'openai-codex/gpt-6-sol', label: 'GPT-6 Sol' },
+      { id: 'openai-codex/gpt-5.6-sol', label: 'GPT-5.6 Sol' },
+      { id: 'openai-codex/gpt-5.5', label: 'GPT-5.5' },
+      { id: 'openai-codex/gpt-5.3-codex-spark', label: 'GPT-5.3 Codex Spark' },
+    ],
+  },
+  {
+    id: 'openai',
+    name: 'OpenAI (API Key)',
+    hasApiKey: true,
+    hasOAuth: false,
+    models: [
+      { id: 'openai/gpt-4o', label: 'GPT-4o (推荐)' },
+      { id: 'openai/gpt-4.1', label: 'GPT-4.1' },
       { id: 'openai/o3-mini', label: 'o3-mini' },
+      { id: 'openai/gpt-4o-mini', label: 'GPT-4o-mini' },
     ],
   },
   {
@@ -113,7 +125,7 @@ const PROVIDERS: ProviderPreset[] = [
   },
 ]
 
-export function Settings({ status: _status, onClose, onLogin: _onLogin }: { status: Status | null; onClose: () => void; onLogin: () => void }) {
+export function Settings({ status, onClose, onLogin: _onLogin }: { status: Status | null; onClose: () => void; onLogin: () => void }) {
   const [env, setEnv] = useState<Record<string, string>>({})
   const [self, setSelf] = useState<{ name: string | null; aliases: string[] }>({ name: null, aliases: [] })
   const [saving, setSaving] = useState(false)
@@ -166,9 +178,8 @@ export function Settings({ status: _status, onClose, onLogin: _onLogin }: { stat
     })
   }, [])
 
-  const rawModel = env.VOICENOTE_PI_MODEL ?? ''
-  const currentModel = rawModel.startsWith('openai-codex/') ? rawModel.replace('openai-codex/', 'openai/') : rawModel
-  const currentProviderId = (currentModel ? currentModel.split('/')[0] : 'openai') || 'openai'
+  const currentModel = env.VOICENOTE_PI_MODEL ?? ''
+  const currentProviderId = (currentModel ? currentModel.split('/')[0] : 'openai-codex') || 'openai-codex'
 
   const matchedPreset = PROVIDERS.find(p => p.id === currentProviderId)
   const isCustomProvider = !matchedPreset && currentModel !== ''
@@ -189,7 +200,7 @@ export function Settings({ status: _status, onClose, onLogin: _onLogin }: { stat
     id: `${currentProviderId}/${m.id}`,
     label: m.name,
   }))
-  const fallbackModels = matchedPreset?.models ?? []
+  const fallbackModels = matchedPreset ? matchedPreset.models.map(m => ({ ...m })) : []
   const availableModels = dynamicModels.length > 0 ? dynamicModels : fallbackModels
 
   // Put recommended/optimal model at the top
@@ -239,6 +250,7 @@ export function Settings({ status: _status, onClose, onLogin: _onLogin }: { stat
     setKeySaving(true)
     try {
       await vn.piSetApiKey(currentProviderId, apiKeyInput.trim())
+      await vn.configSet({ env, self: { name: self.name, aliases: self.aliases } })
       setEditingKey(false)
       setApiKeyInput('')
       await loadProviderStatuses()
@@ -272,6 +284,12 @@ export function Settings({ status: _status, onClose, onLogin: _onLogin }: { stat
   const save = async () => {
     setSaving(true)
     try {
+      if (apiKeyInput.trim()) {
+        await vn.piSetApiKey(currentProviderId, apiKeyInput.trim())
+        setApiKeyInput('')
+        setEditingKey(false)
+        await loadProviderStatuses()
+      }
       await vn.configSet({ env, self: { name: self.name, aliases: self.aliases } })
       setMessage('已保存')
       onClose()
@@ -304,12 +322,12 @@ export function Settings({ status: _status, onClose, onLogin: _onLogin }: { stat
               onChange={e => handleProviderChange(e.target.value)}
             >
               <optgroup label="常用服务商">
-                {PROVIDERS.slice(0, 3).map(p => (
+                {PROVIDERS.slice(0, 4).map(p => (
                   <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
               </optgroup>
               <optgroup label="更多服务商">
-                {PROVIDERS.slice(3).map(p => (
+                {PROVIDERS.slice(4).map(p => (
                   <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
                 <option value="custom">自定义模型 (手动输入)…</option>
@@ -485,7 +503,7 @@ export function Settings({ status: _status, onClose, onLogin: _onLogin }: { stat
         <section>
           <h3>关于</h3>
           <div className="sheet-row">
-            <span className="hint">VoiceNote {version || ''} · 纪要引擎 pi 1.2.0</span>
+            <span className="hint">VoiceNote {version || ''}{status?.pi.version ? ` · 纪要引擎 pi ${status.pi.version}` : ''}</span>
             <button onClick={() => void vn.openReleases()}>查看发布页</button>
           </div>
         </section>

@@ -79,6 +79,7 @@ type Recording = {
   contentHash: string
   recordedAt: Date
   imported: boolean
+  resuming?: boolean
 }
 
 type LocalFiles = {
@@ -1261,7 +1262,6 @@ export async function loginChatGPT(opts: { json?: boolean; deviceCode?: boolean;
         void openPath(url)
       })
     await persistPiOAuth(authPath, PI_PROVIDER_ID, creds as unknown as Record<string, unknown>)
-    await persistPiOAuth(authPath, 'openai', creds as unknown as Record<string, unknown>)
     if (json) emit({ event: 'success', provider: PI_PROVIDER_ID })
     else console.log(`\n✓ Signed in. Credentials saved to ${authPath}. Verify with: vn doctor`)
   } catch (e: any) {
@@ -1302,17 +1302,12 @@ export async function getPiAuthProviders(): Promise<PiProviderItem[]> {
   const providers = runtime.getProviders()
   const list: PiProviderItem[] = []
   for (const p of providers) {
-    if (p.id === 'openai-codex' || p.id === 'google') continue
+    if (p.id === 'google') continue
     const hasApiKey = !!p.auth?.apiKey
     const hasOAuth = !!p.auth?.oauth
     if (!hasApiKey && !hasOAuth) continue
 
     let status = runtime.getProviderAuthStatus(p.id)
-    if (p.id === 'openai' && !status.configured) {
-      if (runtime.getProviderAuthStatus('openai-codex').configured) {
-        status = { configured: true, source: 'stored' }
-      }
-    }
     let models = runtime.getModels(p.id).map(m => ({ id: m.id, name: m.name }))
     models.reverse()
     if (p.id === 'deepseek') {
@@ -1357,6 +1352,7 @@ export async function getPiAuthProviders(): Promise<PiProviderItem[]> {
 
   const priority = [
     'deepseek',
+    'openai-codex',
     'openai',
     'anthropic',
     'kimi-coding',
@@ -1398,15 +1394,13 @@ export async function removePiAuth(providerId: string): Promise<void> {
   let existing: Record<string, unknown> = {}
   try { existing = JSON.parse(await readFile(authPath, 'utf8')) } catch { return }
   delete existing[providerId]
-  if (providerId === 'openai') delete existing['openai-codex']
-  if (providerId === 'openai-codex') delete existing['openai']
   const tmp = `${authPath}.tmp-${process.pid}`
   await writeFile(tmp, JSON.stringify(existing, null, 2) + '\n', { mode: 0o600 })
   await rename(tmp, authPath)
 }
 
 export async function loginPiProvider(providerId: string, opts: { json?: boolean; deviceCode?: boolean; emit?: (o: Record<string, unknown>) => void } = {}): Promise<void> {
-  if (providerId === 'openai-codex' || providerId === 'openai') {
+  if (providerId === 'openai-codex') {
     return loginChatGPT(opts)
   }
   const authPath = getConfig().pi.authPath
@@ -1427,7 +1421,10 @@ export async function loginPiProvider(providerId: string, opts: { json?: boolean
           const browserOpt = prompt.options.find(o => o.id === 'browser') ?? prompt.options[0]
           return browserOpt?.id ?? ''
         }
-        return ''
+        if (prompt.signal?.aborted) throw new Error('Login cancelled')
+        return new Promise<string>((_, reject) => {
+          prompt.signal?.addEventListener('abort', () => reject(new Error('Login cancelled')), { once: true })
+        })
       },
       notify: (event) => {
         if (event.type === 'auth_url') {
@@ -1450,19 +1447,31 @@ export async function loginPiProvider(providerId: string, opts: { json?: boolean
   }
 }
 
+function providerEnvKeyConfigured(providerId: string, childEnv: Record<string, string>): boolean {
+  const norm = providerId.toUpperCase().replace(/-/g, '_')
+  const candidates = [
+    `${norm}_API_KEY`,
+    `${norm}_KEY`,
+  ]
+  if (providerId === 'kimi-coding') candidates.push('KIMI_API_KEY', 'MOONSHOT_API_KEY')
+  if (providerId.startsWith('qwen')) candidates.push('QWEN_API_KEY', 'DASHSCOPE_API_KEY')
+  if (providerId === 'google') candidates.push('GEMINI_API_KEY', 'GOOGLE_API_KEY')
+  return candidates.some(k => Boolean(process.env[k] || childEnv[k]))
+}
+
 export function isPiAuthConfigured(authPath: string, model: string | null): boolean {
-  let requiredProvider = (model ? model.split('/')[0] : 'openai') || 'openai'
-  if (requiredProvider === 'openai-codex') requiredProvider = 'openai'
-  if (requiredProvider === 'deepseek' && (process.env.DEEPSEEK_API_KEY || getConfig().childEnv.DEEPSEEK_API_KEY)) return true
-  if (requiredProvider === 'openai' && (process.env.OPENAI_API_KEY || getConfig().childEnv.OPENAI_API_KEY)) return true
-  if (requiredProvider === 'anthropic' && (process.env.ANTHROPIC_API_KEY || getConfig().childEnv.ANTHROPIC_API_KEY)) return true
+  const requiredProvider = (model ? model.split('/')[0] : 'openai-codex') || 'openai-codex'
+  const childEnv = getConfig().childEnv
+
+  if (requiredProvider && providerEnvKeyConfigured(requiredProvider, childEnv)) {
+    return true
+  }
 
   if (existsSync(authPath)) {
     try {
       const data = JSON.parse(readFileSync(authPath, 'utf8'))
       if (data && typeof data === 'object') {
-        if (data[requiredProvider]) return true
-        if (requiredProvider === 'openai' && data['openai-codex']) return true
+        if (requiredProvider && data[requiredProvider]) return true
         if (!model && Object.keys(data).length > 0) return true
       }
     } catch {}
@@ -1758,9 +1767,11 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
     transcript = await readSavedTranscript(files.transcript)
     console.log(`✓ Reusing transcript: ${files.transcript}`)
     if (!existsSync(files.audio)) {
-      await mkdir(dirname(files.audio), { recursive: true })
-      await copyFile(rec.sourcePath, files.audio)
-      console.log(`✓ Local audio restored: ${files.audio}`)
+      if (rec.sourcePath && existsSync(rec.sourcePath) && isCandidateFile(rec.sourcePath)) {
+        await mkdir(dirname(files.audio), { recursive: true })
+        await copyFile(rec.sourcePath, files.audio)
+        console.log(`✓ Local audio restored: ${files.audio}`)
+      }
     }
   } else {
     progressStep(nextStep(), totalSteps, 'Copy audio to workspace', files.audio)
@@ -2050,7 +2061,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
       const hasSource = typeof job.source_path === 'string' && existsSync(job.source_path)
       if (!hasTranscript && !hasAudio && !hasSource) continue
 
-      const sourcePath = hasAudio ? audio! : (hasSource ? job.source_path : transcript!)
+      const sourcePath = hasAudio ? audio! : (hasSource ? job.source_path : (job.paths?.audio || job.source_path || ''))
       const sizeBytes = job.size_bytes || (hasAudio ? statSync(audio!).size : 0)
       const contentHash = job.content_hash || ''
       const durationSeconds = job.duration_seconds
@@ -2063,6 +2074,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
         contentHash,
         recordedAt: job.recorded_at ? new Date(job.recorded_at) : new Date(),
         imported: job.origin === 'import',
+        resuming: true,
       })
       seenIds.add(id)
     }
@@ -2094,17 +2106,17 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
       const name = basename(rec.sourcePath)
       skipCounts.already_done = (skipCounts.already_done || 0) + 1
       ;(skipSamples.already_done ||= []).push(name)
-      if (!opts.dryRun) await removeImportedSource(rec.sourcePath)
+      if (!opts.dryRun) await removeImportedSource(config, rec.sourcePath)
       if (verboseSkips) console.log(`  Skip: ${name} (already_done)`)
       continue
     }
     const entry = recordFor(store, rec)
-    const verdict = classify(rec, store.jobs[rec.sourceId], single || rec.imported ? manualLimits : automaticLimits, { force, notesMode: mode === 'notes', now: Date.now() })
+    const verdict = classify(rec, store.jobs[rec.sourceId], single || rec.imported || rec.resuming ? manualLimits : automaticLimits, { force, notesMode: mode === 'notes', now: Date.now() })
     if (verdict.run) { eligible.push(rec); continue }
     skipCounts[verdict.code] = (skipCounts[verdict.code] || 0) + 1
     ;(skipSamples[verdict.code] ||= []).push(entry.name)
     if (verdict.persist) patchJob(entry, { state: 'filtered', code: verdict.code, detail: verdict.detail }, nowIso())
-    if (rec.imported && verdict.code === 'already_done' && !opts.dryRun) await removeImportedSource(rec.sourcePath)
+    if (rec.imported && verdict.code === 'already_done' && !opts.dryRun) await removeImportedSource(config, rec.sourcePath)
     if (verboseSkips) console.log(`  Skip: ${entry.name} (${verdict.code}${verdict.detail ? `: ${verdict.detail}` : ''})`)
   }
   // Only prune against a listing we believe to be complete: if the recorder went
@@ -2201,10 +2213,10 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
       clearCurrent()
       await saveState(config, store)   // per job, not per batch: a kill -9 costs one job, not the batch
     }
-    if (importedDone) await removeImportedSource(rec.sourcePath)
+    if (importedDone) await removeImportedSource(config, rec.sourcePath)
     // Whole recorder went away — every remaining recorder target would fail the
     // same way. Local imports do not depend on the recorder and keep running.
-    if (!single && !existsSync(config.recordDir) && targets.slice(targetIndex + 1).some(target => !target.imported)) {
+    if (!single && !existsSync(config.recordDir) && targets.slice(targetIndex + 1).some(target => !target.imported && !target.resuming)) {
       console.error(`Recorder disappeared mid-run (${config.recordDir}); stopping. Remaining recordings stay queued.`)
       break
     }
@@ -2596,7 +2608,9 @@ export async function importRecording(file: string, opts: { json?: boolean }): P
   else console.log(`${result.status}: ${result.name}`)
 }
 
-async function removeImportedSource(path: string): Promise<void> {
+async function removeImportedSource(config: Config, path: string): Promise<void> {
+  const inbox = inboxPathFor(config)
+  if (!resolve(path).startsWith(resolve(inbox))) return
   try { await unlink(path) }
   catch (e: any) { if (e?.code !== 'ENOENT') { warnSideEffect(`remove imported source ${path}`, e); return } }
   await rmdir(dirname(path)).catch((e: any) => {

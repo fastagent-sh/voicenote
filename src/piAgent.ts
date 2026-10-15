@@ -60,13 +60,9 @@ export async function runAgentPrompt(opts: AgentRunOptions): Promise<string> {
   if (opts.model) {
     const slash = opts.model.indexOf('/')
     if (slash <= 0) throw new Error(`Invalid model '${opts.model}'; expected "provider/id", e.g. openai-codex/gpt-5.6-sol`)
-    let providerId = opts.model.slice(0, slash)
+    const providerId = opts.model.slice(0, slash)
     const modelId = opts.model.slice(slash + 1)
     model = modelRuntime.getModel(providerId, modelId)
-    if (!model && providerId === 'openai-codex') {
-      providerId = 'openai'
-      model = modelRuntime.getModel(providerId, modelId)
-    }
     if (!model && modelRuntime.getProvider(providerId)) {
       const existing = modelRuntime.getModels(providerId).map(m => ({
         id: m.id,

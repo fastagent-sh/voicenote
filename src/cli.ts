@@ -62,9 +62,10 @@ cli.command('doctor', 'Check environment')
 cli.command('login [provider]', 'Sign in to a provider (default: openai-codex / ChatGPT OAuth, or deepseek, openai, anthropic, etc.)')
   .option('--json', 'Emit machine-readable JSON events (for the GUI client)')
   .option('--device-code', 'Use the device-code flow instead of the browser callback (OpenAI Codex only)')
-  .action(async (provider: string | undefined, opts: { json?: boolean; deviceCode?: boolean }) => {
+  .option('--api-key [key]', 'Set or prompt for an API key instead of OAuth')
+  .action(async (provider: string | undefined, opts: { json?: boolean; deviceCode?: boolean; apiKey?: string | boolean }) => {
     const providerId = provider || 'openai-codex'
-    if (providerId === 'openai-codex') {
+    if (providerId === 'openai-codex' && !opts.apiKey) {
       return loginChatGPT(opts)
     }
     const { ModelRuntime } = await import('@earendil-works/pi-coding-agent')
@@ -76,25 +77,36 @@ cli.command('login [provider]', 'Sign in to a provider (default: openai-codex / 
       process.exitCode = 1
       return
     }
+
+    const wantApiKey = Boolean(opts.apiKey) || (!p.auth.oauth?.login && Boolean(p.auth.apiKey))
+    if (wantApiKey) {
+      if (!p.auth.apiKey) {
+        console.error(`Provider '${providerId}' does not support API key authentication.`)
+        process.exitCode = 1
+        return
+      }
+      let key = typeof opts.apiKey === 'string' ? opts.apiKey.trim() : ''
+      if (!key) {
+        const readline = await import('node:readline/promises')
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+        try {
+          key = (await rl.question(`Enter API key for ${p.name}: `)).trim()
+        } finally {
+          rl.close()
+        }
+      }
+      if (!key) {
+        console.error('API key cannot be empty.')
+        process.exitCode = 1
+        return
+      }
+      await setPiApiKey(providerId, key)
+      console.log(`\n✓ API key for ${p.name} saved to ${config.pi.authPath}.`)
+      return
+    }
+
     if (p.auth.oauth?.login) {
       return loginPiProvider(providerId, opts)
-    }
-    if (p.auth.apiKey) {
-      const readline = await import('node:readline/promises')
-      const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-      try {
-        const key = await rl.question(`Enter API key for ${p.name}: `)
-        if (!key.trim()) {
-          console.error('API key cannot be empty.')
-          process.exitCode = 1
-          return
-        }
-        await setPiApiKey(providerId, key.trim())
-        console.log(`\n✓ API key for ${p.name} saved to ${config.pi.authPath}.`)
-      } finally {
-        rl.close()
-      }
-      return
     }
     console.error(`Provider '${providerId}' does not support interactive login.`)
     process.exitCode = 1
