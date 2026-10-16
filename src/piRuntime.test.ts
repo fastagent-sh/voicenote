@@ -76,3 +76,25 @@ assert.equal(process.env.MINIMAX_API_KEY, undefined)
     await rm(home, { recursive: true, force: true })
   }
 }, 30_000)
+
+test('explicit env overrides process.env in effective environment', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'vn-env-override-'))
+  const env = envFor(home)
+  try {
+    const run = await runAsync(process.execPath, ['--input-type=module', '-e', `
+const assert = (await import('node:assert/strict')).default
+const { providerEnvKeys, createPiRuntime } = await import('./src/piRuntime.ts')
+process.env.DEEPSEEK_API_KEY = 'ambient-key'
+const keys = await providerEnvKeys('deepseek', { DEEPSEEK_API_KEY: 'override-key' })
+assert.deepEqual(keys, ['DEEPSEEK_API_KEY'])
+const { runtime } = await createPiRuntime(process.env.HOME, { DEEPSEEK_API_KEY: 'override-key' })
+const auth = await runtime.getAuth('deepseek')
+assert.equal(auth.auth.apiKey, 'override-key')
+console.log('override verified')
+`], { env })
+    expect(run.status, run.stderr).toBe(0)
+    expect(run.stdout).toContain('override verified')
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})

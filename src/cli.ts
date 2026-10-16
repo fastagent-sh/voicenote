@@ -106,7 +106,13 @@ cli.command('login [provider]', 'Sign in to a provider (default: openai-codex / 
     }
 
     if (hasOAuth) {
-      return loginPiProvider(providerId, opts)
+      try {
+        await loginPiProvider(providerId, opts)
+      } catch (e: any) {
+        if (!opts.json) console.error(`\n${e?.message || e}`)
+        process.exitCode = 1
+      }
+      return
     }
     console.error(`Provider '${providerId}' does not support interactive login.`)
     process.exitCode = 1

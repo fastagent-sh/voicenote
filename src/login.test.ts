@@ -63,7 +63,7 @@ await fetch('https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit', { sig
 test.skipIf(process.platform === 'win32')('browser OAuth stores Codex credentials without overwriting other providers', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'vn-login-browser-'))
   try {
-    await writeFile(join(dir, 'auth.json'), JSON.stringify({ anthropic: { type: 'api_key', key: 'keep-me' } }))
+    await writeFile(join(dir, 'auth.json'), JSON.stringify({ deepseek: { type: 'api_key', key: 'keep-me' } }))
     const output = await runNode(`
 const { installProxyFromEnv } = await import(process.env.VN_PI_AGENT_URL)
 await installProxyFromEnv()
@@ -81,7 +81,7 @@ agent.assertNoPendingInterceptors()
     expect(output).toContain('"event":"success"')
     expect(output).not.toContain('"event":"device_code"')
     const saved = JSON.parse(await readFile(join(dir, 'auth.json'), 'utf8'))
-    expect(saved.anthropic).toEqual({ type: 'api_key', key: 'keep-me' })
+    expect(saved.deepseek).toEqual({ type: 'api_key', key: 'keep-me' })
     expect(saved.openai).toBeUndefined()
     expect(saved['openai-codex']).toMatchObject({ type: 'oauth', access: expect.stringContaining('x.'), refresh: 'refresh-1', accountId: 'acc-9' })
     expect(saved['openai-codex'].expires - Date.now()).toBeGreaterThan(3_000_000)

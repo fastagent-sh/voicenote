@@ -25,7 +25,7 @@ export function preferredModelId(providerId: string, models: readonly { id: stri
 
 function effectiveEnvironment(env: Record<string, string>): Record<string, string> {
   const inherited = Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)
-  return { ...env, ...Object.fromEntries(inherited) }
+  return { ...Object.fromEntries(inherited), ...env }
 }
 
 export async function providerEnvKeys(providerId: string, env: Record<string, string> = {}): Promise<string[]> {

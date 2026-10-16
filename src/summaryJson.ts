@@ -35,14 +35,32 @@ function escapeControlCharsInStrings(text: string): string {
   let out = ''
   let inString = false
   let escaped = false
-  for (const ch of text) {
-    if (escaped) { out += ch; escaped = false; continue }
-    if (ch === '\\') { out += ch; escaped = true; continue }
-    if (ch === '"') { inString = !inString; out += ch; continue }
-    if (inString && ESCAPES[ch]) { out += ESCAPES[ch]; continue }
-    // Any other raw control char inside a string would also be rejected.
-    if (inString && ch < ' ') { out += '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0'); continue }
-    out += ch
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!
+    if (inString) {
+      if (escaped) {
+        escaped = false
+        if ('"\\/bfnrt'.includes(ch)) {
+          out += '\\' + ch
+        } else if (ch === 'u') {
+          const hex = text.slice(i + 1, i + 5)
+          if (/^[0-9a-fA-F]{4}$/.test(hex)) out += '\\u'
+          else out += '\\\\u'
+        } else {
+          out += '\\\\' + ch
+        }
+        continue
+      }
+      if (ch === '\\') { escaped = true; continue }
+      if (ch === '"') { inString = false; out += ch; continue }
+      if (ESCAPES[ch]) { out += ESCAPES[ch]; continue }
+      // Any other raw control char inside a string would also be rejected.
+      if (ch < ' ') { out += '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0'); continue }
+      out += ch
+    } else {
+      if (ch === '"') inString = true
+      out += ch
+    }
   }
   return out
 }

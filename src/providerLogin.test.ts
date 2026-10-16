@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,7 +12,7 @@ async function runLogin(input: 'answer' | 'eof' | 'abort' | 'failure' | 'device'
   const script = `
 const { ModelRuntime } = await import('@earendil-works/pi-coding-agent')
 const runtime = await ModelRuntime.create({ authPath: process.env.PI_CODING_AGENT_DIR + '/auth.json', modelsPath: null })
-const provider = runtime.getProvider('anthropic')
+const provider = runtime.getProvider('openai')
 provider.auth.oauth.login = async interaction => {
   interaction.notify({ type: 'auth_url', url: 'https://example.com/authorize' })
   if (${JSON.stringify(input)} === 'device') interaction.notify({ type: 'device_code', userCode: 'unused', verificationUri: 'https://example.com/device' })
@@ -27,7 +27,7 @@ ModelRuntime.create = async () => runtime
 const { loginPiProvider } = await import('./src/core.ts')
 const controller = new AbortController()
 if (${JSON.stringify(input)} === 'abort') setTimeout(() => controller.abort(new Error('Login timed out')), 100)
-try { await loginPiProvider('anthropic', { signal: controller.signal }) }
+try { await loginPiProvider('openai', { signal: controller.signal }) }
 catch (error) { console.error('vn: ' + error.message); process.exitCode = 1 }
 `
   try {
@@ -68,7 +68,7 @@ for (const mode of ['eof', 'abort', 'failure', 'device'] as const) {
   test.skipIf(process.platform === 'win32')(`provider CLI exits cleanly on ${mode}`, async () => {
     const run = await runLogin(mode)
     expect(run.status).toBe(1)
-    expect(run.stderr).toContain('vn: Login to Anthropic failed:')
+    expect(run.stderr).toContain('vn: Login to OpenAI failed:')
     expect(run.stderr).not.toContain('UnhandledPromiseRejection')
     expect(run.stderr).not.toContain('    at ')
     if (mode === 'device') {
@@ -77,3 +77,21 @@ for (const mode of ['eof', 'abort', 'failure', 'device'] as const) {
     }
   }, 15_000)
 }
+
+test.skipIf(process.platform === 'win32')('cli login command catches errors and exits with code 1', () => {
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    const { ModelRuntime } = await import('@earendil-works/pi-coding-agent')
+    const orig = ModelRuntime.create
+    ModelRuntime.create = async (opts) => {
+      const rt = await orig(opts)
+      const p = rt.getProvider('openai')
+      p.auth.oauth.login = async () => { throw new Error('Simulated OAuth failure') }
+      return rt
+    }
+    process.argv = [process.execPath, 'src/cli.ts', 'login', 'openai']
+    await import('./src/cli.ts')
+  `], { encoding: 'utf8', timeout: 5000 })
+  expect(result.status).toBe(1)
+  expect(result.stderr).toContain('Login to OpenAI failed: Simulated OAuth failure')
+  expect(result.stderr).not.toContain('UnhandledPromiseRejection')
+})

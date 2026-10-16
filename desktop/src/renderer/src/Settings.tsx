@@ -103,7 +103,10 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
     setEditingKey(false)
     setApiKeyInput('')
     setManualModel(newProviderId === 'custom')
-    if (newProviderId === 'custom') return
+    if (newProviderId === 'custom') {
+      setAuthMethodChoice('api_key')
+      return
+    }
     const targetStatus = providerStatuses.find(p => p.id === newProviderId)
     if (!targetStatus?.defaultModelId) {
       setMessage('该服务商暂无可选纪要模型，请先在 models.json 中配置。')
@@ -258,9 +261,7 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
                 value={currentModel}
                 onChange={e => handleModelChange(e.target.value)}
               >
-                {!currentModel && (
-                  <option value="">使用引擎默认模型</option>
-                )}
+                <option value="">使用引擎默认模型</option>
                 {availableModels.map(m => (
                   <option key={m.id} value={m.id}>{m.label}</option>
                 ))}
@@ -309,7 +310,7 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
                   )}
 
                   {/* API Key Form */}
-                  {(authMethodChoice === 'api_key' || (currentProviderMeta.hasApiKey && !currentProviderMeta.hasOAuth)) && (
+                  {(!currentProviderMeta.hasOAuth || authMethodChoice === 'api_key') && (
                     <div>
                       {isApiKeyConfigured && !editingKey ? (
                         <div className="sheet-row">
@@ -350,7 +351,7 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
                   )}
 
                   {/* OAuth Login */}
-                  {(authMethodChoice === 'oauth' || (!currentProviderMeta.hasApiKey && currentProviderMeta.hasOAuth)) && (
+                  {currentProviderMeta.hasOAuth && (authMethodChoice === 'oauth' || !currentProviderMeta.hasApiKey) && (
                     <div>
                       <div className="sheet-row">
                         <span className="hint">

@@ -26,6 +26,11 @@ describe('parseSummaryJson', () => {
     expect(parseSummaryJson(reply)).toEqual({ title: 't', markdown: '# t\nline two\tindented' })
   })
 
+  test('repairs invalid escape characters like markdown escapes inside strings', () => {
+    const reply = '{"title":"t","markdown":"# item\\_one and \\*bold\\* and \\[bracket\\]"}'
+    expect(parseSummaryJson(reply)).toEqual({ title: 't', markdown: '# item\\_one and \\*bold\\* and \\[bracket\\]' })
+  })
+
   test('still reports the original error when the reply is not JSON at all', () => {
     expect(() => parseSummaryJson('sorry, I cannot help with that')).toThrow()
   })
