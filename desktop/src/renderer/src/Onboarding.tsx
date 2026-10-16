@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { vn, type LoginEvent, type Status } from './api.ts'
+import { vn, type Status } from './api.ts'
+import { ModelAuthCard } from './ModelAuthCard.tsx'
 
 /**
  * Shown until the app can actually do its job: sign in, a transcription key,
@@ -13,37 +14,40 @@ export function Onboarding({ status, onDone, onRefresh }: {
   onDone: () => void
   onRefresh: () => void
 }) {
+  const [model, setModel] = useState('')
   const [asrKey, setAsrKey] = useState('')
   const [workspace, setWorkspace] = useState('')
   const [recordDir, setRecordDir] = useState('')
   const [saving, setSaving] = useState(false)
-  const [loginState, setLoginState] = useState<'idle' | 'waiting' | 'failed'>('idle')
   const [error, setError] = useState<string | null>(null)
+  const [pendingApiKey, setPendingApiKey] = useState<{ providerId: string; key: string } | null>(null)
+  const [providerConfigured, setProviderConfigured] = useState(false)
 
   useEffect(() => {
     void vn.configGet().then(config => {
+      setModel(config.env.VOICENOTE_PI_MODEL ?? '')
       setAsrKey(config.env.VOLCANO_ASR_KEY ?? '')
       setWorkspace(config.env.VOICENOTE_WORKSPACE ?? '')
       setRecordDir(config.env.VOICENOTE_RECORD_DIR ?? '')
     })
-    return vn.on('login:event', (event: LoginEvent) => {
-      if (event.event === 'success') { setLoginState('idle'); onRefresh() }
-      if (event.event === 'error') { setLoginState('failed'); setError(event.message) }
-    })
-  }, [onRefresh])
+  }, [])
 
-  const signedIn = !!status?.pi.auth
+  const hasAuth = providerConfigured || Boolean(pendingApiKey?.key)
   const hasKey = asrKey.trim().length > 0
 
   const save = async () => {
     setSaving(true)
     setError(null)
     try {
+      if (pendingApiKey?.key) {
+        await vn.piSetApiKey(pendingApiKey.providerId, pendingApiKey.key)
+      }
       await vn.configSet({
         env: {
           VOLCANO_ASR_KEY: asrKey.trim(),
           VOICENOTE_WORKSPACE: workspace.trim(),
           VOICENOTE_RECORD_DIR: recordDir.trim(),
+          ...(model ? { VOICENOTE_PI_MODEL: model } : {}),
         },
       })
       onRefresh()
@@ -62,16 +66,15 @@ export function Onboarding({ status, onDone, onRefresh }: {
         <p className="hint">三步就能开始：把录音变成可读的纪要。</p>
 
         <section>
-          <h3><span className={signedIn ? 'step-dot done' : 'step-dot'}>1</span> 配置纪要模型 (ChatGPT / DeepSeek 等)</h3>
-          <p className="hint">纪要由 AI 模型生成。支持 ChatGPT 账号授权登录，或在设置中配置 DeepSeek 等模型的 API Key。</p>
-          <div className="sheet-row">
-            <span>{signedIn ? '已配置认证' : loginState === 'waiting' ? '已打开浏览器，授权后自动继续…' : '未配置'}</span>
-            <div className="row-actions">
-              <button className={signedIn ? '' : 'primary'} onClick={() => { setLoginState('waiting'); void vn.login() }}>
-                {signedIn ? '重新登录 ChatGPT' : '登录 ChatGPT'}
-              </button>
-            </div>
-          </div>
+          <h3><span className={hasAuth ? 'step-dot done' : 'step-dot'}>1</span> 配置纪要模型 (ChatGPT / DeepSeek 等)</h3>
+          <p className="hint">纪要由 AI 模型生成。支持 ChatGPT 账号授权登录，或配置 DeepSeek 等模型的 API Key。</p>
+          <ModelAuthCard
+            currentModel={model}
+            onModelChange={m => setModel(m)}
+            onStatusChange={onRefresh}
+            onConfiguredChange={setProviderConfigured}
+            onPendingKeyChange={(providerId, key) => setPendingApiKey(key ? { providerId, key } : null)}
+          />
         </section>
 
         <section>
@@ -105,7 +108,7 @@ export function Onboarding({ status, onDone, onRefresh }: {
         {error && <p className="problem">{error}</p>}
         <div className="sheet-row">
           <button className="link" onClick={onDone}>稍后再说</button>
-          <button className="primary" onClick={() => void save()} disabled={saving || !hasKey}>开始使用</button>
+          <button className="primary" onClick={() => void save()} disabled={saving || !hasAuth || !hasKey}>开始使用</button>
         </div>
       </main>
     </div>

@@ -76,6 +76,13 @@ test.skipIf(process.platform === 'win32')('scheduler carries the ffprobe path it
   }
 })
 
+test('resolveCli resolves cli.ts or cli.js, not scheduler', async () => {
+  const { resolveCli } = await import('./scheduler.ts')
+  const { cliPath } = resolveCli()
+  expect(cliPath).toMatch(/[/\\]cli\.(ts|js)$/)
+  expect(cliPath).not.toContain('scheduler')
+})
+
 test('invalid config fails without overwriting the file', async () => {
   const home = await mkdtemp(join(tmpdir(), 'voicenote-invalid-config-'))
   const configDir = join(home, process.platform === 'win32' ? 'voicenote' : '.config/voicenote')

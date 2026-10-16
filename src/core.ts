@@ -1,20 +1,30 @@
 // The pipeline as a library: scanning, transcription, notes, job state,
 // scheduling and config, with no command parsing and no process exit. `vn`
 // (cli.ts) and the desktop app are both callers.
+import { volcanoTranscribeAudio } from './asr/volcano.ts'
 import { parseLockOwner } from './runLock.ts'
-import { createPiRuntime, openPiCredentials, providerEnvKeys, providerLoginMethods, preferredModelId } from './piRuntime.ts'
-import { promptInTerminal, type LoginInteraction } from './loginInteraction.ts'
-import { loginWithBrowser, PI_PROVIDER_ID } from './chatgptAuth.ts'
 import { installProxyFromEnv, runAgentPrompt } from './piAgent.ts'
 import { parseSummaryJson } from './summaryJson.ts'
 import { emitPipelineEvent } from './progress.ts'
-import { applyOutcome, buildJobsView, classify, emptyState, ignoreRecording, localIso, MAX_ATTEMPTS, migrateLegacyState, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, requeueForRegenerate, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs.ts'
-import { createHash, randomUUID } from 'node:crypto'
+import { applyOutcome, buildJobsView, classify, emptyState, ignoreRecording, localIso, MAX_ATTEMPTS, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, requeueForRegenerate, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs.ts'
+import {
+  CONFIG_DIR, STATE_DIR, LOG_DIR, IS_WINDOWS, dailyLogPath,
+  getConfig, resetConfigCache, configGetData, configSetData, configGet, configSet,
+  macProxyFromScutil, windowsProxyFromRegistry,
+  type Config, type VolcanoConfig, type PiConfig, type SpeakersConfig, type SpeakerSelf, type SpeakerKnown,
+} from './config.ts'
+import { formatElapsed, formatSeconds, pad, withHeartbeat } from './time.ts'
+import { openPath, runCommand } from './process.ts'
+export {
+  getConfig, resetConfigCache, configGetData, configSetData, configGet, configSet,
+  macProxyFromScutil, windowsProxyFromRegistry,
+  type Config, type VolcanoConfig, type PiConfig, type SpeakersConfig, type SpeakerSelf, type SpeakerKnown,
+}
 import { appendFile, chmod, mkdir, readFile, writeFile, copyFile, rename, unlink, stat, readdir, rmdir, utimes } from 'node:fs/promises'
 import { createReadStream, existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, appendFileSync, openSync, closeSync, statSync, readSync, unlinkSync, renameSync } from 'node:fs'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import os from 'node:os'
 
 /**
@@ -40,35 +50,30 @@ function readVersion(): string {
 }
 
 export const VERSION: string = readVersion()
-const LAUNCH_AGENT_LABEL = 'sh.fastagent.voicenote'
-const LAUNCH_AGENT_LABEL_LEGACY = 'com.kid7st.voicenote' // pre-fastagent installs; cleaned up on install
-const TASK_NAME = 'VoiceNote'   // Windows Task Scheduler name (mac uses LAUNCH_AGENT_LABEL)
 
-// Single switch every platform branch routes through. Declared before the path
-// consts so they can read it.
-const IS_WINDOWS = process.platform === 'win32'
-const IS_MAC = process.platform === 'darwin'
+import {
+  getPiAuthProviders, setPiApiKey, removePiAuth, loginPiProvider,
+  loginChatGPT, loginOpenAICodexOAuth, isPiAuthConfigured,
+  type PiModelItem, type PiProviderItem,
+} from './providerAuth.ts'
+export {
+  getPiAuthProviders, setPiApiKey, removePiAuth, loginPiProvider,
+  loginChatGPT, loginOpenAICodexOAuth, isPiAuthConfigured,
+  type PiModelItem, type PiProviderItem,
+}
+import {
+  installScheduler, uninstallScheduler, printSchedulerStatus, ensureScheduler,
+  agentStatus, plistPath, TASK_NAME,
+} from './scheduler.ts'
+export {
+  installScheduler, uninstallScheduler, printSchedulerStatus, ensureScheduler,
+}
 
-// Per-OS base dirs. Windows -> native AppData (Roaming for config, Local for
-// logs/lock/state); mac/Linux -> ~/.config and ~/.local/state. appConfigDir /
-// appStateDir are hoisted function decls (defined just below).
-const CONFIG_DIR = appConfigDir()
-const STATE_DIR = appStateDir()
-const LOG_DIR = join(STATE_DIR, 'logs')
+import { createHash, randomUUID } from 'node:crypto'
+
 const LOCK_PATH = join(STATE_DIR, 'run.lock')
-const CONFIG_ENV_PATH = join(CONFIG_DIR, 'config.json')
 
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.wma', '.aac', '.flac'])
-
-// Per-OS base directory resolution (see CONFIG_DIR / STATE_DIR above).
-function appConfigDir(): string {
-  if (IS_WINDOWS) return join(process.env.APPDATA || join(os.homedir(), 'AppData', 'Roaming'), 'voicenote')
-  return join(os.homedir(), '.config', 'voicenote')
-}
-function appStateDir(): string {
-  if (IS_WINDOWS) return join(process.env.LOCALAPPDATA || join(os.homedir(), 'AppData', 'Local'), 'voicenote')
-  return join(os.homedir(), '.local', 'state', 'voicenote')
-}
 
 type Json = Record<string, any>
 
@@ -92,330 +97,7 @@ type LocalFiles = {
   metadata: string
 }
 
-type SpeakerSelf = { name: string | null; aliases: string[] }
-type SpeakerKnown = { name: string; aliases: string[]; relationship?: string | null }
-type SpeakersConfig = { self: SpeakerSelf; known: SpeakerKnown[] }
-
-
-type VolcanoConfig = {
-  apiKey: string              // X-Api-Key (new Volcano console)
-  resourceId: string
-  language?: string
-}
-
-/** How this install runs pi: which model, what it may read, where its config is. */
-type PiConfig = {
-  model: string | null
-  thinking: string
-  /** Comma-separated tool list; empty = run the summary without tools. */
-  tools: string
-  contextDir: string
-  retries: number
-  /** pi's config dir; holds auth.json (credentials) and models.json. */
-  agentDir: string
-  authPath: string
-}
-
-type Config = {
-  recordDir: string
-  workspace: string
-  minBytes: number
-  minDurationSeconds: number
-  maxAgeHours: number
-  speakers: SpeakersConfig
-  volcano: VolcanoConfig | null
-  ffprobeBin: string
-  pi: PiConfig
-  /** Added to the environment of every process vn spawns. */
-  childEnv: Record<string, string>
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// Settings → Config
-//
-// config.json is the only persisted source; the inherited environment overrides
-// it for this process only. Everything the program needs is resolved once, in
-// getConfig(), and passed down as a frozen Config — no code below reads a
-// business setting out of process.env, so behaviour can never depend on whether
-// some earlier call happened to hydrate it.
-// ────────────────────────────────────────────────────────────────────────────
-
-// Config keys accepted by `vn config set` and loaded from config.json when the
-// inherited environment does not already define them.
-const ENV_KEYS = [
-  'VOICENOTE_DEVICE_VOLUME',
-  'VOICENOTE_RECORD_DIR',
-  'VOICENOTE_WORKSPACE',
-  'VOICENOTE_MIN_BYTES',
-  'VOICENOTE_MIN_DURATION_SECONDS',
-  'VOICENOTE_MAX_AGE_HOURS',
-  'VOLCANO_ASR_KEY',
-  'VOLCANO_ASR_RESOURCE_ID',
-  'VOLCANO_ASR_LANGUAGE',
-  'PI_CODING_AGENT_DIR',
-  'VOICENOTE_FFPROBE_BIN',
-  'VOICENOTE_PI_MODEL',
-  'VOICENOTE_PI_RETRIES',
-  'VOICENOTE_PI_THINKING',
-  'VOICENOTE_PI_SUMMARY_TOOLS',
-  'VOICENOTE_CONTEXT_DIR',
-  'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
-  'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
-  'LOCAL_PROXY_HOST', 'LOCAL_PROXY_PORT', 'LOCAL_NO_PROXY',
-  'OPENAI_API_KEY',
-  'DEEPSEEK_API_KEY',
-  'ANTHROPIC_API_KEY',
-  'MINIMAX_API_KEY',
-  'KIMI_API_KEY',
-  'OPENROUTER_API_KEY',
-  'QWEN_API_KEY',
-]
-
-// The Volcano ASR endpoint must NEVER go through the SOCKS/HTTP proxy that pi
-// (ChatGPT Codex OAuth) may need: the audio upload is tens of megabytes, which
-// proxy bandwidth chokes on, and routing a China-mainland API through an
-// overseas proxy is slower and less reliable.
-const VOLCANO_NO_PROXY_HOSTS = ['openspeech.bytedance.com']
-
-/**
- * The proxy the OS is configured with, for users who set one globally and
- * never touch VoiceNote's settings. A GUI launched from Finder or the Start
- * menu inherits no shell environment, so this is the only proxy it can find
- * on its own. PAC (automatic configuration) is deliberately not supported:
- * deciding whether one host is proxied means running the PAC script.
- */
-function systemProxyUrl(): string | null {
-  try {
-    if (process.platform === 'darwin') {
-      const out = spawnSync('scutil', ['--proxy'], { encoding: 'utf8', timeout: 3000 })
-      return out.status === 0 && out.stdout ? macProxyFromScutil(out.stdout) : null
-    }
-    if (IS_WINDOWS) {
-      const key = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'
-      const out = spawnSync('reg', ['query', key], { encoding: 'utf8', timeout: 3000 })
-      return out.status === 0 && out.stdout ? windowsProxyFromRegistry(out.stdout) : null
-    }
-    return null
-  } catch { return null }
-}
-
-/** `scutil --proxy` output → proxy URL. Exported for the tests only. */
-export function macProxyFromScutil(stdout: string): string | null {
-  const get = (k: string) => stdout.match(new RegExp(`\\b${k}\\s*:\\s*(\\S+)`))?.[1]
-  if (get('HTTPSEnable') === '1' && get('HTTPSProxy') && get('HTTPSPort')) return `http://${get('HTTPSProxy')}:${get('HTTPSPort')}`
-  if (get('HTTPEnable') === '1' && get('HTTPProxy') && get('HTTPPort')) return `http://${get('HTTPProxy')}:${get('HTTPPort')}`
-  // Last, because SOCKS support in Node's fetch is still marked experimental.
-  if (get('SOCKSEnable') === '1' && get('SOCKSProxy') && get('SOCKSPort')) return `socks5://${get('SOCKSProxy')}:${get('SOCKSPort')}`
-  return null
-}
-
-/**
- * `reg query "…\Internet Settings"` output → proxy URL. Exported for the tests
- * only. ProxyServer is either a bare "host:port" or per-protocol
- * "http=host:port;https=host:port;socks=host:port"; an HTTP or HTTPS entry
- * names a proxy that is itself reached over plain HTTP.
- */
-export function windowsProxyFromRegistry(stdout: string): string | null {
-  const enabled = stdout.match(/ProxyEnable\s+REG_DWORD\s+0x([0-9a-f]+)/i)?.[1]
-  if (!enabled || parseInt(enabled, 16) === 0) return null
-  const server = stdout.match(/ProxyServer\s+REG_SZ\s+(\S+)/i)?.[1]
-  if (!server) return null
-  const withScheme = (host: string, scheme: string) => host.includes('://') ? host : `${scheme}://${host}`
-  if (!server.includes('=')) return withScheme(server, 'http')
-  const byProtocol = new Map<string, string>()
-  for (const part of server.split(';')) {
-    const eq = part.indexOf('=')
-    if (eq > 0) byProtocol.set(part.slice(0, eq).trim().toLowerCase(), part.slice(eq + 1).trim())
-  }
-  const overHttp = byProtocol.get('https') || byProtocol.get('http')
-  if (overHttp) return withScheme(overHttp, 'http')
-  const socks = byProtocol.get('socks')
-  return socks ? withScheme(socks, 'socks5') : null
-}
-
-type Settings = Record<string, string>
-
-/** This run's settings: config.json, overridden by the inherited environment. */
-function readSettings(file: Record<string, unknown>): Settings {
-  const settings: Settings = {}
-  for (const key of ENV_KEYS) {
-    const inherited = process.env[key]
-    if (inherited !== undefined) settings[key] = inherited
-    else if (typeof file[key] === 'string') settings[key] = file[key] as string
-  }
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && (key.endsWith('_API_KEY') || key.endsWith('_KEY')) && !settings[key]) {
-      settings[key] = value
-    }
-  }
-  for (const [key, value] of Object.entries(file)) {
-    if (typeof value === 'string' && (key.endsWith('_API_KEY') || key.endsWith('_KEY')) && !settings[key]) {
-      settings[key] = value
-    }
-  }
-  return settings
-}
-
-/**
- * Proxy variables, resolved from settings or the macOS system proxy. Returned as
- * a map instead of being pushed onto process.env alone because Bun does not hand
- * a child the variables this process added after startup — every spawn site
- * passes them explicitly (covered by summary.test.ts).
- */
-function proxyEnv(s: Settings): Record<string, string> {
-  const url = s.https_proxy || s.HTTPS_PROXY || s.http_proxy || s.HTTP_PROXY || s.all_proxy || s.ALL_PROXY
-    || (s.LOCAL_PROXY_HOST && s.LOCAL_PROXY_PORT ? `http://${s.LOCAL_PROXY_HOST}:${s.LOCAL_PROXY_PORT}` : '')
-    || systemProxyUrl()
-  if (!url) return {}
-  const env: Record<string, string> = {}
-  for (const key of ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']) env[key] = s[key] || url
-  const base = s.LOCAL_NO_PROXY || s.no_proxy || s.NO_PROXY || 'localhost,127.0.0.1,::1'
-  const bypass = [...new Set([...base.split(',').map(v => v.trim()).filter(Boolean), ...VOLCANO_NO_PROXY_HOSTS])].join(',')
-  env.no_proxy = bypass
-  env.NO_PROXY = bypass
-  return env
-}
-
-function volcanoFrom(s: Settings): VolcanoConfig | null {
-  const apiKey = s.VOLCANO_ASR_KEY || ''
-  if (!apiKey) return null
-  return {
-    apiKey,
-    resourceId: s.VOLCANO_ASR_RESOURCE_ID || 'volc.seedasr.auc',
-    language: s.VOLCANO_ASR_LANGUAGE || undefined,
-  }
-}
-
-function volcanoAuthHeaders(volc: VolcanoConfig, taskId: string, includeSequence: boolean): Record<string, string> {
-  const base: Record<string, string> = {
-    'X-Api-Resource-Id': volc.resourceId,
-    'X-Api-Request-Id': taskId,
-    'Content-Type': 'application/json',
-  }
-  if (includeSequence) base['X-Api-Sequence'] = '-1'
-  base['X-Api-Key'] = volc.apiKey
-  return base
-}
-
-function settingNumber(s: Settings, key: string, fallback: number): number {
-  const raw = s[key]
-  const value = raw === undefined || raw === '' ? fallback : Number(raw)
-  if (!Number.isFinite(value) || value < 0) throw new Error(`Invalid ${key}: expected a non-negative number, got '${raw}'`)
-  return value
-}
-
-let configCache: Config | null = null
-
-/**
- * Config is resolved once and frozen, which is right for a CLI process. A
- * long-lived app (the desktop main process) has to drop it after the user
- * saves settings, or it keeps running against the old values.
- */
-export function resetConfigCache(): void {
-  configCache = null
-}
-
-export function getConfig(): Config {
-  if (configCache) return configCache
-  const file = loadConfigJson()
-  const s = readSettings(file)
-  const proxy = proxyEnv(s)
-  // vn's own fetch (the ChatGPT OAuth flow) reads the proxy from the process
-  // environment, so the derived values have to land there as well.
-  for (const [key, value] of Object.entries(proxy)) process.env[key] = value
-  const deviceVolume = s.VOICENOTE_DEVICE_VOLUME || 'VTR6500'
-  const workspace = expandHome(s.VOICENOTE_WORKSPACE || '~/Documents/meetings')
-  // Credentials live in a voicenote-owned directory, not pi's ~/.pi/agent.
-  // Sharing that file means sharing an account with the pi CLI, and an
-  // interactive pi session rewrites its auth.json wholesale on exit — it has
-  // dropped entries that way. PI_CODING_AGENT_DIR still overrides it for
-  // anyone who does want one shared login.
-  const piAgentDir = expandHome(s.PI_CODING_AGENT_DIR || join(CONFIG_DIR, 'pi-agent'))
-  // Passed to every child: the proxy, plus the credentials and the config dir
-  // pi resolves for itself. pi gets the same EXPANDED path vn reports as
-  // `authPath`; forwarding the raw setting handed pi a literal "$HOME/..."
-  // directory, so every summary failed with "No API key found" while doctor
-  // kept reporting the credentials as present.
-  const childEnv: Record<string, string> = { ...proxy, PI_CODING_AGENT_DIR: piAgentDir }
-  for (const [key, value] of Object.entries(s)) {
-    if ((key.endsWith('_API_KEY') || key.endsWith('_KEY')) && typeof value === 'string' && value) {
-      childEnv[key] = value
-    }
-  }
-  configCache = Object.freeze({
-    recordDir: expandHome(s.VOICENOTE_RECORD_DIR || `/Volumes/${deviceVolume}/RECORD`),
-    workspace,
-    minBytes: settingNumber(s, 'VOICENOTE_MIN_BYTES', 100000),
-    minDurationSeconds: settingNumber(s, 'VOICENOTE_MIN_DURATION_SECONDS', 60),
-    // Only recordings from the last N hours are picked up (0 = no limit), so a
-    // fresh install doesn't drain the recorder's entire history.
-    maxAgeHours: settingNumber(s, 'VOICENOTE_MAX_AGE_HOURS', 48),
-    volcano: volcanoFrom(s),
-    speakers: normalizeSpeakers(file.speakers ?? DEFAULT_SPEAKERS),
-    // ffprobe is the only ffmpeg-suite binary the pipeline uses (duration
-    // detection); a configurable path lets the GUI point at its bundled copy.
-    ffprobeBin: expandHome(s.VOICENOTE_FFPROBE_BIN || 'ffprobe'),
-    pi: {
-      // pi's --model accepts "provider/id" (e.g. openai-codex/gpt-5.6-sol), so
-      // this one setting pins both. Null = whatever pi is configured to use.
-      model: (s.VOICENOTE_PI_MODEL || '').trim() || null,
-      thinking: s.VOICENOTE_PI_THINKING || 'high',
-      // Default ON: let the summary model read/grep prior notes for cross-reference
-      // consistency. Set VOICENOTE_PI_SUMMARY_TOOLS='' to disable.
-      tools: s.VOICENOTE_PI_SUMMARY_TOOLS === undefined ? 'read,grep' : s.VOICENOTE_PI_SUMMARY_TOOLS.trim(),
-      // Directory the summary model may read/grep. The published default must not
-      // reach outside the configured workspace.
-      contextDir: expandHome(s.VOICENOTE_CONTEXT_DIR || workspace),
-      retries: Math.max(1, Math.floor(settingNumber(s, 'VOICENOTE_PI_RETRIES', 3))),
-      agentDir: piAgentDir,
-      authPath: join(piAgentDir, 'auth.json'),
-    },
-    childEnv,
-  })
-  return configCache
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// Config files (~/.config/voicenote)
-// ────────────────────────────────────────────────────────────────────────────
-
-const DEFAULT_SPEAKERS: SpeakersConfig = { self: { name: null, aliases: [] }, known: [] }
-
-function normalizeSpeakers(data: unknown): SpeakersConfig {
-  const raw = (data && typeof data === 'object') ? data as Partial<SpeakersConfig> : {}
-  return {
-    self: {
-      name: typeof raw.self?.name === 'string' ? raw.self.name : null,
-      aliases: Array.isArray(raw.self?.aliases) ? raw.self!.aliases.filter((a): a is string => typeof a === 'string') : [],
-    },
-    known: Array.isArray(raw.known)
-      ? raw.known
-        .filter((k): k is SpeakerKnown => !!k && typeof k === 'object' && typeof (k as SpeakerKnown).name === 'string')
-        .map(k => ({ name: k.name, aliases: Array.isArray(k.aliases) ? k.aliases.filter((a): a is string => typeof a === 'string') : [], relationship: k.relationship ?? null }))
-      : [],
-  }
-}
-
-function loadConfigJson(): Record<string, unknown> {
-  if (!existsSync(CONFIG_ENV_PATH)) return {}
-  let value: unknown
-  try { value = JSON.parse(readFileSync(CONFIG_ENV_PATH, 'utf8')) } catch (e: any) {
-    throw new Error(`${CONFIG_ENV_PATH} is invalid JSON: ${e?.message || e}`)
-  }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${CONFIG_ENV_PATH} must contain a JSON object`)
-  return value as Record<string, unknown>
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// Misc helpers
-// ────────────────────────────────────────────────────────────────────────────
-
-function expandHome(path: string): string {
-  return path.replace(/^(?:~|\$\{?HOME\}?)(?=\/|$)/, os.homedir())
-}
-
 function nowIso(): string { return new Date().toISOString() }
-function pad(n: number): string { return String(n).padStart(2, '0') }
 
 function dateParts(d: Date): { month: string; prefix: string } {
   const month = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`
@@ -427,14 +109,6 @@ function dateParts(d: Date): { month: string; prefix: string } {
 function safeSlug(text: string, maxLen = 48): string {
   const cleaned = (text || '').trim().replace(/[\\/:*?"<>|\n\r\t]+/g, '-').replace(/\s+/g, '-').replace(/^-+|-+$/g, '')
   return cleaned.slice(0, maxLen).replace(/-+$/g, '') || 'note'
-}
-
-function formatSeconds(seconds: number | null | undefined): string {
-  const total = Math.max(0, Math.round(seconds || 0))
-  const h = Math.floor(total / 3600)
-  const m = Math.floor((total % 3600) / 60)
-  const s = total % 60
-  return h ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -467,18 +141,12 @@ async function appendJsonl(path: string, data: any): Promise<void> {
 }
 
 const RAW_TRANSCRIPT_MARKER = '## Raw transcript (no lossy cleanup)\n\n'
-const RAW_TRANSCRIPT_MARKER_LEGACY = '## 原始 transcript（不做 lossy 清洗）\n\n' // pre-0.18 files on disk
 
 
 
 // ────────────────────────────────────────────────────────────────────────────
 // Logging (rolling daily log)
 // ────────────────────────────────────────────────────────────────────────────
-
-function dailyLogPath(): string {
-  const d = new Date()
-  return join(LOG_DIR, `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.log`)
-}
 
 // Best-effort side effects (logging, idle-state) must not crash the pipeline, but
 // failures should still be observable. Write directly to stderr (not console.error,
@@ -516,40 +184,12 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`
 }
 
-function formatElapsed(ms: number): string {
-  const total = Math.max(0, Math.round(ms / 1000))
-  const h = Math.floor(total / 3600)
-  const m = Math.floor((total % 3600) / 60)
-  const s = total % 60
-  if (h) return `${h}h ${m}m ${s}s`
-  if (m) return `${m}m ${s}s`
-  return `${s}s`
-}
-
 function progressStep(step: number, total: number, title: string, detail?: string): void {
   console.log(`▶ Step ${step}/${total}: ${title}${detail ? ` — ${detail}` : ''}`)
   // Single hook for live progress: the dashboard shows the same string the log
   // does, instead of regex-guessing the step from log text.
   reportStep(title)
   emitPipelineEvent({ type: 'job_step', step: title })
-}
-
-async function withHeartbeat<T>(label: string, work: () => Promise<T>, heartbeatSeconds = 60): Promise<T> {
-  const started = Date.now()
-  const timer = setInterval(() => {
-    console.log(`… Still working: ${label} (${formatElapsed(Date.now() - started)} elapsed)`)
-  }, Math.max(10, heartbeatSeconds) * 1000)
-  ;(timer as any).unref?.()
-  try {
-    const result = await work()
-    console.log(`✓ Done: ${label} (${formatElapsed(Date.now() - started)})`)
-    return result
-  } catch (e) {
-    console.error(`✗ Failed: ${label} after ${formatElapsed(Date.now() - started)}`)
-    throw e
-  } finally {
-    clearInterval(timer)
-  }
 }
 
 function shouldLogIdleStatus(key: string, intervalMs = 30 * 60 * 1000): boolean {
@@ -696,27 +336,6 @@ function sourceIdFor(path: string, size: number, mtimeMs: number, digest: string
   // Manual imports are content-addressed: dropping the same audio again must
   // find its existing job even after the temporary inbox copy was removed.
   return imported ? `import:${digest}` : createHash('sha256').update(`${path}|${size}|${Math.floor(mtimeMs / 1000)}|${digest}`).digest('hex')
-}
-
-function runCommand(command: string, args: string[], timeoutMs = 20000): Promise<{ stdout: string; stderr: string; code: number }> {
-  return new Promise((res) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
-    let stdout = '', stderr = ''
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs)
-    child.stdout.on('data', d => stdout += String(d))
-    child.stderr.on('data', d => stderr += String(d))
-    child.on('close', code => { clearTimeout(timer); res({ stdout, stderr, code: code ?? 1 }) })
-    child.on('error', err => { clearTimeout(timer); res({ stdout, stderr: String(err), code: 1 }) })
-  })
-}
-
-// Cross-platform "reveal in file manager / open URL in default app".
-// macOS `open`, Linux `xdg-open`, Windows `start` (a cmd builtin, so via `cmd /c`;
-// the empty "" is start's title arg so a quoted path/URL isn't swallowed as title).
-function openPath(target: string, timeoutMs = 5000): Promise<{ stdout: string; stderr: string; code: number }> {
-  if (IS_WINDOWS) return runCommand('cmd', ['/c', 'start', '', target], timeoutMs)
-  if (IS_MAC) return runCommand('open', [target], timeoutMs)
-  return runCommand('xdg-open', [target], timeoutMs)
 }
 
 // Cross-platform replacement for `tail -n N [-F] files`. Windows ships no `tail`,
@@ -933,9 +552,8 @@ function resumableTranscriptFiles(config: Config, rec: Recording, store: StateFi
 
 async function readSavedTranscript(path: string): Promise<string> {
   const markdown = await readFile(path, 'utf8')
-  const marker = [RAW_TRANSCRIPT_MARKER, RAW_TRANSCRIPT_MARKER_LEGACY].find(m => markdown.includes(m))
-  if (!marker) throw new Error(`Cannot resume summary: saved transcript is missing raw transcript marker: ${path}`)
-  const transcript = markdown.slice(markdown.indexOf(marker) + marker.length).trim()
+  if (!markdown.includes(RAW_TRANSCRIPT_MARKER)) throw new Error(`Cannot resume summary: saved transcript is missing raw transcript marker: ${path}`)
+  const transcript = markdown.slice(markdown.indexOf(RAW_TRANSCRIPT_MARKER) + RAW_TRANSCRIPT_MARKER.length).trim()
   if (!transcript) throw new Error(`Cannot resume summary: saved transcript is empty: ${path}`)
   return transcript
 }
@@ -967,158 +585,9 @@ async function promoteOutputs(from: LocalFiles, to: LocalFiles): Promise<void> {
   }
 }
 
-// ───────────────────────────────────────────────────────────────────────
-// Volcano (Doubao ASR). The audio bytes are posted straight to the submit
-// endpoint as base64 — no object storage, no presigned URL, no second set of
-// credentials. Verified against a 42 MB / 2h57m recording.
-// ───────────────────────────────────────────────────────────────────────
-
-async function volcanoSubmitTask(volc: VolcanoConfig, taskId: string, audioBase64: string, format: string): Promise<void> {
-  const body = {
-    user: { uid: 'voicenote' },
-    audio: { data: audioBase64, format },
-    request: {
-      model_name: 'bigmodel',
-      enable_itn: true,
-      enable_punc: true,
-      enable_ddc: true,
-      enable_speaker_info: true,
-      show_utterances: true,
-      ...(volc.language ? { language: volc.language } : {}),
-    },
-  }
-  const res = await fetch('https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit', {
-    method: 'POST',
-    headers: volcanoAuthHeaders(volc, taskId, true),
-    body: JSON.stringify(body),
-  })
-  const status = res.headers.get('X-Api-Status-Code') || ''
-  const message = res.headers.get('X-Api-Message') || ''
-  if (status !== '20000000') {
-    const text = await res.text().catch(() => '')
-    throw new Error(`Volcano submit failed: status=${status} message=${message} body=${text.slice(0, 500)}`)
-  }
-}
-
-type VolcanoUtterance = {
-  text?: string
-  start_time?: number
-  end_time?: number
-  speaker_id?: number | string
-  additions?: { speaker_id?: number | string; speaker?: string | number }
-}
-
-type VolcanoQueryResult = {
-  status: string
-  message: string
-  result?: { text?: string; utterances?: VolcanoUtterance[] }
-  audio_info?: { duration?: number }
-}
-
-async function volcanoQueryResult(volc: VolcanoConfig, taskId: string): Promise<VolcanoQueryResult> {
-  const res = await fetch('https://openspeech.bytedance.com/api/v3/auc/bigmodel/query', {
-    method: 'POST',
-    headers: volcanoAuthHeaders(volc, taskId, false),
-    body: '{}',
-  })
-  const status = res.headers.get('X-Api-Status-Code') || ''
-  const message = res.headers.get('X-Api-Message') || ''
-  const text = await res.text().catch(() => '')
-  let parsed: any = null
-  if (text) { try { parsed = JSON.parse(text) } catch { parsed = null } }
-  return { status, message, result: parsed?.result, audio_info: parsed?.audio_info }
-}
-
-function volcanoSpeakerLabel(u: VolcanoUtterance): string {
-  const id = u.speaker_id ?? u.additions?.speaker_id ?? u.additions?.speaker
-  if (id == null || id === '') return 'Speaker A'
-  const n = Number(id)
-  if (Number.isFinite(n) && n >= 0 && n < 26) return `Speaker ${String.fromCharCode(65 + n)}`
-  return `Speaker ${String(id)}`
-}
-
-function volcanoFormatTranscript(result: { text?: string; utterances?: VolcanoUtterance[] }): string {
-  const utterances = result.utterances || []
-  if (!utterances.length) return (result.text || '').trim()
-  const lines = utterances
-    .map(u => {
-      const text = String(u.text || '').trim()
-      if (!text) return ''
-      const start = formatSeconds(Math.round((u.start_time || 0) / 1000))
-      const end = formatSeconds(Math.round((u.end_time || 0) / 1000))
-      return `[${start}-${end}] ${volcanoSpeakerLabel(u)}: ${text}`
-    })
-    .filter(Boolean)
-  return lines.join('\n')
-}
-
-async function volcanoTranscribeAudio(volc: VolcanoConfig, audioPath: string, rec: Recording): Promise<string> {
-  const format = (extname(audioPath).toLowerCase() || '.mp3').replace(/^\./, '')
-  {
-    const taskId = randomUUID()
-    const audioBase64 = (await readFile(audioPath)).toString('base64')
-    console.log(`Volcano: submit ASR task ${taskId} (resource=${volc.resourceId}, format=${format}, ${(audioBase64.length / 1e6).toFixed(1)} MB upload)`)
-    // The upload happens inside this POST, so a multi-hour recording can hold
-    // it for a minute or more; the heartbeat keeps the run visibly alive.
-    await withHeartbeat('upload audio and submit ASR task', () => volcanoSubmitTask(volc, taskId, audioBase64, format), 30)
-    const started = Date.now()
-    const expectedSeconds = rec.durationSeconds || 0
-    const maxWaitMs = Math.max(20 * 60 * 1000, Math.ceil(expectedSeconds * 1000 * 1.5))
-    let lastStatusLog = 0
-    let lastStatus = ''
-    // Tolerate transient failures while polling: by this point the audio is
-    // uploaded and the ASR task is submitted (money spent) — one dropped
-    // socket or an HTTP-level error (gateway 5xx returns no X-Api-Status-Code
-    // header, so q.status comes back empty) must not fail the whole job and
-    // trigger a full re-upload + re-submit on the next tick. Only give up
-    // after many failures in a row; throws when the budget or deadline is hit.
-    let queryFailures = 0
-    const transientQueryFailure = (desc: string): void => {
-      queryFailures++
-      if (queryFailures >= 10) throw new Error(`Volcano query failed ${queryFailures}x in a row: ${desc}`)
-      if (Date.now() - started > maxWaitMs) throw new Error(`Volcano: timeout after ${formatElapsed(Date.now() - started)} (last error: ${desc})`)
-      // console.error (not log) so wireDailyLog tags it [ERROR] and `vn errors`
-      // surfaces it — matching chatCompleteViaPi's transient-retry logging.
-      // A repeatedly-near-threshold ASR wobble is exactly what ops wants to see.
-      console.error(`… Volcano: transient query failure (attempt ${queryFailures}/10, will retry): ${desc}`)
-    }
-    for (;;) {
-      await new Promise(res => setTimeout(res, 8000))
-      let q: VolcanoQueryResult
-      try {
-        q = await volcanoQueryResult(volc, taskId)
-      } catch (e: any) {
-        transientQueryFailure(String(e?.message || e))
-        continue
-      }
-      if (!q.status) {
-        transientQueryFailure(`empty status header (HTTP-level error, body: ${q.message || 'none'})`)
-        continue
-      }
-      queryFailures = 0
-      if (q.status === '20000000' && q.result) {
-        console.log(`✓ Volcano: ASR done in ${formatElapsed(Date.now() - started)}; audio_duration=${q.audio_info?.duration ?? 'unknown'}ms`)
-        return volcanoFormatTranscript(q.result)
-      }
-      if (q.status === '20000001' || q.status === '20000002') {
-        if (q.status !== lastStatus || Date.now() - lastStatusLog > 60_000) {
-          const label = q.status === '20000002' ? 'queued' : 'processing'
-          console.log(`… Volcano: ${label} (status=${q.status}, ${formatElapsed(Date.now() - started)} elapsed)`)
-          lastStatusLog = Date.now()
-          lastStatus = q.status
-        }
-        if (Date.now() - started > maxWaitMs) throw new Error(`Volcano: timeout after ${formatElapsed(Date.now() - started)} (last status=${q.status})`)
-        continue
-      }
-      if (q.status === '20000003') throw new Error('Volcano: 20000003 silent audio (no speech detected)')
-      throw new Error(`Volcano query failed: status=${q.status} message=${q.message}`)
-    }
-  }
-}
-
 async function transcribeAudio(config: Config, audioPath: string, rec: Recording): Promise<string> {
   if (!config.volcano) throw new Error('Volcano ASR not configured. Set VOLCANO_ASR_KEY in config.json.')
-  return volcanoTranscribeAudio(config.volcano, audioPath, rec)
+  return volcanoTranscribeAudio(config.volcano, audioPath, { durationSeconds: rec.durationSeconds })
 }
 
 
@@ -1227,309 +696,10 @@ ${transcript}`
 // ───────────────────────────────────────────────────────────────────────
 
 // ───────────────────────────────────────────────────────────────────────
-// ChatGPT browser OAuth is shared by CLI and desktop callers.
-// The flow lives in chatgptAuth.ts; here we only persist the result to pi's
-// auth.json in the exact shape it reads: { type: 'oauth', ...creds }.
-// ───────────────────────────────────────────────────────────────────────
-
-async function persistPiOAuth(authPath: string, providerId: string, creds: Record<string, unknown>): Promise<void> {
-  const storage = await openPiCredentials(authPath)
-  await storage.modify(providerId, async () => ({
-    ...creds,
-    type: 'oauth',
-    access: String(creds.access),
-    refresh: String(creds.refresh),
-    expires: Number(creds.expires),
-  }), { signal: AbortSignal.timeout(10_000) })
-}
-
-export async function loginChatGPT(opts: { json?: boolean; signal?: AbortSignal; emit?: (o: Record<string, unknown>) => void }): Promise<void> {
-  // OpenAI's OAuth endpoint is geo-blocked in some regions. getConfig() resolves
-  // the proxy into this process's env, but Node's fetch ignores those variables,
-  // so the dispatcher has to be installed too — without it the token exchange
-  // went direct and failed (403) while the browser, using the system proxy, had
-  // already shown the callback page.
-  const authPath = getConfig().pi.authPath
-  await installProxyFromEnv()
-  const json = !!opts.json
-  const emit = opts.emit ?? ((o: Record<string, unknown>) => { if (json) console.log(JSON.stringify(o)) })
-  try {
-    const creds = await loginWithBrowser((url) => {
-        if (json) emit({ event: 'auth_url', url })
-        else {
-          console.log('\nOpening your browser to sign in to ChatGPT…')
-          console.log(`If it doesn't open, paste this into a browser on THIS machine:\n  ${url}`)
-        }
-        // Best-effort auto-open; the URL is printed/emitted above as fallback.
-        void openPath(url)
-      }, opts.signal)
-    await persistPiOAuth(authPath, PI_PROVIDER_ID, creds as unknown as Record<string, unknown>)
-    if (json) emit({ event: 'success', provider: PI_PROVIDER_ID })
-    else console.log(`\n✓ Signed in. Credentials saved to ${authPath}. Verify with: vn doctor`)
-  } catch (e: any) {
-    let message = String(e?.message || e)
-    if (/unsupported_country_region_territory|\b403\b/.test(message)) {
-      message += ' — OpenAI blocks this region without a proxy. Set LOCAL_PROXY_HOST/LOCAL_PROXY_PORT (or http_proxy) and retry; Volcano stays direct.'
-    }
-    if (json) emit({ event: 'error', message })
-    if (opts.emit) throw new Error(message, { cause: e })
-    if (!json) console.error(`\nLogin failed: ${message}`)
-    process.exitCode = 1
-  }
-}
-
-export type PiModelItem = { id: string; name: string }
-
-export type PiProviderItem = {
-  id: string
-  name: string
-  configured: boolean
-  source?: string
-  authType?: 'api_key' | 'oauth'
-  hasApiKey: boolean
-  hasOAuth: boolean
-  models: PiModelItem[]
-  defaultModelId?: string
-  envKeys: string[]
-  apiKey?: string
-}
-
-export async function getPiAuthProviders(): Promise<PiProviderItem[]> {
-  const config = getConfig()
-  const { runtime, credentials } = await createPiRuntime(config.pi.agentDir, config.childEnv)
-  const providers = runtime.getProviders()
-  const list: PiProviderItem[] = []
-  for (const p of providers) {
-    if (p.id === 'google') continue
-    const { hasApiKey, hasOAuth } = providerLoginMethods(p)
-    if (!hasApiKey && !hasOAuth) continue
-
-    const status = runtime.getProviderAuthStatus(p.id)
-    const models = runtime.getModels(p.id).map(m => ({ id: m.id, name: m.name }))
-    const auth = await runtime.checkAuth(p.id)
-    const stored = await credentials.read(p.id, { signal: AbortSignal.timeout(10_000) })
-    const apiKey = auth?.type === 'api_key' ? (await runtime.getAuth(p.id))?.auth.apiKey : undefined
-    list.push({
-      id: p.id,
-      name: p.name,
-      configured: Boolean(auth),
-      source: stored ? 'stored' : status.source,
-      authType: auth?.type,
-      hasApiKey,
-      hasOAuth,
-      models,
-      defaultModelId: preferredModelId(p.id, models),
-      envKeys: await providerEnvKeys(p.id, config.childEnv),
-      apiKey,
-    })
-  }
-
-  const priority = [
-    'deepseek',
-    'openai-codex',
-    'openai',
-    'anthropic',
-    'kimi-coding',
-    'minimax',
-    'qwen-token-plan-cn',
-    'openrouter',
-    'github-copilot',
-    'xai',
-  ]
-  list.sort((a, b) => {
-    const ai = priority.indexOf(a.id)
-    const bi = priority.indexOf(b.id)
-    if (ai !== -1 && bi !== -1) return ai - bi
-    if (ai !== -1) return -1
-    if (bi !== -1) return 1
-    return a.name.localeCompare(b.name)
-  })
-  return list
-}
-
-export async function setPiApiKey(providerId: string, apiKey: string): Promise<void> {
-  const trimmed = apiKey.trim()
-  if (!trimmed) throw new Error('API key cannot be empty')
-  const storage = await openPiCredentials(getConfig().pi.authPath)
-  await storage.modify(providerId, async () => ({ type: 'api_key', key: trimmed }), { signal: AbortSignal.timeout(10_000) })
-}
-
-export async function removePiAuth(providerId: string): Promise<void> {
-  const authPath = getConfig().pi.authPath
-  const storage = await openPiCredentials(authPath)
-  const current = loadConfigJson()
-  const keys = await providerEnvKeys(providerId, configFileEnv(current))
-  for (const key of keys) delete current[key]
-  await storage.delete(providerId, { signal: AbortSignal.timeout(10_000) })
-  await writeConfigJson(current)
-  resetConfigCache()
-  const inherited = keys.filter(key => process.env[key])
-  if (inherited.length) {
-    throw new Error(`Stored credentials removed; ${inherited.join(', ')} is still inherited from the environment. Unset it and restart VoiceNote.`)
-  }
-}
-
-function getOrCreateDeviceId(): string {
-  try {
-    const current = loadConfigJson()
-    if (typeof current.deviceId === 'string' && current.deviceId) {
-      return current.deviceId
-    }
-    const id = randomUUID()
-    current.deviceId = id
-    void writeConfigJson(current).catch(() => {})
-    return id
-  } catch {
-    return randomUUID()
-  }
-}
-
-export async function loginPiProvider(providerId: string, opts: {
-  json?: boolean
-  emit?: (o: Record<string, unknown>) => void
-  prompt?: LoginInteraction['prompt']
-  signal?: AbortSignal
-} = {}): Promise<void> {
-  const signal = AbortSignal.any([AbortSignal.timeout(15 * 60_000), ...(opts.signal ? [opts.signal] : [])])
-  if (providerId === 'openai-codex') {
-    return loginChatGPT({ ...opts, signal })
-  }
-  const config = getConfig()
-  const authPath = config.pi.authPath
-  await installProxyFromEnv()
-  const json = !!opts.json
-  const emit = opts.emit ?? ((o: Record<string, unknown>) => { if (json) console.log(JSON.stringify(o)) })
-  const { runtime } = await createPiRuntime(config.pi.agentDir, config.childEnv)
-  const provider = runtime.getProvider(providerId)
-  if (!provider) throw new Error(`Unknown provider '${providerId}'`)
-  if (!providerLoginMethods(provider).hasOAuth) throw new Error(`Provider '${providerId}' does not support browser OAuth. Use an API key.`)
-
-  try {
-    await runtime.login(providerId, 'oauth', {
-      signal,
-      prompt: prompt => {
-        if (prompt.type === 'select' && prompt.options.some(option => option.id === 'browser')) {
-          return Promise.resolve('browser')
-        }
-        const promptSignal = AbortSignal.any([signal, ...(prompt.signal ? [prompt.signal] : [])])
-        if (opts.prompt) return opts.prompt({ ...prompt, signal: promptSignal })
-        if (json) throw new Error('Interactive login requires a prompt handler')
-        return promptInTerminal(prompt, promptSignal)
-      },
-      notify: (event) => {
-        if (event.type === 'auth_url') {
-          if (json) emit({ event: 'auth_url', url: event.url })
-          else console.log(`\nSign in to ${provider.name} in your browser:\n  ${event.url}\n${event.instructions ?? ''}`)
-          void openPath(event.url)
-        } else if (event.type === 'device_code') {
-          throw new Error('Device-code sign-in is not supported. Use browser OAuth or an API key.')
-        } else if (event.type === 'progress' || event.type === 'info') {
-          if (json) emit({ event: 'progress', message: event.message })
-          else console.log(event.message)
-        }
-      },
-    }, {
-      getDeviceId: () => getOrCreateDeviceId(),
-      agentName: 'VoiceNote',
-    })
-    if (json) emit({ event: 'success', provider: providerId })
-    else console.log(`\n✓ Signed in to ${provider.name}. Credentials saved to ${authPath}.`)
-  } catch (e: any) {
-    const message = String(e?.message || e)
-    if (json) emit({ event: 'error', message })
-    throw new Error(`Login to ${provider.name} failed: ${message}`, { cause: e })
-  }
-}
-
-export async function isPiAuthConfigured(authPath: string, model: string | null): Promise<boolean> {
-  const { runtime } = await createPiRuntime(dirname(authPath), getConfig().childEnv)
-  if (!model) return runtime.getAvailableSnapshot().length > 0
-  const provider = model.split('/')[0]
-  return provider ? Boolean(await runtime.checkAuth(provider)) : false
-}
-
-// ───────────────────────────────────────────────────────────────────────
 // File-based config (~/.config/voicenote/config.json) — written by the GUI
 // via `vn config set`, read by loadEnvConfig(). ENV config uses ENV_KEYS;
 // identity lives under the same file's `speakers` object.
 // ───────────────────────────────────────────────────────────────────────
-
-function readStdin(): Promise<string> {
-  return new Promise((resolve) => {
-    let data = ''
-    process.stdin.setEncoding('utf8')
-    process.stdin.on('data', d => { data += d })
-    process.stdin.on('end', () => resolve(data))
-    process.stdin.on('error', () => resolve(data))
-  })
-}
-
-function configFileEnv(raw = loadConfigJson()): Record<string, string> {
-  const env: Record<string, string> = {}
-  for (const [k, v] of Object.entries(raw)) {
-    if (typeof v === 'string' && (ENV_KEYS.includes(k) || k.endsWith('_API_KEY') || k.endsWith('_KEY'))) {
-      env[k] = v
-    }
-  }
-  return env
-}
-
-export function configGetData(): { path: string; env: Record<string, string>; self: { name: string | null; aliases: string[] } } {
-  const current = loadConfigJson()
-  const speakers = normalizeSpeakers(current.speakers ?? DEFAULT_SPEAKERS)
-  return {
-    path: CONFIG_ENV_PATH,
-    env: configFileEnv(current),
-    self: { name: speakers.self.name, aliases: speakers.self.aliases },
-  }
-}
-
-export function configGet(): void { console.log(JSON.stringify(configGetData(), null, 2)) }
-
-type ConfigSetPayload = { env?: Record<string, unknown>; self?: { name?: string | null; aliases?: string[] } }
-
-async function writeConfigJson(value: Record<string, unknown>): Promise<void> {
-  await mkdir(CONFIG_DIR, { recursive: true })
-  const tmp = `${CONFIG_ENV_PATH}.tmp-${process.pid}`
-  await writeFile(tmp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 })
-  await rename(tmp, CONFIG_ENV_PATH)
-}
-
-export async function configSetData(payload: ConfigSetPayload): Promise<{ ok: true; path: string; ignoredKeys?: string[] }> {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('Config payload must be a JSON object')
-  const current = loadConfigJson()
-  const isKnown = (key: string) => ENV_KEYS.includes(key) || key.endsWith('_API_KEY') || key.endsWith('_KEY')
-  const ignored: string[] = []
-  if (payload.env) {
-    for (const [key, value] of Object.entries(payload.env)) {
-      if (!isKnown(key)) { ignored.push(key); continue }
-      if (value === null) delete current[key]
-      else if (typeof value === 'string') current[key] = value
-      else throw new Error(`Config value ${key} must be a string or null`)
-    }
-  }
-  if (payload.self) {
-    const speakers = normalizeSpeakers(current.speakers ?? DEFAULT_SPEAKERS)
-    if (payload.self.name !== undefined) {
-      if (payload.self.name !== null && typeof payload.self.name !== 'string') throw new Error('self.name must be a string or null')
-      speakers.self.name = payload.self.name
-    }
-    if (payload.self.aliases !== undefined) {
-      if (!Array.isArray(payload.self.aliases) || payload.self.aliases.some(alias => typeof alias !== 'string')) throw new Error('self.aliases must contain only strings')
-      speakers.self.aliases = payload.self.aliases
-    }
-    current.speakers = speakers
-  }
-  await writeConfigJson(current)
-  return { ok: true, path: CONFIG_ENV_PATH, ...(ignored.length ? { ignoredKeys: ignored } : {}) }
-}
-
-export async function configSet(): Promise<void> {
-  let payload: ConfigSetPayload
-  try { payload = JSON.parse(await readStdin()) }
-  catch (e: any) { console.error(`Invalid JSON on stdin: ${e?.message || e}`); process.exitCode = 1; return }
-  console.log(JSON.stringify(await configSetData(payload)))
-}
 
 type PiRunOptions = {
   systemPrompt: string
@@ -1858,50 +1028,13 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
 // Job state — `vn run` is the only writer; every view is a pure read of this.
 // ────────────────────────────────────────────────────────────────────────────
 
-// Named for what it holds: every recording's job state, not just the processed
-// ones. (Pre-0.18 this was `processed.json` with two reason-keyed buckets.)
 const statePathFor = (config: Config) => join(config.workspace, '_state', 'jobs.json')
-
-const legacyStatePathFor = (config: Config) => join(config.workspace, '_state', 'processed.json')
-
-/**
- * Read-only load. On an un-migrated workspace this converts in memory and does
- * NOT write: `vn jobs` and the GUI's poll both come through here without the run
- * lock, and a write from a view could race a live `vn run`. Persisting the
- * conversion is migrateStateOnDisk()'s job, under the lock.
- */
-// The legacy read is the one irreversible read in the codebase, so it gets the
-// same strictness as the new format — `readJson` swallows a parse failure and
-// returns `{}`, which here would mean "nothing was ever processed" and re-pay
-// for every recording's ASR.
-async function readLegacyState(config: Config): Promise<Json> {
-  const path = legacyStatePathFor(config)
-  return parseStrictJson(await readFile(path, 'utf8'), path) as Json
-}
 
 async function loadState(config: Config): Promise<StateFile> {
   const path = statePathFor(config)
-  if (!existsSync(path) && existsSync(legacyStatePathFor(config))) {
-    return migrateLegacyState(await readLegacyState(config), nowIso())
-  }
   const store = existsSync(path) ? parseStateFile(await readFile(path, 'utf8'), path) : emptyState()
   lastSavedState = JSON.stringify(store)
   return store
-}
-
-// Inline rather than a repo script: most installs are the GUI's compiled
-// sidecar, which has no checkout to run a script from — and starting from empty
-// is not an option, it would re-transcribe everything and pay for ASR twice.
-// Call only with the run lock held.
-async function migrateStateOnDisk(config: Config): Promise<void> {
-  const path = statePathFor(config)
-  const legacy = legacyStatePathFor(config)
-  if (existsSync(path) || !existsSync(legacy)) return
-  const store = migrateLegacyState(await readLegacyState(config), nowIso())
-  await writeJson(path, store)
-  lastSavedState = JSON.stringify(store)
-  await rename(legacy, `${legacy}.v1.bak`).catch(e => warnSideEffect('archive pre-0.18 state', e))
-  console.log(`Converted ${basename(legacy)} → ${basename(path)} (${Object.keys(store.jobs).length} records; old file kept as .v1.bak)`)
 }
 
 // Workspaces are often synced folders; skip writes when a run did not change
@@ -2005,10 +1138,6 @@ export async function runPipeline(file: string | undefined, opts: any): Promise<
 
 async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   await ensureDirs(config)
-  // --dry-run is a zero-side-effect diagnostic; the migration renames the legacy
-  // file and permanently drops its `error:*` entries. loadState converts in
-  // memory, so a dry run still sees the right picture.
-  if (!opts.dryRun) await migrateStateOnDisk(config)
   const store = await loadState(config)
   // We hold the run lock, so nothing else can own a `running` record: any that
   // survive are debris from a killed run. Their attempt was already counted, so
@@ -2207,252 +1336,6 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
 // LaunchAgent
 // ────────────────────────────────────────────────────────────────────────────
 
-// Bun standalone executables embed source in a virtual FS, so import.meta.url is
-// NOT a real on-disk path: "/$bunfs/..." on mac/Linux, "B:\~BUN\root\..." on
-// Windows. Either marker means we're the compiled exe (run it directly via
-// process.execPath); otherwise we're bun + cli.ts on disk. NOTE: matching only
-// $bunfs (the old check) misfired on Windows and leaked the virtual path into the
-// scheduled task's arguments.
-function resolveCli(): { cliPath: string; compiled: boolean } {
-  const cliPath = fileURLToPath(import.meta.url)
-  return { cliPath, compiled: /\$bunfs|~BUN/i.test(cliPath) }
-}
-
-function plistPath(): string {
-  return join(os.homedir(), 'Library', 'LaunchAgents', `${LAUNCH_AGENT_LABEL}.plist`)
-}
-
-function xmlEscape(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;')
-}
-
-// Scheduled runs read all business settings from config.json. The plist only
-// carries a fixed PATH and desktop-bundled runtime paths that do not exist in
-// that file.
-async function launchAgentEnv(config: Config): Promise<Record<string, string>> {
-  const env: Record<string, string> = {
-    PATH: `${os.homedir()}/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
-  }
-  // Provenance matters here, so this reads the raw sources rather than Config:
-  // only a path that was handed to us through the environment (and that
-  // config.json does not already carry) has to be written into the plist. The
-  // notes model needs no entry at all — pi is a library call now.
-  const fileEnv = configFileEnv()
-  const ffprobe = process.env.VOICENOTE_FFPROBE_BIN
-  if (ffprobe && ffprobe !== fileEnv.VOICENOTE_FFPROBE_BIN) env.VOICENOTE_FFPROBE_BIN = ffprobe
-  return env
-}
-
-async function installLaunchAgent(opts: { load?: boolean } = {}): Promise<void> {
-  const { cliPath, compiled } = resolveCli()
-  const programArgs = compiled
-    ? [process.execPath, 'run']
-    : [existsSync('/opt/homebrew/bin/bun') ? '/opt/homebrew/bin/bun' : process.execPath, cliPath, 'run']
-  const programArgsXml = programArgs.map(a => `    <string>${xmlEscape(a)}</string>`).join('\n')
-  const plist = plistPath()
-  await mkdir(dirname(plist), { recursive: true })
-  await mkdir(LOG_DIR, { recursive: true })
-  const env = await launchAgentEnv(getConfig())
-  const envEntries = Object.entries(env)
-    .map(([k, v]) => `    <key>${xmlEscape(k)}</key>\n    <string>${xmlEscape(v)}</string>`).join('\n')
-  const content = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${LAUNCH_AGENT_LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-${programArgsXml}
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>StartInterval</key>
-  <integer>60</integer>
-  <key>StandardOutPath</key>
-  <string>${LOG_DIR}/launchd.out.log</string>
-  <key>StandardErrorPath</key>
-  <string>${LOG_DIR}/launchd.err.log</string>
-  <key>WorkingDirectory</key>
-  <string>${os.homedir()}</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-${envEntries}
-  </dict>
-</dict>
-</plist>
-`
-  await writeFile(plist, content, 'utf8')
-  // Keep scheduler details private and tighten permissions on older plists.
-  await chmod(plist, 0o600)
-  const summary = Object.keys(env).join(', ')
-  console.log(`LaunchAgent written: ${plist}`)
-  console.log(`Embedded env keys: ${summary}`)
-  if (opts.load) {
-    const uid = process.getuid?.()
-    // Remove the legacy-label agent so old installs don't double-run vn.
-    const legacyPlist = join(os.homedir(), 'Library', 'LaunchAgents', `${LAUNCH_AGENT_LABEL_LEGACY}.plist`)
-    if (existsSync(legacyPlist)) {
-      await runCommand('launchctl', ['bootout', `gui/${uid}/${LAUNCH_AGENT_LABEL_LEGACY}`], 10000)
-      await unlink(legacyPlist).catch(e => warnSideEffect(`remove legacy LaunchAgent ${legacyPlist}`, e))
-    }
-    await runCommand('launchctl', ['bootout', `gui/${uid}`, plist], 10000) // ignore if not loaded
-    const r = await runCommand('launchctl', ['bootstrap', `gui/${uid}`, plist], 10000)
-    await runCommand('launchctl', ['enable', `gui/${uid}/${LAUNCH_AGENT_LABEL}`], 10000)
-    if (r.code === 0) console.log('LaunchAgent loaded (launchctl bootstrap).')
-    else console.error(`bootstrap exit ${r.code}: ${(r.stderr || r.stdout).trim().slice(0, 200)}`)
-  } else {
-    console.log(`Enable with: launchctl bootstrap gui/$(id -u) ${plist}`)
-  }
-}
-
-async function uninstallLaunchAgent(): Promise<void> {
-  await runCommand('launchctl', ['bootout', `gui/${process.getuid?.()}`, plistPath()], 10000)
-  console.log(`Bootout attempted: ${plistPath()}`)
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// Windows Task Scheduler (parallel to the mac LaunchAgent above)
-// ────────────────────────────────────────────────────────────────────────────
-
-function taskXmlPath(): string { return join(STATE_DIR, 'task.xml') }
-function taskVbsPath(): string { return join(STATE_DIR, 'run-hidden.vbs') }
-
-// Run via the interpreter currently executing us: process.execPath is the
-// absolute bun.exe (or the compiled vn.exe). Mirrors installLaunchAgent's
-// compiled-vs-script detection.
-function schedulerProgramArgs(): { command: string; argLine: string } {
-  const { cliPath, compiled } = resolveCli()
-  const args = compiled ? ['run'] : [cliPath, 'run']
-  const argLine = args.map(a => (/\s/.test(a) ? `"${a}"` : a)).join(' ')
-  return { command: process.execPath, argLine }
-}
-
-async function installScheduledTask(opts: { load?: boolean } = {}): Promise<void> {
-  await mkdir(STATE_DIR, { recursive: true })
-  await mkdir(LOG_DIR, { recursive: true })
-  // The task carries no env (Task Scheduler has no per-task env block), so an
-  // ffprobe path handed to us through the environment must be persisted to
-  // config.json, which `vn run` reads on startup. (On mac it rides in the
-  // LaunchAgent plist instead.)
-  const ffprobe = process.env.VOICENOTE_FFPROBE_BIN
-  if (ffprobe) {
-    await mkdir(CONFIG_DIR, { recursive: true })
-    const current = loadConfigJson()
-    current.VOICENOTE_FFPROBE_BIN = ffprobe
-    await writeConfigJson(current)
-  }
-  const { command, argLine } = schedulerProgramArgs()
-  // bun.exe / vn.exe are console-subsystem: an InteractiveToken task flashes a
-  // console window on every tick. Launch through wscript with window style 0
-  // (hidden). wait=True keeps wscript alive for the duration of `vn run` so
-  // IgnoreNew still prevents overlap, and WScript.Quit propagates vn's exit
-  // code so the task's Last Run Result stays meaningful. UTF-16 BOM so
-  // non-ASCII paths survive (wscript reads BOM-less files as ANSI).
-  const fullCmd = `"${command}" ${argLine}`
-  const vbs = `WScript.Quit CreateObject("WScript.Shell").Run("${fullCmd.replace(/"/g, '""')}", 0, True)\r\n`
-  await writeFile(taskVbsPath(), '\ufeff' + vbs, 'utf16le')
-  const wscript = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe')
-  // Register the task as the current user (DOMAIN\user; DOMAIN == machine name for
-  // local accounts). Without an explicit <UserId>, `schtasks /create /xml` can't tell
-  // who to register as and a standard (non-admin) user gets "Access is denied".
-  const taskUser = process.env.USERDOMAIN && process.env.USERNAME
-    ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}`
-    : (process.env.USERNAME || os.userInfo().username)
-  // Local-time StartBoundary for the TimeTrigger (Task Scheduler wants no zone).
-  const n = new Date()
-  const startBoundary = `${n.getFullYear()}-${pad(n.getMonth() + 1)}-${pad(n.getDate())}T${pad(n.getHours())}:${pad(n.getMinutes())}:${pad(n.getSeconds())}`
-  // The task just runs `vn run`; config comes from config.json (vn config set /
-  // the GUI), so unlike the mac plist there's no env to embed. A TimeTrigger that
-  // repeats every PT1M (mirrors the working `schtasks /sc minute /mo 1` form; a
-  // LogonTrigger gave "Access is denied" for standard users) + IgnoreNew is the
-  // StartInterval(60)+flock equivalent.
-  const xml = `<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Description>VoiceNote: watch the recorder and process new recordings.</Description>
-  </RegistrationInfo>
-  <Triggers>
-    <TimeTrigger>
-      <StartBoundary>${startBoundary}</StartBoundary>
-      <Enabled>true</Enabled>
-      <Repetition>
-        <Interval>PT1M</Interval>
-        <StopAtDurationEnd>false</StopAtDurationEnd>
-      </Repetition>
-    </TimeTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>${xmlEscape(taskUser)}</UserId>
-      <LogonType>InteractiveToken</LogonType>
-      <RunLevel>LeastPrivilege</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>${xmlEscape(wscript)}</Command>
-      <Arguments>${xmlEscape(`//B //Nologo "${taskVbsPath()}"`)}</Arguments>
-    </Exec>
-  </Actions>
-</Task>
-`
-  const xmlPath = taskXmlPath()
-  // schtasks /xml wants UTF-16; prepend a BOM so non-ASCII paths survive.
-  await writeFile(xmlPath, '\ufeff' + xml, 'utf16le')
-  const r = await runCommand('schtasks', ['/create', '/tn', TASK_NAME, '/xml', xmlPath, '/f'], 15000)
-  if (r.code !== 0) {
-    console.error(`schtasks /create failed (exit ${r.code}): ${(r.stderr || r.stdout).trim()}`)
-    process.exitCode = 1
-    return
-  }
-  console.log(`Scheduled task '${TASK_NAME}' installed — runs \`vn run\` every 60s at/after logon.`)
-  console.log(`Command: ${command} ${argLine} (launched hidden via wscript)`)
-  console.log('Note: the task reads config from config.json — set it with `vn config set` (or the GUI) so the background run is configured.')
-  if (opts.load) await runCommand('schtasks', ['/run', '/tn', TASK_NAME], 10000)
-}
-
-async function uninstallScheduledTask(): Promise<void> {
-  const r = await runCommand('schtasks', ['/delete', '/tn', TASK_NAME, '/f'], 10000)
-  // Remove our artifacts too: the VBS is the task's actual entry point, and a
-  // leftover copy could make schedulerIsCurrent misjudge a future install.
-  // Only when the task is actually gone — deleting the VBS while the task is
-  // still registered would turn every tick into a silent wscript failure.
-  if (r.code === 0) {
-    for (const p of [taskVbsPath(), taskXmlPath()]) {
-      try { unlinkSync(p) } catch (e: any) { if (e?.code !== 'ENOENT') warnSideEffect(`remove scheduler artifact ${p}`, e) }
-    }
-  }
-  console.log(r.code === 0 ? `Scheduled task '${TASK_NAME}' removed.` : `schtasks /delete: ${(r.stderr || r.stdout).trim()}`)
-}
-
-// ── Cross-platform scheduler dispatch ──
-export function installScheduler(opts: { load?: boolean } = {}): Promise<void> {
-  return IS_WINDOWS ? installScheduledTask(opts) : installLaunchAgent(opts)
-}
-export function uninstallScheduler(): Promise<void> {
-  return IS_WINDOWS ? uninstallScheduledTask() : uninstallLaunchAgent()
-}
-export async function printSchedulerStatus(): Promise<void> {
-  if (IS_WINDOWS) {
-    const r = await runCommand('schtasks', ['/query', '/tn', TASK_NAME, '/v', '/fo', 'LIST'], 10000)
-    process.stdout.write(r.stdout || r.stderr || `Task '${TASK_NAME}' not found.\n`)
-    return
-  }
-  const r = await runCommand('launchctl', ['print', `gui/${process.getuid?.()}/${LAUNCH_AGENT_LABEL}`], 10000)
-  process.stdout.write(r.stdout || r.stderr)
-}
-
 // ────────────────────────────────────────────────────────────────────────────
 // Browse / debug commands
 // ────────────────────────────────────────────────────────────────────────────
@@ -2601,13 +1484,9 @@ export async function removeImportedSource(config: Config, path: string): Promis
 
 export async function forgetRecording(needle: string): Promise<void> {
   const config = getConfig()
-  // Under the run lock: `vn run` holds the state file in memory for the length
-  // of a batch and re-saves after every job, so an unlocked delete here would be
-  // silently resurrected by the next save.
   const lock = await acquireRunLock()
   if (!lock) { console.error('A voicenote run is in progress, so the state file is busy. Re-run this once it finishes (`vn jobs` shows what it is working on).'); process.exitCode = 1; return }
   try {
-    await migrateStateOnDisk(config)
     const store = await loadState(config)
     let removed = 0
     for (const [id, entry] of Object.entries(store.jobs)) {
@@ -2626,7 +1505,6 @@ export async function retryRecording(id: string): Promise<void> {
   const lock = await acquireRunLock()
   if (!lock) throw new Error('A voicenote run is in progress. Retry once it finishes.')
   try {
-    await migrateStateOnDisk(config)
     const store = await loadState(config)
     const entry = store.jobs[id]
     if (!entry) throw new Error('Recording no longer exists in the processing list.')
@@ -2642,7 +1520,6 @@ export async function ignoreJob(id: string): Promise<void> {
   const lock = await acquireRunLock()
   if (!lock) throw new Error('A voicenote run is in progress. Try again once it finishes.')
   try {
-    await migrateStateOnDisk(config)
     const store = await loadState(config)
     const entry = store.jobs[id]
     if (!entry) throw new Error('Recording no longer exists in the processing list.')
@@ -2658,7 +1535,6 @@ export async function regenerateNotes(id: string): Promise<void> {
   const lock = await acquireRunLock()
   if (!lock) throw new Error('A voicenote run is in progress. Regenerate once it finishes.')
   try {
-    await migrateStateOnDisk(config)
     const store = await loadState(config)
     const entry = store.jobs[id]
     if (!entry) throw new Error('Recording no longer exists in the processing list.')
@@ -2811,71 +1687,6 @@ export async function upgradeSelf(): Promise<void> {
 // Doctor
 // ────────────────────────────────────────────────────────────────────────────
 
-// Read up to the last `maxBytes` of a (possibly large, ever-appending) log file
-// without slurping the whole thing — used to surface the agent's latest activity.
-function readLogTail(path: string, maxBytes: number): string {
-  try {
-    const size = statSync(path).size
-    const start = Math.max(0, size - maxBytes)
-    const len = size - start
-    const fd = openSync(path, 'r')
-    try {
-      const buf = Buffer.alloc(len)
-      readSync(fd, buf, 0, len, start)
-      return buf.toString('utf8')
-    } finally { closeSync(fd) }
-  } catch { return '' }
-}
-
-// Where the background agent's latest activity lands. mac: launchd redirects
-// the agent's stdout to launchd.out.log. Windows: Task Scheduler redirects
-// nothing — the agent's own daily rolling log is the only mirror of its
-// output. wireDailyLog captures the log path once at process start, so a run
-// spanning midnight keeps writing to its START day's file; pick the
-// most-recently-modified dated log rather than today's by name, or a
-// still-running cross-midnight job would look idle on the dashboard.
-function agentLogPath(): string {
-  if (!IS_WINDOWS) return join(LOG_DIR, 'launchd.out.log')
-  try {
-    const dated = readdirSync(LOG_DIR)
-      .filter(f => /^\d{4}-\d{2}-\d{2}\.log$/.test(f))
-      .map(f => join(LOG_DIR, f))
-    let newest: string | null = null
-    let newestMs = -Infinity
-    for (const p of dated) {
-      const ms = statSync(p).mtimeMs
-      if (ms > newestMs) { newestMs = ms; newest = p }
-    }
-    return newest ?? dailyLogPath()
-  } catch { return dailyLogPath() }
-}
-
-// Is the background scheduler installed at all (any version)? Cheaper cousin
-// of schedulerIsCurrent(), used for the dashboard's installed/not-installed
-// pill — mac checks the plist file, Windows must ask schtasks (there is no
-// file whose existence tracks task registration).
-async function schedulerInstalledAtAll(): Promise<boolean> {
-  if (IS_WINDOWS) return (await runCommand('schtasks', ['/query', '/tn', TASK_NAME], 10000)).code === 0
-  return existsSync(plistPath())
-}
-
-// Background agent snapshot for the dashboard (LaunchAgent / Scheduled Task).
-async function agentStatus() {
-  const logFile = agentLogPath()
-  let logTail: string[] = []
-  let logAt: string | null = null
-  if (existsSync(logFile)) {
-    try { logAt = statSync(logFile).mtime.toISOString() } catch {}
-    logTail = readLogTail(logFile, 16384).split('\n').map(s => s.trim()).filter(Boolean).slice(-8)
-  }
-  // `scheduler` points at the on-disk scheduler entry for `vn doctor` to show.
-  // mac: the plist IS the registration (its existence == installed). Windows:
-  // the task XML is only the staging file we wrote; registration lives in Task
-  // Scheduler (queried by `installed`), so the XML may lag reality — it's an
-  // inspection aid, not proof of registration.
-  return { installed: await schedulerInstalledAtAll(), scheduler: IS_WINDOWS ? taskXmlPath() : plistPath(), logAt, logTail }
-}
-
 /** pi's version as installed with this package, or null when it cannot load. */
 async function piPackageVersion(): Promise<string | null> {
   try {
@@ -3000,21 +1811,4 @@ export async function doctor(opts: { json?: boolean } = {}): Promise<void> {
   console.log(`speakers.known=${s.identity.knownCount}`)
   console.log(`scheduler=${s.agent.scheduler}`)
   console.log(`ffprobe=${s.deps.ffprobe ? 'ok' : 'missing'}`)
-}
-
-// Is the background scheduler installed and pointing at this binary?
-async function schedulerIsCurrent(): Promise<boolean> {
-  const exe = process.execPath
-  if (IS_WINDOWS) {
-    if ((await runCommand('schtasks', ['/query', '/tn', TASK_NAME], 10000)).code !== 0) return false
-    // The task XML points at wscript; the actual CLI path lives in the VBS.
-    try { return readFileSync(taskVbsPath(), 'utf16le').includes(exe) } catch { return false }
-  }
-  try { return readFileSync(plistPath(), 'utf8').includes(exe) } catch { return false }
-}
-
-export async function ensureScheduler(force: boolean): Promise<{ ok: true; skipped?: boolean }> {
-  if (!force && await schedulerIsCurrent()) return { ok: true, skipped: true }
-  await installScheduler({ load: true })
-  return { ok: true }
 }

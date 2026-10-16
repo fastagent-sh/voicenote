@@ -256,50 +256,6 @@ export function reconcileInterrupted(jobs: Record<string, JobRecord>, now: strin
 }
 
 /**
- * Convert the pre-0.18 layout (two reason-keyed buckets) to the one-map form.
- * Pure so the one irreversible step in this codebase is testable: `error:*`
- * entries are dropped, and they never come back.
- */
-export function migrateLegacyState(raw: Record<string, any>, now: string): StateFile {
-  const jobs: Record<string, JobRecord> = {}
-  const nameOf = (path: string, id: string) => String(path || id).split(/[/\\]/).pop()!
-  const recordedAt = (name: string, fallback: string | undefined): string => {
-    const m = name.match(/(20\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/)
-    if (m) return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}`
-    const d = fallback ? new Date(fallback) : null
-    return d && !Number.isNaN(+d) ? localIso(d) : '1970-01-01T00:00:00'
-  }
-  for (const [id, e] of Object.entries<any>(raw.processed_source_ids ?? {})) {
-    const name = nameOf(e.source_path, id)
-    jobs[id] = {
-      name, source_path: e.source_path ?? '', recorded_at: recordedAt(name, e.processed_at),
-      size_bytes: e.size_bytes ?? 0, duration_seconds: e.duration_seconds ?? null,
-      state: e.status === SUMMARY_FAILED_STATUS ? 'error' : 'done',
-      code: e.status === SUMMARY_FAILED_STATUS ? 'summary_failed' : null,
-      detail: e.status === SUMMARY_FAILED_STATUS ? 'Summary failed before 0.18; the saved transcript will be reused' : null,
-      attempts: 0, updated_at: e.processed_at ?? now,
-      title: e.title ?? null, paths: e.final_paths ?? e.local_paths ?? null,
-    }
-  }
-  for (const [id, e] of Object.entries<any>(raw.skipped_source_ids ?? {})) {
-    const reason = String(e.reason ?? '')
-    // `error:*` entries were scan artifacts, not jobs — overwhelmingly ENOENT
-    // from a recorder unplugged mid-run. Dropping them re-queues whatever is
-    // still on the device and forgets the rest.
-    if (reason.startsWith('error')) continue
-    const code = reason.split(':')[0] as JobCode
-    const name = nameOf(e.source_path, id)
-    jobs[id] = {
-      name, source_path: e.source_path ?? '', recorded_at: recordedAt(name, e.seen_at),
-      size_bytes: e.size_bytes ?? 0, duration_seconds: e.duration_seconds ?? null,
-      state: 'filtered', code, detail: reason.slice((code ?? '').length + 1) || null,
-      attempts: 0, updated_at: e.seen_at ?? now, title: null, paths: null,
-    }
-  }
-  return { version: 2, jobs }
-}
-
-/**
  * Drop records the scan no longer sees. A queued/filtered/error record whose
  * file is gone was a scan artifact, not a job — keeping them is how 127 dead
  * entries accumulated. Records that produced output are history and stay.
