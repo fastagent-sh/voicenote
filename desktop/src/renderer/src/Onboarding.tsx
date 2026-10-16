@@ -21,6 +21,7 @@ export function Onboarding({ status, onDone, onRefresh }: {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [pendingApiKey, setPendingApiKey] = useState<{ providerId: string; key: string } | null>(null)
+  const [providerConfigured, setProviderConfigured] = useState(false)
 
   useEffect(() => {
     void vn.configGet().then(config => {
@@ -31,7 +32,7 @@ export function Onboarding({ status, onDone, onRefresh }: {
     })
   }, [])
 
-  const hasAuth = !!status?.pi.auth || Boolean(pendingApiKey?.key)
+  const hasAuth = providerConfigured || Boolean(pendingApiKey?.key)
   const hasKey = asrKey.trim().length > 0
 
   const save = async () => {
@@ -71,6 +72,7 @@ export function Onboarding({ status, onDone, onRefresh }: {
             currentModel={model}
             onModelChange={m => setModel(m)}
             onStatusChange={onRefresh}
+            onConfiguredChange={setProviderConfigured}
             onPendingKeyChange={(providerId, key) => setPendingApiKey(key ? { providerId, key } : null)}
           />
         </section>

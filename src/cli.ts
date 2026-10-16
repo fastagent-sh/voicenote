@@ -114,7 +114,7 @@ cli.command('login [provider]', 'Sign in to a provider (default: openai-codex / 
       try {
         await loginPiProvider(providerId, opts)
       } catch (e: any) {
-        if (!opts.json) console.error(`\n${e?.message || e}`)
+        if (!opts.json) console.error(e?.message || e)
         process.exitCode = 1
       }
       return

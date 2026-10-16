@@ -1,12 +1,10 @@
-import { chmod, mkdir, unlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, writeFile } from 'node:fs/promises'
 import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, statSync, unlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { spawn } from 'node:child_process'
 import os from 'node:os'
 import {
   CONFIG_DIR,
-  CONFIG_ENV_PATH,
   configFileEnv,
   getConfig,
   IS_WINDOWS,

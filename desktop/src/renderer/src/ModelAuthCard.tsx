@@ -8,6 +8,7 @@ export interface ModelAuthCardProps {
   onStatusChange?: () => void
   onPendingKeyChange?: (providerId: string, key: string) => void
   onAuthRemoved?: (providerId: string, envKeys: string[]) => void
+  onConfiguredChange?: (configured: boolean) => void
 }
 
 export function ModelAuthCard({
@@ -17,6 +18,7 @@ export function ModelAuthCard({
   onStatusChange,
   onPendingKeyChange,
   onAuthRemoved,
+  onConfiguredChange,
 }: ModelAuthCardProps) {
   const [providerStatuses, setProviderStatuses] = useState<ProviderInfo[]>([])
   const [selectedProviderId, setSelectedProviderId] = useState<string>('openai-codex')
@@ -103,6 +105,10 @@ export function ModelAuthCard({
     id: `${currentProviderId}/${m.id}`,
     label: m.name,
   }))
+
+  useEffect(() => {
+    onConfiguredChange?.(isConfigured)
+  }, [currentProviderId, isConfigured])
 
   useEffect(() => {
     if (currentStatus?.authType === 'api_key' || (currentProviderMeta.hasApiKey && !currentProviderMeta.hasOAuth)) {
