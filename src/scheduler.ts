@@ -11,18 +11,17 @@ import {
   getConfig,
   IS_WINDOWS,
   loadConfigJson,
+  LOG_DIR,
+  dailyLogPath,
+  readLogTail,
   STATE_DIR,
   writeConfigJson,
   type Config,
 } from './config.ts'
+import { pad } from './time.ts'
 
 export const LAUNCH_AGENT_LABEL = 'sh.fastagent.voicenote'
 export const TASK_NAME = 'VoiceNote'
-export const LOG_DIR = join(STATE_DIR, 'logs')
-
-function pad(n: number): string {
-  return String(n).padStart(2, '0')
-}
 
 export function runCommand(command: string, args: string[], timeoutMs = 20000): Promise<{ stdout: string; stderr: string; code: number }> {
   return new Promise((res) => {
@@ -243,25 +242,6 @@ export async function printSchedulerStatus(): Promise<void> {
 export async function schedulerInstalledAtAll(): Promise<boolean> {
   if (IS_WINDOWS) return (await runCommand('schtasks', ['/query', '/tn', TASK_NAME], 10000)).code === 0
   return existsSync(plistPath())
-}
-
-export function readLogTail(path: string, maxBytes: number): string {
-  try {
-    const size = statSync(path).size
-    if (size <= 0) return ''
-    const start = Math.max(0, size - maxBytes)
-    const fd = openSync(path, 'r')
-    try {
-      const buf = Buffer.alloc(size - start)
-      readSync(fd, buf, 0, buf.length, start)
-      return buf.toString('utf8')
-    } finally { closeSync(fd) }
-  } catch { return '' }
-}
-
-export function dailyLogPath(): string {
-  const d = new Date()
-  return join(LOG_DIR, `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.log`)
 }
 
 export function agentLogPath(): string {

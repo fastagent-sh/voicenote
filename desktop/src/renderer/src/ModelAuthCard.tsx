@@ -44,11 +44,14 @@ export function ModelAuthCard({
 
   useEffect(() => {
     void loadProviderStatuses()
+  }, [])
+
+  useEffect(() => {
     if (currentModel) {
       const prov = currentModel.split('/')[0]
       if (prov) setSelectedProviderId(prov)
     }
-  }, [])
+  }, [currentModel])
 
   useEffect(() => {
     return vn.on('login:event', (event: LoginEvent) => {
@@ -84,7 +87,9 @@ export function ModelAuthCard({
     })
   }, [])
 
-  const isCustomProvider = manualModel
+  const isCustomProvider = manualModel || Boolean(
+    currentModel && providerStatuses.length > 0 && !providerStatuses.some(p => p.models.some(m => `${p.id}/${m.id}` === currentModel))
+  )
   const currentProviderId = isCustomProvider
     ? (currentModel.split('/')[0] || selectedProviderId)
     : (currentModel ? currentModel.split('/')[0] || selectedProviderId : selectedProviderId)
@@ -170,6 +175,7 @@ export function ModelAuthCard({
       await vn.piLoginOAuth(currentProviderId)
     } catch (e: any) {
       setOauthError(e.message || String(e))
+    } finally {
       setOauthPending(false)
       setOauthStatusText(null)
     }

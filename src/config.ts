@@ -1,5 +1,5 @@
 import { mkdir, rename, writeFile } from 'node:fs/promises'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, openSync, readSync, closeSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import os from 'node:os'
@@ -20,6 +20,28 @@ export function appStateDir(): string {
 export const CONFIG_DIR = appConfigDir()
 export const STATE_DIR = appStateDir()
 export const CONFIG_ENV_PATH = join(CONFIG_DIR, 'config.json')
+export const LOG_DIR = join(STATE_DIR, 'logs')
+
+export function dailyLogPath(): string {
+  const d = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return join(LOG_DIR, `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.log`)
+}
+
+export function readLogTail(path: string, maxBytes: number): string {
+  try {
+    const size = statSync(path).size
+    if (size <= 0) return ''
+    const start = Math.max(0, size - maxBytes)
+    const len = size - start
+    const fd = openSync(path, 'r')
+    try {
+      const buf = Buffer.alloc(len)
+      readSync(fd, buf, 0, len, start)
+      return buf.toString('utf8')
+    } finally { closeSync(fd) }
+  } catch { return '' }
+}
 
 export type SpeakerSelf = { name: string | null; aliases: string[] }
 export type SpeakerKnown = { name: string; aliases: string[]; relationship?: string | null }

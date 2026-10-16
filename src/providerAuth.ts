@@ -40,20 +40,11 @@ async function openPath(target: string, timeoutMs = 5000): Promise<{ stdout: str
   const IS_MAC = process.platform === 'darwin'
   const command = IS_MAC ? 'open' : IS_WINDOWS ? 'cmd.exe' : 'xdg-open'
   const args = IS_WINDOWS ? ['/c', 'start', '""', target] : [target]
-  return new Promise((resolve, reject) => {
-    const proc = spawn(command, args, { stdio: 'ignore' })
-    const timer = setTimeout(() => {
-      proc.kill()
-      reject(new Error(`openPath timed out after ${timeoutMs}ms: ${target}`))
-    }, timeoutMs)
-    proc.on('error', (err) => {
-      clearTimeout(timer)
-      reject(err)
-    })
-    proc.on('close', (code) => {
-      clearTimeout(timer)
-      resolve({ stdout: '', stderr: '', code: code ?? 0 })
-    })
+  return new Promise((resolve) => {
+    const proc = spawn(command, args, { stdio: 'ignore', windowsHide: true })
+    const timer = setTimeout(() => { proc.kill(); resolve({ stdout: '', stderr: 'timeout', code: 1 }) }, timeoutMs)
+    proc.on('error', (err) => { clearTimeout(timer); resolve({ stdout: '', stderr: String(err), code: 1 }) })
+    proc.on('close', (code) => { clearTimeout(timer); resolve({ stdout: '', stderr: '', code: code ?? 0 }) })
   })
 }
 

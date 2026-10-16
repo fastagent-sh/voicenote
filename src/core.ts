@@ -11,7 +11,7 @@ import { parseSummaryJson } from './summaryJson.ts'
 import { emitPipelineEvent } from './progress.ts'
 import { applyOutcome, buildJobsView, classify, emptyState, ignoreRecording, localIso, MAX_ATTEMPTS, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, requeueForRegenerate, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs.ts'
 import {
-  appConfigDir, appStateDir, CONFIG_DIR, STATE_DIR, CONFIG_ENV_PATH,
+  appConfigDir, appStateDir, CONFIG_DIR, STATE_DIR, CONFIG_ENV_PATH, LOG_DIR,
   IS_WINDOWS, IS_MAC, ENV_KEYS, VOLCANO_NO_PROXY_HOSTS,
   type Config, type VolcanoConfig, type PiConfig, type SpeakersConfig, type SpeakerSelf, type SpeakerKnown,
   type Settings, type ConfigSetPayload,
@@ -19,7 +19,9 @@ import {
   getConfig, resetConfigCache, configGetData, configSetData, configGet, configSet,
   macProxyFromScutil, windowsProxyFromRegistry, systemProxyUrl, proxyEnv,
   volcanoFrom, volcanoAuthHeaders, settingNumber, normalizeSpeakers, DEFAULT_SPEAKERS,
+  dailyLogPath, readLogTail,
 } from './config.ts'
+import { formatElapsed, formatSeconds, pad, withHeartbeat } from './time.ts'
 export {
   getConfig, resetConfigCache, configGetData, configSetData, configGet, configSet,
   macProxyFromScutil, windowsProxyFromRegistry,
@@ -68,7 +70,7 @@ export {
 }
 import {
   installScheduler, uninstallScheduler, printSchedulerStatus, ensureScheduler,
-  agentStatus, runCommand, readLogTail, dailyLogPath, plistPath, TASK_NAME,
+  agentStatus, runCommand, plistPath, TASK_NAME,
 } from './scheduler.ts'
 export {
   installScheduler, uninstallScheduler, printSchedulerStatus, ensureScheduler,
@@ -76,7 +78,6 @@ export {
 
 import { createHash, randomUUID } from 'node:crypto'
 
-const LOG_DIR = join(STATE_DIR, 'logs')
 const LOCK_PATH = join(STATE_DIR, 'run.lock')
 
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.wma', '.aac', '.flac'])
@@ -104,7 +105,6 @@ type LocalFiles = {
 }
 
 function nowIso(): string { return new Date().toISOString() }
-function pad(n: number): string { return String(n).padStart(2, '0') }
 
 function dateParts(d: Date): { month: string; prefix: string } {
   const month = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`
@@ -116,14 +116,6 @@ function dateParts(d: Date): { month: string; prefix: string } {
 function safeSlug(text: string, maxLen = 48): string {
   const cleaned = (text || '').trim().replace(/[\\/:*?"<>|\n\r\t]+/g, '-').replace(/\s+/g, '-').replace(/^-+|-+$/g, '')
   return cleaned.slice(0, maxLen).replace(/-+$/g, '') || 'note'
-}
-
-function formatSeconds(seconds: number | null | undefined): string {
-  const total = Math.max(0, Math.round(seconds || 0))
-  const h = Math.floor(total / 3600)
-  const m = Math.floor((total % 3600) / 60)
-  const s = total % 60
-  return h ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -199,40 +191,12 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`
 }
 
-function formatElapsed(ms: number): string {
-  const total = Math.max(0, Math.round(ms / 1000))
-  const h = Math.floor(total / 3600)
-  const m = Math.floor((total % 3600) / 60)
-  const s = total % 60
-  if (h) return `${h}h ${m}m ${s}s`
-  if (m) return `${m}m ${s}s`
-  return `${s}s`
-}
-
 function progressStep(step: number, total: number, title: string, detail?: string): void {
   console.log(`▶ Step ${step}/${total}: ${title}${detail ? ` — ${detail}` : ''}`)
   // Single hook for live progress: the dashboard shows the same string the log
   // does, instead of regex-guessing the step from log text.
   reportStep(title)
   emitPipelineEvent({ type: 'job_step', step: title })
-}
-
-async function withHeartbeat<T>(label: string, work: () => Promise<T>, heartbeatSeconds = 60): Promise<T> {
-  const started = Date.now()
-  const timer = setInterval(() => {
-    console.log(`… Still working: ${label} (${formatElapsed(Date.now() - started)} elapsed)`)
-  }, Math.max(10, heartbeatSeconds) * 1000)
-  ;(timer as any).unref?.()
-  try {
-    const result = await work()
-    console.log(`✓ Done: ${label} (${formatElapsed(Date.now() - started)})`)
-    return result
-  } catch (e) {
-    console.error(`✗ Failed: ${label} after ${formatElapsed(Date.now() - started)}`)
-    throw e
-  } finally {
-    clearInterval(timer)
-  }
 }
 
 function shouldLogIdleStatus(key: string, intervalMs = 30 * 60 * 1000): boolean {
