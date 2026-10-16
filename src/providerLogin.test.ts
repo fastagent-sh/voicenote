@@ -8,7 +8,9 @@ async function runLogin(input: 'answer' | 'eof' | 'abort' | 'failure' | 'device'
   const home = await mkdtemp(join(tmpdir(), 'vn-provider-login-'))
   const bin = join(home, 'bin')
   await mkdir(bin)
-  await writeFile(join(bin, 'open'), '#!/bin/sh\nprintf "%s\\n" "$1" >> "$HOME/opened-urls"\n', { mode: 0o700 })
+  const opener = '#!/bin/sh\nprintf "%s\\n" "$1" >> "$HOME/opened-urls"\n'
+  await writeFile(join(bin, 'open'), opener, { mode: 0o700 })
+  await writeFile(join(bin, 'xdg-open'), opener, { mode: 0o700 })
   const script = `
 const { ModelRuntime } = await import('@earendil-works/pi-coding-agent')
 const runtime = await ModelRuntime.create({ authPath: process.env.PI_CODING_AGENT_DIR + '/auth.json', modelsPath: null })
