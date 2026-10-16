@@ -31,6 +31,16 @@ describe('parseSummaryJson', () => {
     expect(parseSummaryJson(reply)).toEqual({ title: 't', markdown: '# item\\_one and \\*bold\\* and \\[bracket\\]' })
   })
 
+  test('repairs truncated JSON output where string and object were cut off mid-sentence', () => {
+    const reply = '{"title":"AI Native","markdown":"# Header\\n\\nSome very long text cut off without closing quote'
+    expect(parseSummaryJson(reply)).toEqual({ title: 'AI Native', markdown: '# Header\n\nSome very long text cut off without closing quote' })
+  })
+
+  test('repairs unclosed code fence with truncated JSON', () => {
+    const reply = '```json\n{"title":"AI Native","markdown":"# Header\\n\\nText...'
+    expect(parseSummaryJson(reply)).toEqual({ title: 'AI Native', markdown: '# Header\n\nText...' })
+  })
+
   test('still reports the original error when the reply is not JSON at all', () => {
     expect(() => parseSummaryJson('sorry, I cannot help with that')).toThrow()
   })

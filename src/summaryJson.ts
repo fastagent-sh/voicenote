@@ -6,7 +6,7 @@
 export function extractFirstJsonObject(text: string): string {
   const raw = text.trim()
   // Models often wrap JSON in a ```json fence; strip it before looking inside.
-  const trimmed = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```\s*$/i)?.[1]?.trim() ?? raw
+  const trimmed = raw.match(/^```(?:json)?\s*([\s\S]*?)(?:```\s*)?$/i)?.[1]?.trim() ?? raw
   if (trimmed.startsWith('{') && trimmed.endsWith('}')) return trimmed
   // Find the first balanced {...}
   let depth = 0, start = -1, inString = false, escape = false
@@ -22,6 +22,7 @@ export function extractFirstJsonObject(text: string): string {
     if (ch === '{') { if (depth === 0) start = i; depth++ }
     else if (ch === '}') { depth--; if (depth === 0 && start !== -1) return trimmed.slice(start, i + 1) }
   }
+  if (start !== -1) return trimmed.slice(start)
   return trimmed
 }
 
@@ -30,11 +31,12 @@ export function extractFirstJsonObject(text: string): string {
  * characters JSON forbids raw are touched, and only inside strings, so valid
  * JSON passes through unchanged.
  */
-function escapeControlCharsInStrings(text: string): string {
+export function escapeControlCharsInStrings(text: string): string {
   const ESCAPES: Record<string, string> = { '\n': '\\n', '\r': '\\r', '\t': '\\t' }
   let out = ''
   let inString = false
   let escaped = false
+  const stack: string[] = []
   for (let i = 0; i < text.length; i++) {
     const ch = text[i]!
     if (inString) {
@@ -59,9 +61,16 @@ function escapeControlCharsInStrings(text: string): string {
       out += ch
     } else {
       if (ch === '"') inString = true
+      else if (ch === '{') stack.push('}')
+      else if (ch === '[') stack.push(']')
+      else if (ch === '}' || ch === ']') {
+        if (stack.length && stack[stack.length - 1] === ch) stack.pop()
+      }
       out += ch
     }
   }
+  if (inString) out += '"'
+  while (stack.length) out += stack.pop()
   return out
 }
 
@@ -70,11 +79,7 @@ export function parseSummaryJson(text: string): unknown {
   const jsonText = extractFirstJsonObject(text) || '{}'
   try {
     return JSON.parse(jsonText)
-  } catch (first) {
-    try {
-      return JSON.parse(escapeControlCharsInStrings(jsonText))
-    } catch {
-      throw first
-    }
+  } catch {
+    return JSON.parse(escapeControlCharsInStrings(jsonText))
   }
 }
