@@ -101,6 +101,7 @@
       ]
     },
     "nsis": {
+      "artifactName": "VoiceNote-Setup-${version}.${ext}",
       "oneClick": true,
       "perMachine": false,
       "allowToChangeInstallationDirectory": false
