@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { vn, type LoginEvent, type Status } from './api.ts'
+import { vn, type Status } from './api.ts'
+import { ModelAuthCard } from './ModelAuthCard.tsx'
 
 /**
  * Shown until the app can actually do its job: sign in, a transcription key,
@@ -13,24 +14,21 @@ export function Onboarding({ status, onDone, onRefresh }: {
   onDone: () => void
   onRefresh: () => void
 }) {
+  const [model, setModel] = useState('')
   const [asrKey, setAsrKey] = useState('')
   const [workspace, setWorkspace] = useState('')
   const [recordDir, setRecordDir] = useState('')
   const [saving, setSaving] = useState(false)
-  const [loginState, setLoginState] = useState<'idle' | 'waiting' | 'failed'>('idle')
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     void vn.configGet().then(config => {
+      setModel(config.env.VOICENOTE_PI_MODEL ?? '')
       setAsrKey(config.env.VOLCANO_ASR_KEY ?? '')
       setWorkspace(config.env.VOICENOTE_WORKSPACE ?? '')
       setRecordDir(config.env.VOICENOTE_RECORD_DIR ?? '')
     })
-    return vn.on('login:event', (event: LoginEvent) => {
-      if (event.event === 'success') { setLoginState('idle'); onRefresh() }
-      if (event.event === 'error') { setLoginState('failed'); setError(event.message) }
-    })
-  }, [onRefresh])
+  }, [])
 
   const signedIn = !!status?.pi.auth
   const hasKey = asrKey.trim().length > 0
@@ -44,6 +42,7 @@ export function Onboarding({ status, onDone, onRefresh }: {
           VOLCANO_ASR_KEY: asrKey.trim(),
           VOICENOTE_WORKSPACE: workspace.trim(),
           VOICENOTE_RECORD_DIR: recordDir.trim(),
+          ...(model ? { VOICENOTE_PI_MODEL: model } : {}),
         },
       })
       onRefresh()
@@ -63,15 +62,13 @@ export function Onboarding({ status, onDone, onRefresh }: {
 
         <section>
           <h3><span className={signedIn ? 'step-dot done' : 'step-dot'}>1</span> 配置纪要模型 (ChatGPT / DeepSeek 等)</h3>
-          <p className="hint">纪要由 AI 模型生成。支持 ChatGPT 账号授权登录，或在设置中配置 DeepSeek 等模型的 API Key。</p>
-          <div className="sheet-row">
-            <span>{signedIn ? '已配置认证' : loginState === 'waiting' ? '已打开浏览器，授权后自动继续…' : '未配置'}</span>
-            <div className="row-actions">
-              <button className={signedIn ? '' : 'primary'} onClick={() => { setLoginState('waiting'); void vn.login() }}>
-                {signedIn ? '重新登录 ChatGPT' : '登录 ChatGPT'}
-              </button>
-            </div>
-          </div>
+          <p className="hint">纪要由 AI 模型生成。支持 ChatGPT 账号授权登录，或配置 DeepSeek 等模型的 API Key。</p>
+          <ModelAuthCard
+            currentModel={model}
+            onModelChange={m => setModel(m)}
+            onStatusChange={onRefresh}
+            compact
+          />
         </section>
 
         <section>
