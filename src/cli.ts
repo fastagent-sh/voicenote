@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // The `vn` command: argument parsing on top of core.ts, nothing else.
 import { cac } from 'cac'
+import { createPiRuntime, providerLoginMethods } from './piRuntime.ts'
 import {
   VERSION,
   configGet, configSet, doctor, ensureScheduler, forgetRecording, getConfig, importRecording,
@@ -61,16 +62,14 @@ cli.command('doctor', 'Check environment')
   .action((opts: { json?: boolean }) => doctor(opts))
 cli.command('login [provider]', 'Sign in to a provider (default: openai-codex / ChatGPT OAuth, or deepseek, openai, anthropic, etc.)')
   .option('--json', 'Emit machine-readable JSON events (for the GUI client)')
-  .option('--device-code', 'Use the device-code flow instead of the browser callback (OpenAI Codex only)')
   .option('--api-key [key]', 'Set or prompt for an API key instead of OAuth')
-  .action(async (provider: string | undefined, opts: { json?: boolean; deviceCode?: boolean; apiKey?: string | boolean }) => {
+  .action(async (provider: string | undefined, opts: { json?: boolean; apiKey?: string | boolean }) => {
     const providerId = provider || 'openai-codex'
     if (providerId === 'openai-codex' && !opts.apiKey) {
       return loginChatGPT(opts)
     }
-    const { ModelRuntime } = await import('@earendil-works/pi-coding-agent')
     const config = getConfig()
-    const runtime = await ModelRuntime.create({ authPath: config.pi.authPath })
+    const { runtime } = await createPiRuntime(config.pi.agentDir, config.childEnv)
     const p = runtime.getProvider(providerId)
     if (!p) {
       console.error(`Unknown provider '${providerId}'.`)
@@ -78,9 +77,10 @@ cli.command('login [provider]', 'Sign in to a provider (default: openai-codex / 
       return
     }
 
-    const wantApiKey = Boolean(opts.apiKey) || (!p.auth.oauth?.login && Boolean(p.auth.apiKey))
+    const { hasApiKey, hasOAuth } = providerLoginMethods(p)
+    const wantApiKey = Boolean(opts.apiKey) || (!hasOAuth && hasApiKey)
     if (wantApiKey) {
-      if (!p.auth.apiKey) {
+      if (!hasApiKey) {
         console.error(`Provider '${providerId}' does not support API key authentication.`)
         process.exitCode = 1
         return
@@ -105,7 +105,7 @@ cli.command('login [provider]', 'Sign in to a provider (default: openai-codex / 
       return
     }
 
-    if (p.auth.oauth?.login) {
+    if (hasOAuth) {
       return loginPiProvider(providerId, opts)
     }
     console.error(`Provider '${providerId}' does not support interactive login.`)

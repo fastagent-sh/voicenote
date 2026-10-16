@@ -1,3 +1,5 @@
+import type { LoginPromptView } from '../../../../src/loginInteraction.ts'
+
 /** The preload bridge, typed for the renderer. */
 export type Status = {
   version: string
@@ -58,9 +60,12 @@ export type ProviderInfo = {
   name: string
   configured: boolean
   source?: string
+  authType?: 'api_key' | 'oauth'
   hasApiKey: boolean
   hasOAuth: boolean
   models: ModelInfo[]
+  defaultModelId?: string
+  envKeys: string[]
   apiKey?: string
 }
 
@@ -72,8 +77,9 @@ export type PipelineEvent =
   | { type: 'note_delta'; delta: string }
   | { type: 'note_tool'; name: string }
 export type LoginEvent =
+  | { event: 'prompt'; id: number; prompt: LoginPromptView }
+  | { event: 'prompt_closed'; id: number }
   | { event: 'auth_url'; url: string }
-  | { event: 'device_code'; userCode: string; verificationUri: string }
   | { event: 'progress'; message: string }
   | { event: 'success'; provider: string }
   | { event: 'error'; message: string }
@@ -102,6 +108,8 @@ type Api = {
   piSetApiKey: (providerId: string, apiKey: string) => Promise<{ ok: true }>
   piRemoveAuth: (providerId: string) => Promise<{ ok: true }>
   piLoginOAuth: (providerId: string) => Promise<{ ok: true }>
+  piLoginAnswer: (id: number, value: string) => Promise<void>
+  piLoginCancel: () => Promise<void>
   openPath: (path: string) => Promise<string>
   revealPath: (path: string) => Promise<void>
   readNote: (path: string) => Promise<string>

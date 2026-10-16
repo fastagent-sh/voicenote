@@ -36,6 +36,13 @@ describe('buildAuthorizeUrl', () => {
 // attempt (or another Codex client) holding one must not sink the flow. Both
 // halves are local: no code reaches the token endpoint.
 describe('browser flow callback', () => {
+  it('cancels a pending browser login and releases the callback port', async () => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const controller = new AbortController()
+      const login = loginWithBrowser(() => controller.abort(new Error('Login cancelled')), controller.signal)
+      await expect(login).rejects.toThrow('Login cancelled')
+    }
+  })
   it('falls back to 1457 and rejects a state that does not match', async () => {
     const squatter = createServer()
     await new Promise<void>(resolve => squatter.listen(1455, '127.0.0.1', resolve))

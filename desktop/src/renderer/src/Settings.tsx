@@ -10,121 +10,6 @@ const FIELDS: { key: string; label: string; hint?: string }[] = [
   { key: 'LOCAL_PROXY_PORT', label: '代理端口' },
 ]
 
-type ProviderPreset = {
-  id: string
-  name: string
-  models: { id: string; label: string }[]
-  hasApiKey: boolean
-  hasOAuth: boolean
-  oauthLabel?: string
-}
-
-const PROVIDER_RECOMMENDED_MODELS: Record<string, string> = {
-  deepseek: 'deepseek/deepseek-flash',
-  'openai-codex': 'openai-codex/gpt-6.1-sol',
-  openai: 'openai/gpt-4o',
-  anthropic: 'anthropic/claude-sonnet-5-5',
-  'kimi-coding': 'kimi-coding/kimi-for-coding',
-  minimax: 'minimax/MiniMax-Text-01',
-  'qwen-token-plan-cn': 'qwen-token-plan-cn/qwen3.6-plus',
-  openrouter: 'openrouter/deepseek/deepseek-chat',
-}
-
-const PROVIDERS: ProviderPreset[] = [
-  {
-    id: 'deepseek',
-    name: 'DeepSeek',
-    hasApiKey: true,
-    hasOAuth: false,
-    models: [
-      { id: 'deepseek/deepseek-flash', label: 'DeepSeek V4.1 Flash (推荐)' },
-      { id: 'deepseek/deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
-      { id: 'deepseek/deepseek-chat', label: 'DeepSeek-V3 (deepseek-chat)' },
-      { id: 'deepseek/deepseek-reasoner', label: 'DeepSeek-R1 (deepseek-reasoner 深度思考)' },
-    ],
-  },
-  {
-    id: 'openai-codex',
-    name: 'ChatGPT (Plus/Pro 账号)',
-    hasApiKey: false,
-    hasOAuth: true,
-    oauthLabel: 'ChatGPT 账号授权',
-    models: [
-      { id: 'openai-codex/gpt-6.1-sol', label: 'GPT-6.1 Sol (最新推荐)' },
-      { id: 'openai-codex/gpt-6-sol', label: 'GPT-6 Sol' },
-      { id: 'openai-codex/gpt-5.6-sol', label: 'GPT-5.6 Sol' },
-      { id: 'openai-codex/gpt-5.5', label: 'GPT-5.5' },
-      { id: 'openai-codex/gpt-5.3-codex-spark', label: 'GPT-5.3 Codex Spark' },
-    ],
-  },
-  {
-    id: 'openai',
-    name: 'OpenAI (API Key)',
-    hasApiKey: true,
-    hasOAuth: false,
-    models: [
-      { id: 'openai/gpt-4o', label: 'GPT-4o (推荐)' },
-      { id: 'openai/gpt-4.1', label: 'GPT-4.1' },
-      { id: 'openai/o3-mini', label: 'o3-mini' },
-      { id: 'openai/gpt-4o-mini', label: 'GPT-4o-mini' },
-    ],
-  },
-  {
-    id: 'anthropic',
-    name: 'Claude (Anthropic)',
-    hasApiKey: true,
-    hasOAuth: true,
-    oauthLabel: 'Claude 订阅授权 (Pro/Max)',
-    models: [
-      { id: 'anthropic/claude-sonnet-5-5', label: 'Claude Sonnet 5.5 (最新最优推荐)' },
-      { id: 'anthropic/claude-3-7-sonnet', label: 'Claude 3.7 Sonnet' },
-      { id: 'anthropic/claude-3-5-sonnet', label: 'Claude 3.5 Sonnet' },
-    ],
-  },
-  {
-    id: 'kimi-coding',
-    name: 'Kimi For Coding',
-    hasApiKey: true,
-    hasOAuth: true,
-    oauthLabel: 'Kimi 账号授权',
-    models: [
-      { id: 'kimi-coding/kimi-for-coding', label: 'kimi-for-coding' },
-      { id: 'kimi-coding/k3', label: 'Kimi K3' },
-    ],
-  },
-  {
-    id: 'minimax',
-    name: 'MiniMax',
-    hasApiKey: true,
-    hasOAuth: false,
-    models: [
-      { id: 'minimax/MiniMax-Text-01', label: 'MiniMax-Text-01' },
-      { id: 'minimax/MiniMax-M2.7', label: 'MiniMax-M2.7' },
-    ],
-  },
-  {
-    id: 'qwen-token-plan-cn',
-    name: '通义千问 (Qwen)',
-    hasApiKey: true,
-    hasOAuth: false,
-    models: [
-      { id: 'qwen-token-plan-cn/qwen3.6-plus', label: 'Qwen 3.6 Plus' },
-      { id: 'qwen-token-plan-cn/deepseek-v3.2', label: 'DeepSeek V3.2' },
-    ],
-  },
-  {
-    id: 'openrouter',
-    name: 'OpenRouter',
-    hasApiKey: true,
-    hasOAuth: true,
-    oauthLabel: 'OpenRouter 授权',
-    models: [
-      { id: 'openrouter/deepseek/deepseek-chat', label: 'DeepSeek V3 (via OpenRouter)' },
-      { id: 'openrouter/auto', label: 'Auto Router' },
-    ],
-  },
-]
-
 export function Settings({ status, onClose, onLogin: _onLogin }: { status: Status | null; onClose: () => void; onLogin: () => void }) {
   const [env, setEnv] = useState<Record<string, string>>({})
   const [self, setSelf] = useState<{ name: string | null; aliases: string[] }>({ name: null, aliases: [] })
@@ -135,33 +20,44 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
   const [providerStatuses, setProviderStatuses] = useState<ProviderInfo[]>([])
   const [apiKeyInput, setApiKeyInput] = useState('')
   const [editingKey, setEditingKey] = useState(false)
+  const [manualModel, setManualModel] = useState(false)
   const [keySaving, setKeySaving] = useState(false)
 
   const [authMethodChoice, setAuthMethodChoice] = useState<'oauth' | 'api_key'>('oauth')
   const [oauthPending, setOauthPending] = useState(false)
   const [oauthStatusText, setOauthStatusText] = useState<string | null>(null)
+  const [loginPrompt, setLoginPrompt] = useState<Extract<LoginEvent, { event: 'prompt' }> | null>(null)
+  const [loginAnswer, setLoginAnswer] = useState('')
 
   const loadProviderStatuses = async () => {
     try {
       const list = await vn.piProviders()
       setProviderStatuses(list)
-    } catch { /* ignore */ }
+    } catch (error) {
+      setMessage(`无法加载认证状态: ${String(error)}`)
+    }
   }
 
   useEffect(() => {
-    void vn.configGet().then(config => {
+    void Promise.all([vn.configGet(), vn.piProviders()]).then(([config, providers]) => {
       setEnv(config.env)
       setSelf(config.self)
-    })
-    void vn.updateState().then(state => setVersion(state.version))
-    void loadProviderStatuses()
+      setProviderStatuses(providers)
+      const model = config.env.VOICENOTE_PI_MODEL ?? ''
+      setManualModel(Boolean(model) && !providers.some(p => p.models.some(m => `${p.id}/${m.id}` === model)))
+    }).catch(error => setMessage(`无法加载设置: ${String(error)}`))
+    void vn.updateState().then(state => setVersion(state.version)).catch(error => setMessage(String(error)))
 
     return vn.on('login:event', (event: LoginEvent) => {
       if (event.event === 'auth_url') {
         setOauthStatusText('已打开浏览器，请在网页中完成授权…')
       }
-      if (event.event === 'device_code') {
-        setOauthStatusText(`设备授权码: ${event.userCode}，已打开验证页面`)
+      if (event.event === 'prompt') {
+        setLoginPrompt(event)
+        setLoginAnswer(event.prompt.type === 'select' ? event.prompt.options[0]?.id ?? '' : '')
+      }
+      if (event.event === 'prompt_closed') {
+        setLoginPrompt(current => current?.id === event.id ? null : current)
       }
       if (event.event === 'progress') {
         setOauthStatusText(event.message)
@@ -181,68 +77,37 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
   const currentModel = env.VOICENOTE_PI_MODEL ?? ''
   const currentProviderId = (currentModel ? currentModel.split('/')[0] : 'openai-codex') || 'openai-codex'
 
-  const matchedPreset = PROVIDERS.find(p => p.id === currentProviderId)
-  const isCustomProvider = !matchedPreset && currentModel !== ''
-
+  const isCustomProvider = manualModel
   const currentStatus = providerStatuses.find(p => p.id === currentProviderId)
   const isConfigured = currentStatus?.configured ?? false
-
-  const currentProviderMeta = matchedPreset ?? {
-    id: currentProviderId,
-    name: currentStatus?.name ?? currentProviderId,
-    hasApiKey: currentStatus?.hasApiKey ?? true,
-    hasOAuth: currentStatus?.hasOAuth ?? false,
-    models: [],
+  const currentProviderMeta = currentStatus ?? {
+    name: currentProviderId, hasApiKey: false, hasOAuth: false,
   }
-
-  // Dynamically populate models from pi-ai catalog, falling back to presets
-  const dynamicModels = (currentStatus?.models ?? []).map(m => ({
+  const availableModels = (currentStatus?.models ?? []).map(m => ({
     id: `${currentProviderId}/${m.id}`,
     label: m.name,
   }))
-  const fallbackModels = matchedPreset ? matchedPreset.models.map(m => ({ ...m })) : []
-  const availableModels = dynamicModels.length > 0 ? dynamicModels : fallbackModels
-
-  // Put recommended/optimal model at the top
-  const bestModelId = PROVIDER_RECOMMENDED_MODELS[currentProviderId]
-  if (bestModelId) {
-    const idx = availableModels.findIndex(m => m.id === bestModelId)
-    if (idx > 0) {
-      const best = availableModels[idx]
-      if (best) {
-        availableModels.splice(idx, 1)
-        availableModels.unshift(best)
-      }
-    }
-  }
-
-  // Ensure currentModel is always present in options if set
-  if (currentModel && !availableModels.some(m => m.id === currentModel)) {
-    availableModels.unshift({ id: currentModel, label: currentModel })
-  }
 
   useEffect(() => {
-    if (currentStatus?.apiKey || (currentProviderMeta.hasApiKey && !currentProviderMeta.hasOAuth)) {
+    if (currentStatus?.authType === 'api_key' || (currentProviderMeta.hasApiKey && !currentProviderMeta.hasOAuth)) {
       setAuthMethodChoice('api_key')
     } else if (isConfigured && currentProviderMeta.hasOAuth) {
       setAuthMethodChoice('oauth')
     }
-  }, [currentProviderId, currentStatus?.configured, currentStatus?.apiKey])
+  }, [currentProviderId, currentStatus?.configured, currentStatus?.authType])
 
   const handleProviderChange = (newProviderId: string) => {
     setEditingKey(false)
     setApiKeyInput('')
-    if (newProviderId === 'custom') {
-      setEnv({ ...env, VOICENOTE_PI_MODEL: 'custom/model-id' })
+    setManualModel(newProviderId === 'custom')
+    if (newProviderId === 'custom') return
+    const targetStatus = providerStatuses.find(p => p.id === newProviderId)
+    if (!targetStatus?.defaultModelId) {
+      setMessage('该服务商暂无可选纪要模型，请先在 models.json 中配置。')
       return
     }
-    const targetStatus = providerStatuses.find(p => p.id === newProviderId)
-    const targetPreset = PROVIDERS.find(p => p.id === newProviderId)
-    const bestModel = PROVIDER_RECOMMENDED_MODELS[newProviderId]
-      || targetPreset?.models[0]?.id
-      || `${newProviderId}/default`
-    setEnv({ ...env, VOICENOTE_PI_MODEL: bestModel })
-    if (targetStatus?.apiKey || (targetPreset?.hasApiKey && !targetPreset.hasOAuth)) {
+    setEnv({ ...env, VOICENOTE_PI_MODEL: `${newProviderId}/${targetStatus.defaultModelId}` })
+    if (targetStatus.authType === 'api_key' || !targetStatus.hasOAuth) {
       setAuthMethodChoice('api_key')
     } else {
       setAuthMethodChoice('oauth')
@@ -272,9 +137,42 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
   const handleRemoveAuth = async (targetProviderId = currentProviderId) => {
     try {
       await vn.piRemoveAuth(targetProviderId)
-      await loadProviderStatuses()
     } catch (e: any) {
-      setMessage(`清除失败: ${e.message}`)
+      setMessage(`清除凭据: ${e.message}`)
+    }
+    try {
+      const config = await vn.configGet()
+      const keys = providerStatuses.find(p => p.id === targetProviderId)?.envKeys ?? []
+      setEnv(current => {
+        const next = { ...current }
+        for (const key of keys) {
+          if (Object.hasOwn(config.env, key)) next[key] = config.env[key]!
+          else delete next[key]
+        }
+        return next
+      })
+      setApiKeyInput('')
+      setEditingKey(false)
+      await loadProviderStatuses()
+    } catch (error) {
+      setMessage(`无法刷新设置: ${String(error)}`)
+    }
+  }
+
+  const submitLoginAnswer = async () => {
+    if (!loginPrompt) return
+    try {
+      await vn.piLoginAnswer(loginPrompt.id, loginAnswer)
+    } catch (error) {
+      setMessage(String(error))
+    }
+  }
+
+  const cancelLogin = async () => {
+    try {
+      await vn.piLoginCancel()
+    } catch (error) {
+      setMessage(String(error))
     }
   }
 
@@ -285,14 +183,16 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
       await vn.piLoginOAuth(currentProviderId)
     } catch (e: any) {
       setMessage(`登录失败: ${e.message}`)
+    } finally {
       setOauthPending(false)
+      setLoginPrompt(null)
     }
   }
 
   const save = async () => {
     setSaving(true)
     try {
-      if (apiKeyInput.trim()) {
+      if (editingKey && apiKeyInput.trim()) {
         await vn.piSetApiKey(currentProviderId, apiKeyInput.trim())
         setApiKeyInput('')
         setEditingKey(false)
@@ -313,8 +213,8 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
       <header className="titlebar">
         <div className="brand">设置</div>
         <div className="grow" />
-        <button onClick={onClose}>返回</button>
-        <button className="primary" onClick={() => void save()} disabled={saving}>保存</button>
+        <button onClick={onClose} disabled={oauthPending}>返回</button>
+        <button className="primary" onClick={() => void save()} disabled={saving || keySaving || oauthPending}>保存</button>
       </header>
 
       <main className="sheet">
@@ -328,18 +228,12 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
             <select
               value={isCustomProvider ? 'custom' : currentProviderId}
               onChange={e => handleProviderChange(e.target.value)}
+              disabled={oauthPending}
             >
-              <optgroup label="常用服务商">
-                {PROVIDERS.slice(0, 4).map(p => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-              </optgroup>
-              <optgroup label="更多服务商">
-                {PROVIDERS.slice(4).map(p => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-                <option value="custom">自定义模型 (手动输入)…</option>
-              </optgroup>
+              {providerStatuses.map(p => (
+                <option key={p.id} value={p.id} disabled={!p.models.length}>{p.name}</option>
+              ))}
+              <option value="custom">手动输入模型标识…</option>
             </select>
           </label>
 
@@ -348,7 +242,7 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
               <span>模型标识 (provider/id)</span>
               <input
                 value={currentModel}
-                placeholder="例如 ollama/qwen2.5 或 openai/gpt-4o"
+                placeholder="例如 ollama/qwen2.5；目录外模型需先在 models.json 配置"
                 onChange={e => setEnv({ ...env, VOICENOTE_PI_MODEL: e.target.value.trim() })}
               />
             </label>
@@ -360,7 +254,7 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
                 onChange={e => handleModelChange(e.target.value)}
               >
                 {!currentModel && (
-                  <option value="">使用引擎默认推荐 ({availableModels[0]?.label ?? '默认'})</option>
+                  <option value="">使用引擎默认模型</option>
                 )}
                 {availableModels.map(m => (
                   <option key={m.id} value={m.id}>{m.label}</option>
@@ -372,8 +266,8 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
           {/* Authentication area for selected provider */}
           <div style={{ borderTop: '1px solid var(--line)', marginTop: 12, paddingTop: 12 }}>
             {(() => {
-              const isOAuthConfigured = isConfigured && !currentStatus?.apiKey
-              const isApiKeyConfigured = Boolean(currentStatus?.apiKey) || (currentStatus?.source === 'environment')
+              const isOAuthConfigured = currentStatus?.authType === 'oauth'
+              const isApiKeyConfigured = currentStatus?.authType === 'api_key'
               const currentTabConfigured = authMethodChoice === 'api_key'
                 ? isApiKeyConfigured
                 : (currentProviderMeta.hasOAuth ? isOAuthConfigured : isConfigured)
@@ -429,19 +323,19 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
                             autoFocus={editingKey}
                             placeholder={`输入 ${currentProviderMeta.name} API Key (例如 sk-...)`}
                             value={apiKeyInput}
-                            onChange={e => setApiKeyInput(e.target.value)}
+                            onChange={e => { setEditingKey(true); setApiKeyInput(e.target.value) }}
                             onKeyDown={e => { if (e.key === 'Enter') void handleSaveKey() }}
                           />
                           <button
                             className="primary"
                             style={{ flex: 'none', whiteSpace: 'nowrap' }}
                             onClick={() => void handleSaveKey()}
-                            disabled={keySaving || !apiKeyInput.trim()}
+                            disabled={saving || keySaving || !apiKeyInput.trim()}
                           >
                             {keySaving ? '保存中…' : '保存 Key'}
                           </button>
                           {editingKey && (
-                            <button style={{ flex: 'none' }} onClick={() => setEditingKey(false)}>
+                            <button style={{ flex: 'none' }} onClick={() => { setEditingKey(false); setApiKeyInput('') }}>
                               取消
                             </button>
                           )}
@@ -476,8 +370,23 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
                       {oauthPending && (
                         <div className="oauth-pending-box" style={{ marginTop: 8 }}>
                           <span className="pulse" />
-                          <span style={{ flex: 1 }}>{oauthStatusText || '已在浏览器打开登录页，请在网页中完成授权…'}</span>
-                          <button onClick={() => { setOauthPending(false); setOauthStatusText(null) }}>取消</button>
+                          <div style={{ flex: 1 }}>
+                            <p>{oauthStatusText || '请在浏览器中完成授权。'}</p>
+                            {loginPrompt && (
+                              <div>
+                                <p>{loginPrompt.prompt.message}</p>
+                                {loginPrompt.prompt.type === 'select' ? (
+                                  <select aria-label={loginPrompt.prompt.message} value={loginAnswer} onChange={e => setLoginAnswer(e.target.value)}>
+                                    {loginPrompt.prompt.options.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
+                                  </select>
+                                ) : (
+                                  <input aria-label={loginPrompt.prompt.message} value={loginAnswer} onChange={e => setLoginAnswer(e.target.value)} />
+                                )}
+                                <button onClick={() => void submitLoginAnswer()}>继续</button>
+                              </div>
+                            )}
+                          </div>
+                          <button onClick={() => void cancelLogin()}>取消</button>
                         </div>
                       )}
                     </div>

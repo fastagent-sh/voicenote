@@ -17,7 +17,7 @@ test.skipIf(process.platform === 'win32')('the version is found from any bundle 
     const nested = join(root, 'out', 'main')
     await mkdir(nested, { recursive: true })
     await cp(join(import.meta.dir, 'core.ts'), join(nested, 'core.ts'))
-    for (const file of ['jobs.ts', 'runLock.ts', 'chatgptAuth.ts', 'piAgent.ts', 'progress.ts', 'summaryJson.ts']) {
+    for (const file of ['jobs.ts', 'runLock.ts', 'chatgptAuth.ts', 'piAgent.ts', 'progress.ts', 'summaryJson.ts', 'loginInteraction.ts', 'piRuntime.ts']) {
       await cp(join(import.meta.dir, file), join(nested, file))
     }
     await writeFile(join(nested, 'probe.ts'), "import { VERSION } from './core.ts'\nconsole.log(VERSION)\n")
@@ -27,6 +27,7 @@ test.skipIf(process.platform === 'win32')('the version is found from any bundle 
       timeout: 30_000,
       env: { ...process.env, HOME: root },
     })
+    expect(result.status, result.stderr || String(result.error ?? '')).toBe(0)
     expect(result.stdout.trim()).toBe('9.9.9')
   } finally {
     await rm(root, { recursive: true, force: true })

@@ -6,7 +6,7 @@
 // The import is dynamic because loading the SDK costs ~1s and pulls in every
 // provider client; commands that never summarize (scan, jobs, doctor) must not
 // pay for it.
-import { join } from 'node:path'
+import { createPiRuntime } from './piRuntime.ts'
 
 /** Live signal from a running agent turn, for a progress UI. */
 export type AgentProgress =
@@ -16,6 +16,7 @@ export type AgentProgress =
 export type AgentRunOptions = {
   /** pi's config dir: auth.json and models.json live here. */
   agentDir: string
+  env?: Record<string, string>
   /** Working directory for read/grep. Also where relative tool paths resolve. */
   cwd: string
   /** "provider/id", e.g. "openai-codex/gpt-5.6-sol". Null = pi's own default. */
@@ -49,13 +50,10 @@ export async function installProxyFromEnv(): Promise<void> {
 /** Runs one prompt to completion and returns the assistant's text. */
 export async function runAgentPrompt(opts: AgentRunOptions): Promise<string> {
   await installProxyFromEnv()
-  const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager } =
+  const { createAgentSession, DefaultResourceLoader, SessionManager } =
     await import('@earendil-works/pi-coding-agent')
 
-  const modelRuntime = await ModelRuntime.create({
-    authPath: join(opts.agentDir, 'auth.json'),
-    modelsPath: join(opts.agentDir, 'models.json'),
-  })
+  const { runtime: modelRuntime } = await createPiRuntime(opts.agentDir, opts.env)
   let model
   if (opts.model) {
     const slash = opts.model.indexOf('/')
@@ -63,33 +61,7 @@ export async function runAgentPrompt(opts: AgentRunOptions): Promise<string> {
     const providerId = opts.model.slice(0, slash)
     const modelId = opts.model.slice(slash + 1)
     model = modelRuntime.getModel(providerId, modelId)
-    if (!model && modelRuntime.getProvider(providerId)) {
-      const existing = modelRuntime.getModels(providerId).map(m => ({
-        id: m.id,
-        name: m.name,
-        reasoning: (m as any).reasoning ?? false,
-        input: m.input,
-        cost: m.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: m.contextWindow,
-        maxTokens: m.maxTokens,
-      }))
-      modelRuntime.registerProvider(providerId, {
-        models: [
-          ...existing,
-          {
-            id: modelId,
-            name: modelId,
-            reasoning: modelId.includes('reasoner') || modelId.includes('r1') || modelId.includes('o1') || modelId.includes('o3'),
-            input: ['text'],
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            contextWindow: 128000,
-            maxTokens: 16384,
-          },
-        ],
-      })
-      model = modelRuntime.getModel(providerId, modelId)
-    }
-    if (!model) throw new Error(`Unknown model '${opts.model}'. Check the provider/id spelling, or clear VOICENOTE_PI_MODEL to use pi's default.`)
+    if (!model) throw new Error(`Unknown model '${opts.model}'. Select a model from the catalog or define it explicitly in models.json.`)
   }
 
   // Everything discoverable is switched off: this is a fixed pipeline step, so

@@ -1,95 +1,57 @@
 import { expect, test } from 'bun:test'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { getPiAuthProviders, isPiAuthConfigured, removePiAuth, resetConfigCache, setPiApiKey } from './core.ts'
+import { dirname, join } from 'node:path'
+import { runAsync } from './testing/fakeModel.ts'
 
-test('pi auth: sets and removes API keys and reflects auth status', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'vn-pi-auth-test-'))
-  const authPath = join(dir, 'auth.json')
-  process.env.PI_CODING_AGENT_DIR = dir
-  resetConfigCache()
-
+async function checkAuth(script: string, env: Record<string, string> = {}) {
+  const home = await mkdtemp(join(tmpdir(), 'vn-pi-auth-'))
   try {
-    // Initially not configured for deepseek
-    expect(isPiAuthConfigured(authPath, 'deepseek/deepseek-flash')).toBe(false)
-
-    // Set deepseek api key
-    await setPiApiKey('deepseek', 'sk-test-deepseek-key-123')
-
-    const fileContent = JSON.parse(await readFile(authPath, 'utf8'))
-    expect(fileContent.deepseek).toEqual({
-      type: 'api_key',
-      key: 'sk-test-deepseek-key-123',
+    const run = await runAsync(process.execPath, ['--input-type=module', '-e', `
+const assert = (await import('node:assert/strict')).default
+const { readFile, mkdir, writeFile } = await import('node:fs/promises')
+const { getConfig, getPiAuthProviders, isPiAuthConfigured, removePiAuth, setPiApiKey } = await import('./src/core.ts')
+const authPath = getConfig().pi.authPath
+${script}
+console.log('verified')`], {
+      env: { HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home, PATH: dirname(process.execPath), SystemRoot: process.env.SystemRoot, ...env },
     })
-
-    // Now configured for deepseek model
-    expect(isPiAuthConfigured(authPath, 'deepseek/deepseek-flash')).toBe(true)
-
-    // Check providers list from ModelRuntime
-    const providers = await getPiAuthProviders()
-    const ds = providers.find(p => p.id === 'deepseek')
-    expect(ds).toBeDefined()
-    expect(ds?.configured).toBe(true)
-    expect(ds?.hasApiKey).toBe(true)
-    expect(ds?.models[0]?.id).toBe('deepseek-flash')
-    expect(ds?.apiKey).toBe('sk-test-deepseek-key-123')
-
-    // Remove auth
-    await removePiAuth('deepseek')
-    expect(isPiAuthConfigured(authPath, 'deepseek/deepseek-flash')).toBe(false)
-
-    const updatedFile = JSON.parse(await readFile(authPath, 'utf8'))
-    expect(updatedFile.deepseek).toBeUndefined()
+    expect(run.stderr).toBe('')
+    expect(run.status).toBe(0)
+    expect(run.stdout).toContain('verified')
   } finally {
-    delete process.env.PI_CODING_AGENT_DIR
-    resetConfigCache()
-    await rm(dir, { recursive: true, force: true })
+    await rm(home, { recursive: true, force: true })
   }
-})
+}
 
-test('pi auth: dynamically detects environment API keys without hardcoded provider whitelist', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'vn-pi-env-test-'))
-  const authPath = join(dir, 'auth.json')
-  process.env.PI_CODING_AGENT_DIR = dir
-  process.env.MINIMAX_API_KEY = 'test-minimax-key'
-  process.env.KIMI_API_KEY = 'test-kimi-key'
-  resetConfigCache()
+test('pi auth saves, displays and removes API keys', () => checkAuth(`
+assert.equal(await isPiAuthConfigured(authPath, 'deepseek/deepseek-flash'), false)
+await setPiApiKey('deepseek', 'test-key')
+assert.deepEqual(JSON.parse(await readFile(authPath, 'utf8')).deepseek, { type: 'api_key', key: 'test-key' })
+const ds = (await getPiAuthProviders()).find(p => p.id === 'deepseek')
+assert.equal(ds.configured, true)
+assert.equal(ds.apiKey, 'test-key')
+assert.equal(ds.models[0].id, 'deepseek-flash')
+await removePiAuth('deepseek')
+assert.equal(await isPiAuthConfigured(authPath, 'deepseek/deepseek-flash'), false)
+`))
 
-  try {
-    expect(isPiAuthConfigured(authPath, 'minimax/MiniMax-Text-01')).toBe(true)
-    expect(isPiAuthConfigured(authPath, 'kimi-coding/kimi-for-coding')).toBe(true)
-    expect(isPiAuthConfigured(authPath, 'openrouter/auto')).toBe(false)
-  } finally {
-    delete process.env.PI_CODING_AGENT_DIR
-    delete process.env.MINIMAX_API_KEY
-    delete process.env.KIMI_API_KEY
-    resetConfigCache()
-    await rm(dir, { recursive: true, force: true })
-  }
-})
+test('pi auth detects environment API keys with and without a selected model', () => checkAuth(`
+assert.equal(await isPiAuthConfigured(authPath, 'minimax/MiniMax-M2.7'), true)
+assert.equal(await isPiAuthConfigured(authPath, 'kimi-coding/kimi-for-coding'), true)
+assert.equal(await isPiAuthConfigured(authPath, null), true)
+assert.equal(await isPiAuthConfigured(authPath, 'openrouter/auto'), false)
+`, { MINIMAX_API_KEY: 'test-minimax', KIMI_API_KEY: 'test-kimi' }))
 
-test('pi auth: keeps openai and openai-codex independent', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'vn-pi-codex-test-'))
-  const authPath = join(dir, 'auth.json')
-  process.env.PI_CODING_AGENT_DIR = dir
-  resetConfigCache()
-
-  try {
-    await setPiApiKey('openai', 'sk-openai-test-key')
-    expect(isPiAuthConfigured(authPath, 'openai/gpt-4o')).toBe(true)
-    expect(isPiAuthConfigured(authPath, 'openai-codex/gpt-6.1-sol')).toBe(false)
-
-    const providers = await getPiAuthProviders()
-    const codex = providers.find(p => p.id === 'openai-codex')
-    const openai = providers.find(p => p.id === 'openai')
-    expect(codex).toBeDefined()
-    expect(openai).toBeDefined()
-    expect(openai?.configured).toBe(true)
-    expect(codex?.configured).toBe(false)
-  } finally {
-    delete process.env.PI_CODING_AGENT_DIR
-    resetConfigCache()
-    await rm(dir, { recursive: true, force: true })
-  }
-})
+test('pi auth keeps OpenAI and Codex credentials independent during removal', () => checkAuth(`
+await setPiApiKey('openai', 'test-openai')
+const data = JSON.parse(await readFile(authPath, 'utf8'))
+data['openai-codex'] = { type: 'oauth', access: 'test-access', refresh: 'test-refresh', expires: Date.now() + 3600000 }
+await writeFile(authPath, JSON.stringify(data))
+assert.equal(await isPiAuthConfigured(authPath, 'openai/gpt-4o'), true)
+await removePiAuth('openai')
+const saved = JSON.parse(await readFile(authPath, 'utf8'))
+assert.equal(saved.openai, undefined)
+assert.equal(saved['openai-codex'].access, 'test-access')
+assert.equal(await isPiAuthConfigured(authPath, 'openai/gpt-4o'), false)
+`))

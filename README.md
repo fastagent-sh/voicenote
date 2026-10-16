@@ -171,7 +171,7 @@ vn forget <id|filename>         # let a recording be processed again
 vn log                          # print today's log tail (--lines N / -f follow / --err include launchd.err / --date YYYY-MM-DD)
 vn errors                       # print recent ERROR logs
 vn import /path/to/audio.mp3    # copy one local recording into the durable manual-import queue
-vn login                        # sign in to ChatGPT for the notes backend (browser callback; `--device-code` for headless machines). No pi TUI needed
+vn login                        # sign in to ChatGPT through browser OAuth. No pi TUI or device-code setting needed
 vn upgrade                      # reinstall latest npm package
 vn install-launch-agent
 vn status

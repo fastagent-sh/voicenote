@@ -6,7 +6,7 @@ import { resolve } from 'node:path'
 // undici stay external so their runtime file lookups keep working.
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
+    plugins: [externalizeDepsPlugin({ include: ['@earendil-works/pi-ai'] })],
     build: { rollupOptions: { input: resolve(__dirname, 'src/main/index.ts') } },
   },
   preload: {

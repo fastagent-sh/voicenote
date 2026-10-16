@@ -14,6 +14,7 @@ import {
   removePiAuth, resetConfigCache, retryRecording, runPipeline, setPiApiKey, VERSION,
 } from '../../../src/core.ts'
 import { onPipelineEvent } from '../../../src/progress.ts'
+import { LoginPrompts } from '../../../src/loginInteraction.ts'
 
 const dirname = fileURLToPath(new URL('.', import.meta.url))
 // Tray art: template images (black + alpha) so macOS recolours them for the
@@ -141,7 +142,10 @@ function createWindow(): void {
     webPreferences: { preload: join(dirname, '../preload/index.mjs'), sandbox: false },
   })
   mainWindow.on('ready-to-show', () => mainWindow?.show())
-  mainWindow.on('closed', () => { mainWindow = null })
+  mainWindow.on('closed', () => {
+    activeLogin?.abort(new Error('Login cancelled: window closed'))
+    mainWindow = null
+  })
   mainWindow.webContents.setWindowOpenHandler(({ url }) => { void shell.openExternal(url); return { action: 'deny' } })
 
   if (process.env.ELECTRON_RENDERER_URL) void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
@@ -251,6 +255,28 @@ function setupUpdates(): void {
   setInterval(check, 6 * 60 * 60 * 1000)
 }
 
+let activeLogin: AbortController | null = null
+const loginPrompts = new LoginPrompts(event => broadcast('login:event', event))
+
+async function loginProvider(providerId: string): Promise<{ ok: true }> {
+  if (activeLogin) throw new Error('A login is already in progress. Cancel it before starting another.')
+  const controller = new AbortController()
+  activeLogin = controller
+  try {
+    await loginPiProvider(providerId, {
+      json: true,
+      signal: controller.signal,
+      emit: event => broadcast('login:event', event),
+      prompt: prompt => loginPrompts.ask(prompt, controller.signal)
+    })
+    resetConfigCache()
+    return { ok: true }
+  } finally {
+    controller.abort(new Error('Login finished'))
+    activeLogin = null
+  }
+}
+
 function registerIpc(): void {
   ipcMain.handle('update:state', () => ({ version: app.getVersion(), ready: updateReady, manual: manualUpdateOnly }))
   // Quitting for an update while a recording is being processed would lose
@@ -308,10 +334,9 @@ function registerIpc(): void {
     await importRecording(path, { json: true })
     return requestRun({ reason: 'manual' })
   })
-  ipcMain.handle('login', async (_e, providerId?: string) => {
-    await loginPiProvider(providerId || 'openai-codex', { json: true, emit: (event) => broadcast('login:event', event) })
-    resetConfigCache()
-  })
+  ipcMain.handle('login', (_e, providerId?: string) => loginProvider(providerId || 'openai-codex'))
+  ipcMain.handle('pi:login-answer', (_e, id: number, value: string) => loginPrompts.answer(id, value))
+  ipcMain.handle('pi:login-cancel', () => { activeLogin?.abort(new Error('Login cancelled')) })
   ipcMain.handle('pi:providers', () => getPiAuthProviders())
   ipcMain.handle('pi:set-api-key', async (_e, providerId: string, apiKey: string) => {
     await setPiApiKey(providerId, apiKey)
@@ -323,11 +348,7 @@ function registerIpc(): void {
     resetConfigCache()
     return { ok: true }
   })
-  ipcMain.handle('pi:login-oauth', async (_e, providerId: string) => {
-    await loginPiProvider(providerId, { json: true, emit: (event) => broadcast('login:event', event) })
-    resetConfigCache()
-    return { ok: true }
-  })
+  ipcMain.handle('pi:login-oauth', (_e, providerId: string) => loginProvider(providerId))
   ipcMain.handle('pending-retries', () => [...pendingRetries])
   ipcMain.handle('open-path', (_e, path: string) => shell.openPath(path))
   ipcMain.handle('note:read', (_e, path: string) => readFile(path, 'utf8'))
