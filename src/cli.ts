@@ -5,7 +5,7 @@ import { createPiRuntime, providerLoginMethods } from './piRuntime.ts'
 import {
   VERSION,
   configGet, configSet, doctor, ensureScheduler, forgetRecording, getConfig, importRecording,
-  installScheduler, jobsList, lastMeeting, listMeetings, loginChatGPT, loginPiProvider, openTarget,
+  installScheduler, jobsList, lastMeeting, listMeetings, loginPiProvider, openTarget,
   ignoreJob, printSchedulerStatus, regenerateNotes, retryRecording, runPipeline, setPiApiKey, showErrors, showLog,
   uninstallScheduler, upgradeSelf,
 } from './core.ts'
@@ -65,14 +65,12 @@ cli.command('login [provider]', 'Sign in to a provider (default: openai-codex / 
   .option('--api-key [key]', 'Set or prompt for an API key instead of OAuth')
   .action(async (provider: string | undefined, opts: { json?: boolean; apiKey?: string | boolean }) => {
     const providerId = provider || 'openai-codex'
-    if (providerId === 'openai-codex' && !opts.apiKey) {
-      return loginChatGPT(opts)
-    }
     const config = getConfig()
     const { runtime } = await createPiRuntime(config.pi.agentDir, config.childEnv)
     const p = runtime.getProvider(providerId)
     if (!p) {
-      console.error(`Unknown provider '${providerId}'.`)
+      if (opts.json) console.log(JSON.stringify({ event: 'error', message: `Unknown provider '${providerId}'.` }))
+      else console.error(`Unknown provider '${providerId}'.`)
       process.exitCode = 1
       return
     }
@@ -121,7 +119,8 @@ cli.command('login [provider]', 'Sign in to a provider (default: openai-codex / 
       }
       return
     }
-    console.error(`Provider '${providerId}' does not support interactive login.`)
+    if (opts.json) console.log(JSON.stringify({ event: 'error', message: `Provider '${providerId}' does not support interactive login.` }))
+    else console.error(`Provider '${providerId}' does not support interactive login.`)
     process.exitCode = 1
   })
 cli.command('config <action>', 'Read/write file-based config. action: get (print JSON) | set (write from stdin JSON)')
