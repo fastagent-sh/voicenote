@@ -22,8 +22,6 @@ import { runCommand } from './process.ts'
 export const LAUNCH_AGENT_LABEL = 'sh.fastagent.voicenote'
 export const TASK_NAME = 'VoiceNote'
 
-export { runCommand }
-
 export function readLogTail(path: string, maxBytes: number): string {
   try {
     const size = statSync(path).size

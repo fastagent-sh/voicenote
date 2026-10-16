@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import os from 'node:os'
+import { pad } from './time.ts'
 
 export const IS_WINDOWS = process.platform === 'win32'
 export const IS_MAC = process.platform === 'darwin'
@@ -24,7 +25,6 @@ export const LOG_DIR = join(STATE_DIR, 'logs')
 
 export function dailyLogPath(): string {
   const d = new Date()
-  const pad = (n: number) => String(n).padStart(2, '0')
   return join(LOG_DIR, `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.log`)
 }
 
