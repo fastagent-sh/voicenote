@@ -21,6 +21,7 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
   const [apiKeyInput, setApiKeyInput] = useState('')
   const [editingKey, setEditingKey] = useState(false)
   const [manualModel, setManualModel] = useState(false)
+  const [selectedProviderId, setSelectedProviderId] = useState<string>('openai-codex')
   const [keySaving, setKeySaving] = useState(false)
 
   const [authMethodChoice, setAuthMethodChoice] = useState<'oauth' | 'api_key'>('oauth')
@@ -45,6 +46,10 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
       setSelf(config.self)
       setProviderStatuses(providers)
       const model = config.env.VOICENOTE_PI_MODEL ?? ''
+      if (model) {
+        const prov = model.split('/')[0]
+        if (prov) setSelectedProviderId(prov)
+      }
       setManualModel(Boolean(model) && !providers.some(p => p.models.some(m => `${p.id}/${m.id}` === model)))
     }).catch(error => setMessage(`无法加载设置: ${String(error)}`))
     void vn.updateState().then(state => setVersion(state.version)).catch(error => setMessage(String(error)))
@@ -78,9 +83,10 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
   }, [])
 
   const currentModel = env.VOICENOTE_PI_MODEL ?? ''
-  const currentProviderId = (currentModel ? currentModel.split('/')[0] : 'openai-codex') || 'openai-codex'
-
   const isCustomProvider = manualModel
+  const currentProviderId = isCustomProvider
+    ? (currentModel.split('/')[0] || selectedProviderId)
+    : (currentModel ? currentModel.split('/')[0] || selectedProviderId : selectedProviderId)
   const currentStatus = providerStatuses.find(p => p.id === currentProviderId)
   const isConfigured = currentStatus?.configured ?? false
   const currentProviderMeta = currentStatus ?? {
@@ -107,6 +113,7 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
       setAuthMethodChoice('api_key')
       return
     }
+    setSelectedProviderId(newProviderId)
     const targetStatus = providerStatuses.find(p => p.id === newProviderId)
     if (!targetStatus?.defaultModelId) {
       setMessage('该服务商暂无可选纪要模型，请先在 models.json 中配置。')

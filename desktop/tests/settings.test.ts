@@ -73,6 +73,7 @@ app.whenReady().then(async () => {
  check(modelSelect.options.length === 2 && modelSelect.options[0].value === '', 'static models leaked into runtime catalog');
  change(modelSelect, ''); await tick();
  check(modelSelect.value === '', 'unable to select default engine model');
+ check(document.querySelector('select').value === 'minimax', 'selecting default model changed provider unexpectedly');
  change(document.querySelector('select'), 'custom'); await tick();
  check(!button('授权登录') && [...document.querySelectorAll('input')].some(e => e.placeholder.includes('API Key')), 'custom model must show API key input, not OAuth');
  let input = [...document.querySelectorAll('input')].find(e => e.placeholder.includes('ollama'));
