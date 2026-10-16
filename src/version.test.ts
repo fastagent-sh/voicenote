@@ -17,6 +17,7 @@ test.skipIf(process.platform === 'win32')('the version is found from any bundle 
     const nested = join(root, 'out', 'main')
     await mkdir(nested, { recursive: true })
     await cp(join(import.meta.dir, 'core.ts'), join(nested, 'core.ts'))
+    await cp(join(import.meta.dir, 'asr'), join(nested, 'asr'), { recursive: true })
     for (const file of ['config.ts', 'jobs.ts', 'runLock.ts', 'chatgptAuth.ts', 'piAgent.ts', 'progress.ts', 'summaryJson.ts', 'loginInteraction.ts', 'piRuntime.ts']) {
       await cp(join(import.meta.dir, file), join(nested, file))
     }
