@@ -66,9 +66,13 @@ export {
   loginChatGPT, loginOpenAICodexOAuth, isPiAuthConfigured,
   type PiModelItem, type PiProviderItem,
 }
-const LAUNCH_AGENT_LABEL = 'sh.fastagent.voicenote'
-const LAUNCH_AGENT_LABEL_LEGACY = 'com.kid7st.voicenote' // pre-fastagent installs; cleaned up on install
-const TASK_NAME = 'VoiceNote'   // Windows Task Scheduler name (mac uses LAUNCH_AGENT_LABEL)
+import {
+  installScheduler, uninstallScheduler, printSchedulerStatus, ensureScheduler,
+  agentStatus, runCommand, readLogTail, dailyLogPath, plistPath,
+} from './scheduler.ts'
+export {
+  installScheduler, uninstallScheduler, printSchedulerStatus, ensureScheduler,
+}
 
 import { createHash, randomUUID } from 'node:crypto'
 
@@ -159,11 +163,6 @@ const RAW_TRANSCRIPT_MARKER_LEGACY = '## 原始 transcript（不做 lossy 清洗
 // ────────────────────────────────────────────────────────────────────────────
 // Logging (rolling daily log)
 // ────────────────────────────────────────────────────────────────────────────
-
-function dailyLogPath(): string {
-  const d = new Date()
-  return join(LOG_DIR, `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.log`)
-}
 
 // Best-effort side effects (logging, idle-state) must not crash the pipeline, but
 // failures should still be observable. Write directly to stderr (not console.error,
@@ -381,18 +380,6 @@ function sourceIdFor(path: string, size: number, mtimeMs: number, digest: string
   // Manual imports are content-addressed: dropping the same audio again must
   // find its existing job even after the temporary inbox copy was removed.
   return imported ? `import:${digest}` : createHash('sha256').update(`${path}|${size}|${Math.floor(mtimeMs / 1000)}|${digest}`).digest('hex')
-}
-
-function runCommand(command: string, args: string[], timeoutMs = 20000): Promise<{ stdout: string; stderr: string; code: number }> {
-  return new Promise((res) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
-    let stdout = '', stderr = ''
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs)
-    child.stdout.on('data', d => stdout += String(d))
-    child.stderr.on('data', d => stderr += String(d))
-    child.on('close', code => { clearTimeout(timer); res({ stdout, stderr, code: code ?? 1 }) })
-    child.on('error', err => { clearTimeout(timer); res({ stdout, stderr: String(err), code: 1 }) })
-  })
 }
 
 // Cross-platform "reveal in file manager / open URL in default app".
@@ -1461,252 +1448,6 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
 // LaunchAgent
 // ────────────────────────────────────────────────────────────────────────────
 
-// Bun standalone executables embed source in a virtual FS, so import.meta.url is
-// NOT a real on-disk path: "/$bunfs/..." on mac/Linux, "B:\~BUN\root\..." on
-// Windows. Either marker means we're the compiled exe (run it directly via
-// process.execPath); otherwise we're bun + cli.ts on disk. NOTE: matching only
-// $bunfs (the old check) misfired on Windows and leaked the virtual path into the
-// scheduled task's arguments.
-function resolveCli(): { cliPath: string; compiled: boolean } {
-  const cliPath = fileURLToPath(import.meta.url)
-  return { cliPath, compiled: /\$bunfs|~BUN/i.test(cliPath) }
-}
-
-function plistPath(): string {
-  return join(os.homedir(), 'Library', 'LaunchAgents', `${LAUNCH_AGENT_LABEL}.plist`)
-}
-
-function xmlEscape(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;')
-}
-
-// Scheduled runs read all business settings from config.json. The plist only
-// carries a fixed PATH and desktop-bundled runtime paths that do not exist in
-// that file.
-async function launchAgentEnv(config: Config): Promise<Record<string, string>> {
-  const env: Record<string, string> = {
-    PATH: `${os.homedir()}/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
-  }
-  // Provenance matters here, so this reads the raw sources rather than Config:
-  // only a path that was handed to us through the environment (and that
-  // config.json does not already carry) has to be written into the plist. The
-  // notes model needs no entry at all — pi is a library call now.
-  const fileEnv = configFileEnv()
-  const ffprobe = process.env.VOICENOTE_FFPROBE_BIN
-  if (ffprobe && ffprobe !== fileEnv.VOICENOTE_FFPROBE_BIN) env.VOICENOTE_FFPROBE_BIN = ffprobe
-  return env
-}
-
-async function installLaunchAgent(opts: { load?: boolean } = {}): Promise<void> {
-  const { cliPath, compiled } = resolveCli()
-  const programArgs = compiled
-    ? [process.execPath, 'run']
-    : [existsSync('/opt/homebrew/bin/bun') ? '/opt/homebrew/bin/bun' : process.execPath, cliPath, 'run']
-  const programArgsXml = programArgs.map(a => `    <string>${xmlEscape(a)}</string>`).join('\n')
-  const plist = plistPath()
-  await mkdir(dirname(plist), { recursive: true })
-  await mkdir(LOG_DIR, { recursive: true })
-  const env = await launchAgentEnv(getConfig())
-  const envEntries = Object.entries(env)
-    .map(([k, v]) => `    <key>${xmlEscape(k)}</key>\n    <string>${xmlEscape(v)}</string>`).join('\n')
-  const content = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${LAUNCH_AGENT_LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-${programArgsXml}
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>StartInterval</key>
-  <integer>60</integer>
-  <key>StandardOutPath</key>
-  <string>${LOG_DIR}/launchd.out.log</string>
-  <key>StandardErrorPath</key>
-  <string>${LOG_DIR}/launchd.err.log</string>
-  <key>WorkingDirectory</key>
-  <string>${os.homedir()}</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-${envEntries}
-  </dict>
-</dict>
-</plist>
-`
-  await writeFile(plist, content, 'utf8')
-  // Keep scheduler details private and tighten permissions on older plists.
-  await chmod(plist, 0o600)
-  const summary = Object.keys(env).join(', ')
-  console.log(`LaunchAgent written: ${plist}`)
-  console.log(`Embedded env keys: ${summary}`)
-  if (opts.load) {
-    const uid = process.getuid?.()
-    // Remove the legacy-label agent so old installs don't double-run vn.
-    const legacyPlist = join(os.homedir(), 'Library', 'LaunchAgents', `${LAUNCH_AGENT_LABEL_LEGACY}.plist`)
-    if (existsSync(legacyPlist)) {
-      await runCommand('launchctl', ['bootout', `gui/${uid}/${LAUNCH_AGENT_LABEL_LEGACY}`], 10000)
-      await unlink(legacyPlist).catch(e => warnSideEffect(`remove legacy LaunchAgent ${legacyPlist}`, e))
-    }
-    await runCommand('launchctl', ['bootout', `gui/${uid}`, plist], 10000) // ignore if not loaded
-    const r = await runCommand('launchctl', ['bootstrap', `gui/${uid}`, plist], 10000)
-    await runCommand('launchctl', ['enable', `gui/${uid}/${LAUNCH_AGENT_LABEL}`], 10000)
-    if (r.code === 0) console.log('LaunchAgent loaded (launchctl bootstrap).')
-    else console.error(`bootstrap exit ${r.code}: ${(r.stderr || r.stdout).trim().slice(0, 200)}`)
-  } else {
-    console.log(`Enable with: launchctl bootstrap gui/$(id -u) ${plist}`)
-  }
-}
-
-async function uninstallLaunchAgent(): Promise<void> {
-  await runCommand('launchctl', ['bootout', `gui/${process.getuid?.()}`, plistPath()], 10000)
-  console.log(`Bootout attempted: ${plistPath()}`)
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// Windows Task Scheduler (parallel to the mac LaunchAgent above)
-// ────────────────────────────────────────────────────────────────────────────
-
-function taskXmlPath(): string { return join(STATE_DIR, 'task.xml') }
-function taskVbsPath(): string { return join(STATE_DIR, 'run-hidden.vbs') }
-
-// Run via the interpreter currently executing us: process.execPath is the
-// absolute bun.exe (or the compiled vn.exe). Mirrors installLaunchAgent's
-// compiled-vs-script detection.
-function schedulerProgramArgs(): { command: string; argLine: string } {
-  const { cliPath, compiled } = resolveCli()
-  const args = compiled ? ['run'] : [cliPath, 'run']
-  const argLine = args.map(a => (/\s/.test(a) ? `"${a}"` : a)).join(' ')
-  return { command: process.execPath, argLine }
-}
-
-async function installScheduledTask(opts: { load?: boolean } = {}): Promise<void> {
-  await mkdir(STATE_DIR, { recursive: true })
-  await mkdir(LOG_DIR, { recursive: true })
-  // The task carries no env (Task Scheduler has no per-task env block), so an
-  // ffprobe path handed to us through the environment must be persisted to
-  // config.json, which `vn run` reads on startup. (On mac it rides in the
-  // LaunchAgent plist instead.)
-  const ffprobe = process.env.VOICENOTE_FFPROBE_BIN
-  if (ffprobe) {
-    await mkdir(CONFIG_DIR, { recursive: true })
-    const current = loadConfigJson()
-    current.VOICENOTE_FFPROBE_BIN = ffprobe
-    await writeConfigJson(current)
-  }
-  const { command, argLine } = schedulerProgramArgs()
-  // bun.exe / vn.exe are console-subsystem: an InteractiveToken task flashes a
-  // console window on every tick. Launch through wscript with window style 0
-  // (hidden). wait=True keeps wscript alive for the duration of `vn run` so
-  // IgnoreNew still prevents overlap, and WScript.Quit propagates vn's exit
-  // code so the task's Last Run Result stays meaningful. UTF-16 BOM so
-  // non-ASCII paths survive (wscript reads BOM-less files as ANSI).
-  const fullCmd = `"${command}" ${argLine}`
-  const vbs = `WScript.Quit CreateObject("WScript.Shell").Run("${fullCmd.replace(/"/g, '""')}", 0, True)\r\n`
-  await writeFile(taskVbsPath(), '\ufeff' + vbs, 'utf16le')
-  const wscript = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe')
-  // Register the task as the current user (DOMAIN\user; DOMAIN == machine name for
-  // local accounts). Without an explicit <UserId>, `schtasks /create /xml` can't tell
-  // who to register as and a standard (non-admin) user gets "Access is denied".
-  const taskUser = process.env.USERDOMAIN && process.env.USERNAME
-    ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}`
-    : (process.env.USERNAME || os.userInfo().username)
-  // Local-time StartBoundary for the TimeTrigger (Task Scheduler wants no zone).
-  const n = new Date()
-  const startBoundary = `${n.getFullYear()}-${pad(n.getMonth() + 1)}-${pad(n.getDate())}T${pad(n.getHours())}:${pad(n.getMinutes())}:${pad(n.getSeconds())}`
-  // The task just runs `vn run`; config comes from config.json (vn config set /
-  // the GUI), so unlike the mac plist there's no env to embed. A TimeTrigger that
-  // repeats every PT1M (mirrors the working `schtasks /sc minute /mo 1` form; a
-  // LogonTrigger gave "Access is denied" for standard users) + IgnoreNew is the
-  // StartInterval(60)+flock equivalent.
-  const xml = `<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Description>VoiceNote: watch the recorder and process new recordings.</Description>
-  </RegistrationInfo>
-  <Triggers>
-    <TimeTrigger>
-      <StartBoundary>${startBoundary}</StartBoundary>
-      <Enabled>true</Enabled>
-      <Repetition>
-        <Interval>PT1M</Interval>
-        <StopAtDurationEnd>false</StopAtDurationEnd>
-      </Repetition>
-    </TimeTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>${xmlEscape(taskUser)}</UserId>
-      <LogonType>InteractiveToken</LogonType>
-      <RunLevel>LeastPrivilege</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>${xmlEscape(wscript)}</Command>
-      <Arguments>${xmlEscape(`//B //Nologo "${taskVbsPath()}"`)}</Arguments>
-    </Exec>
-  </Actions>
-</Task>
-`
-  const xmlPath = taskXmlPath()
-  // schtasks /xml wants UTF-16; prepend a BOM so non-ASCII paths survive.
-  await writeFile(xmlPath, '\ufeff' + xml, 'utf16le')
-  const r = await runCommand('schtasks', ['/create', '/tn', TASK_NAME, '/xml', xmlPath, '/f'], 15000)
-  if (r.code !== 0) {
-    console.error(`schtasks /create failed (exit ${r.code}): ${(r.stderr || r.stdout).trim()}`)
-    process.exitCode = 1
-    return
-  }
-  console.log(`Scheduled task '${TASK_NAME}' installed — runs \`vn run\` every 60s at/after logon.`)
-  console.log(`Command: ${command} ${argLine} (launched hidden via wscript)`)
-  console.log('Note: the task reads config from config.json — set it with `vn config set` (or the GUI) so the background run is configured.')
-  if (opts.load) await runCommand('schtasks', ['/run', '/tn', TASK_NAME], 10000)
-}
-
-async function uninstallScheduledTask(): Promise<void> {
-  const r = await runCommand('schtasks', ['/delete', '/tn', TASK_NAME, '/f'], 10000)
-  // Remove our artifacts too: the VBS is the task's actual entry point, and a
-  // leftover copy could make schedulerIsCurrent misjudge a future install.
-  // Only when the task is actually gone — deleting the VBS while the task is
-  // still registered would turn every tick into a silent wscript failure.
-  if (r.code === 0) {
-    for (const p of [taskVbsPath(), taskXmlPath()]) {
-      try { unlinkSync(p) } catch (e: any) { if (e?.code !== 'ENOENT') warnSideEffect(`remove scheduler artifact ${p}`, e) }
-    }
-  }
-  console.log(r.code === 0 ? `Scheduled task '${TASK_NAME}' removed.` : `schtasks /delete: ${(r.stderr || r.stdout).trim()}`)
-}
-
-// ── Cross-platform scheduler dispatch ──
-export function installScheduler(opts: { load?: boolean } = {}): Promise<void> {
-  return IS_WINDOWS ? installScheduledTask(opts) : installLaunchAgent(opts)
-}
-export function uninstallScheduler(): Promise<void> {
-  return IS_WINDOWS ? uninstallScheduledTask() : uninstallLaunchAgent()
-}
-export async function printSchedulerStatus(): Promise<void> {
-  if (IS_WINDOWS) {
-    const r = await runCommand('schtasks', ['/query', '/tn', TASK_NAME, '/v', '/fo', 'LIST'], 10000)
-    process.stdout.write(r.stdout || r.stderr || `Task '${TASK_NAME}' not found.\n`)
-    return
-  }
-  const r = await runCommand('launchctl', ['print', `gui/${process.getuid?.()}/${LAUNCH_AGENT_LABEL}`], 10000)
-  process.stdout.write(r.stdout || r.stderr)
-}
-
 // ────────────────────────────────────────────────────────────────────────────
 // Browse / debug commands
 // ────────────────────────────────────────────────────────────────────────────
@@ -2065,71 +1806,6 @@ export async function upgradeSelf(): Promise<void> {
 // Doctor
 // ────────────────────────────────────────────────────────────────────────────
 
-// Read up to the last `maxBytes` of a (possibly large, ever-appending) log file
-// without slurping the whole thing — used to surface the agent's latest activity.
-function readLogTail(path: string, maxBytes: number): string {
-  try {
-    const size = statSync(path).size
-    const start = Math.max(0, size - maxBytes)
-    const len = size - start
-    const fd = openSync(path, 'r')
-    try {
-      const buf = Buffer.alloc(len)
-      readSync(fd, buf, 0, len, start)
-      return buf.toString('utf8')
-    } finally { closeSync(fd) }
-  } catch { return '' }
-}
-
-// Where the background agent's latest activity lands. mac: launchd redirects
-// the agent's stdout to launchd.out.log. Windows: Task Scheduler redirects
-// nothing — the agent's own daily rolling log is the only mirror of its
-// output. wireDailyLog captures the log path once at process start, so a run
-// spanning midnight keeps writing to its START day's file; pick the
-// most-recently-modified dated log rather than today's by name, or a
-// still-running cross-midnight job would look idle on the dashboard.
-function agentLogPath(): string {
-  if (!IS_WINDOWS) return join(LOG_DIR, 'launchd.out.log')
-  try {
-    const dated = readdirSync(LOG_DIR)
-      .filter(f => /^\d{4}-\d{2}-\d{2}\.log$/.test(f))
-      .map(f => join(LOG_DIR, f))
-    let newest: string | null = null
-    let newestMs = -Infinity
-    for (const p of dated) {
-      const ms = statSync(p).mtimeMs
-      if (ms > newestMs) { newestMs = ms; newest = p }
-    }
-    return newest ?? dailyLogPath()
-  } catch { return dailyLogPath() }
-}
-
-// Is the background scheduler installed at all (any version)? Cheaper cousin
-// of schedulerIsCurrent(), used for the dashboard's installed/not-installed
-// pill — mac checks the plist file, Windows must ask schtasks (there is no
-// file whose existence tracks task registration).
-async function schedulerInstalledAtAll(): Promise<boolean> {
-  if (IS_WINDOWS) return (await runCommand('schtasks', ['/query', '/tn', TASK_NAME], 10000)).code === 0
-  return existsSync(plistPath())
-}
-
-// Background agent snapshot for the dashboard (LaunchAgent / Scheduled Task).
-async function agentStatus() {
-  const logFile = agentLogPath()
-  let logTail: string[] = []
-  let logAt: string | null = null
-  if (existsSync(logFile)) {
-    try { logAt = statSync(logFile).mtime.toISOString() } catch {}
-    logTail = readLogTail(logFile, 16384).split('\n').map(s => s.trim()).filter(Boolean).slice(-8)
-  }
-  // `scheduler` points at the on-disk scheduler entry for `vn doctor` to show.
-  // mac: the plist IS the registration (its existence == installed). Windows:
-  // the task XML is only the staging file we wrote; registration lives in Task
-  // Scheduler (queried by `installed`), so the XML may lag reality — it's an
-  // inspection aid, not proof of registration.
-  return { installed: await schedulerInstalledAtAll(), scheduler: IS_WINDOWS ? taskXmlPath() : plistPath(), logAt, logTail }
-}
-
 /** pi's version as installed with this package, or null when it cannot load. */
 async function piPackageVersion(): Promise<string | null> {
   try {
@@ -2254,21 +1930,4 @@ export async function doctor(opts: { json?: boolean } = {}): Promise<void> {
   console.log(`speakers.known=${s.identity.knownCount}`)
   console.log(`scheduler=${s.agent.scheduler}`)
   console.log(`ffprobe=${s.deps.ffprobe ? 'ok' : 'missing'}`)
-}
-
-// Is the background scheduler installed and pointing at this binary?
-async function schedulerIsCurrent(): Promise<boolean> {
-  const exe = process.execPath
-  if (IS_WINDOWS) {
-    if ((await runCommand('schtasks', ['/query', '/tn', TASK_NAME], 10000)).code !== 0) return false
-    // The task XML points at wscript; the actual CLI path lives in the VBS.
-    try { return readFileSync(taskVbsPath(), 'utf16le').includes(exe) } catch { return false }
-  }
-  try { return readFileSync(plistPath(), 'utf8').includes(exe) } catch { return false }
-}
-
-export async function ensureScheduler(force: boolean): Promise<{ ok: true; skipped?: boolean }> {
-  if (!force && await schedulerIsCurrent()) return { ok: true, skipped: true }
-  await installScheduler({ load: true })
-  return { ok: true }
 }
