@@ -9,7 +9,7 @@ import { loginWithBrowser, PI_PROVIDER_ID } from './chatgptAuth.ts'
 import { installProxyFromEnv, runAgentPrompt } from './piAgent.ts'
 import { parseSummaryJson } from './summaryJson.ts'
 import { emitPipelineEvent } from './progress.ts'
-import { applyOutcome, buildJobsView, classify, emptyState, ignoreRecording, localIso, MAX_ATTEMPTS, migrateLegacyState, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, requeueForRegenerate, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs.ts'
+import { applyOutcome, buildJobsView, classify, emptyState, ignoreRecording, localIso, MAX_ATTEMPTS, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, requeueForRegenerate, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs.ts'
 import {
   appConfigDir, appStateDir, CONFIG_DIR, STATE_DIR, CONFIG_ENV_PATH,
   IS_WINDOWS, IS_MAC, ENV_KEYS, VOLCANO_NO_PROXY_HOSTS,
@@ -156,7 +156,6 @@ async function appendJsonl(path: string, data: any): Promise<void> {
 }
 
 const RAW_TRANSCRIPT_MARKER = '## Raw transcript (no lossy cleanup)\n\n'
-const RAW_TRANSCRIPT_MARKER_LEGACY = '## 原始 transcript（不做 lossy 清洗）\n\n' // pre-0.18 files on disk
 
 
 
@@ -605,9 +604,8 @@ function resumableTranscriptFiles(config: Config, rec: Recording, store: StateFi
 
 async function readSavedTranscript(path: string): Promise<string> {
   const markdown = await readFile(path, 'utf8')
-  const marker = [RAW_TRANSCRIPT_MARKER, RAW_TRANSCRIPT_MARKER_LEGACY].find(m => markdown.includes(m))
-  if (!marker) throw new Error(`Cannot resume summary: saved transcript is missing raw transcript marker: ${path}`)
-  const transcript = markdown.slice(markdown.indexOf(marker) + marker.length).trim()
+  if (!markdown.includes(RAW_TRANSCRIPT_MARKER)) throw new Error(`Cannot resume summary: saved transcript is missing raw transcript marker: ${path}`)
+  const transcript = markdown.slice(markdown.indexOf(RAW_TRANSCRIPT_MARKER) + RAW_TRANSCRIPT_MARKER.length).trim()
   if (!transcript) throw new Error(`Cannot resume summary: saved transcript is empty: ${path}`)
   return transcript
 }
@@ -1099,50 +1097,13 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
 // Job state — `vn run` is the only writer; every view is a pure read of this.
 // ────────────────────────────────────────────────────────────────────────────
 
-// Named for what it holds: every recording's job state, not just the processed
-// ones. (Pre-0.18 this was `processed.json` with two reason-keyed buckets.)
 const statePathFor = (config: Config) => join(config.workspace, '_state', 'jobs.json')
-
-const legacyStatePathFor = (config: Config) => join(config.workspace, '_state', 'processed.json')
-
-/**
- * Read-only load. On an un-migrated workspace this converts in memory and does
- * NOT write: `vn jobs` and the GUI's poll both come through here without the run
- * lock, and a write from a view could race a live `vn run`. Persisting the
- * conversion is migrateStateOnDisk()'s job, under the lock.
- */
-// The legacy read is the one irreversible read in the codebase, so it gets the
-// same strictness as the new format — `readJson` swallows a parse failure and
-// returns `{}`, which here would mean "nothing was ever processed" and re-pay
-// for every recording's ASR.
-async function readLegacyState(config: Config): Promise<Json> {
-  const path = legacyStatePathFor(config)
-  return parseStrictJson(await readFile(path, 'utf8'), path) as Json
-}
 
 async function loadState(config: Config): Promise<StateFile> {
   const path = statePathFor(config)
-  if (!existsSync(path) && existsSync(legacyStatePathFor(config))) {
-    return migrateLegacyState(await readLegacyState(config), nowIso())
-  }
   const store = existsSync(path) ? parseStateFile(await readFile(path, 'utf8'), path) : emptyState()
   lastSavedState = JSON.stringify(store)
   return store
-}
-
-// Inline rather than a repo script: most installs are the GUI's compiled
-// sidecar, which has no checkout to run a script from — and starting from empty
-// is not an option, it would re-transcribe everything and pay for ASR twice.
-// Call only with the run lock held.
-async function migrateStateOnDisk(config: Config): Promise<void> {
-  const path = statePathFor(config)
-  const legacy = legacyStatePathFor(config)
-  if (existsSync(path) || !existsSync(legacy)) return
-  const store = migrateLegacyState(await readLegacyState(config), nowIso())
-  await writeJson(path, store)
-  lastSavedState = JSON.stringify(store)
-  await rename(legacy, `${legacy}.v1.bak`).catch(e => warnSideEffect('archive pre-0.18 state', e))
-  console.log(`Converted ${basename(legacy)} → ${basename(path)} (${Object.keys(store.jobs).length} records; old file kept as .v1.bak)`)
 }
 
 // Workspaces are often synced folders; skip writes when a run did not change
@@ -1246,10 +1207,6 @@ export async function runPipeline(file: string | undefined, opts: any): Promise<
 
 async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   await ensureDirs(config)
-  // --dry-run is a zero-side-effect diagnostic; the migration renames the legacy
-  // file and permanently drops its `error:*` entries. loadState converts in
-  // memory, so a dry run still sees the right picture.
-  if (!opts.dryRun) await migrateStateOnDisk(config)
   const store = await loadState(config)
   // We hold the run lock, so nothing else can own a `running` record: any that
   // survive are debris from a killed run. Their attempt was already counted, so
@@ -1596,13 +1553,9 @@ export async function removeImportedSource(config: Config, path: string): Promis
 
 export async function forgetRecording(needle: string): Promise<void> {
   const config = getConfig()
-  // Under the run lock: `vn run` holds the state file in memory for the length
-  // of a batch and re-saves after every job, so an unlocked delete here would be
-  // silently resurrected by the next save.
   const lock = await acquireRunLock()
   if (!lock) { console.error('A voicenote run is in progress, so the state file is busy. Re-run this once it finishes (`vn jobs` shows what it is working on).'); process.exitCode = 1; return }
   try {
-    await migrateStateOnDisk(config)
     const store = await loadState(config)
     let removed = 0
     for (const [id, entry] of Object.entries(store.jobs)) {
@@ -1621,7 +1574,6 @@ export async function retryRecording(id: string): Promise<void> {
   const lock = await acquireRunLock()
   if (!lock) throw new Error('A voicenote run is in progress. Retry once it finishes.')
   try {
-    await migrateStateOnDisk(config)
     const store = await loadState(config)
     const entry = store.jobs[id]
     if (!entry) throw new Error('Recording no longer exists in the processing list.')
@@ -1637,7 +1589,6 @@ export async function ignoreJob(id: string): Promise<void> {
   const lock = await acquireRunLock()
   if (!lock) throw new Error('A voicenote run is in progress. Try again once it finishes.')
   try {
-    await migrateStateOnDisk(config)
     const store = await loadState(config)
     const entry = store.jobs[id]
     if (!entry) throw new Error('Recording no longer exists in the processing list.')
@@ -1653,7 +1604,6 @@ export async function regenerateNotes(id: string): Promise<void> {
   const lock = await acquireRunLock()
   if (!lock) throw new Error('A voicenote run is in progress. Regenerate once it finishes.')
   try {
-    await migrateStateOnDisk(config)
     const store = await loadState(config)
     const entry = store.jobs[id]
     if (!entry) throw new Error('Recording no longer exists in the processing list.')

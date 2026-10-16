@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { applyOutcome, buildJobsView, classify, emptyState, ignoreRecording, MAX_ATTEMPTS, MAX_INTERRUPTIONS, migrateLegacyState, parseJobsLimit, parseStateFile, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, startAttempt, type JobRecord, type StateFile } from './jobs.ts'
+import { applyOutcome, buildJobsView, classify, emptyState, ignoreRecording, MAX_ATTEMPTS, MAX_INTERRUPTIONS, parseJobsLimit, parseStateFile, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, startAttempt, type JobRecord, type StateFile } from './jobs.ts'
 
 const rec = (over: Partial<JobRecord> & { name: string; recorded_at: string; state: JobRecord['state'] }): JobRecord => ({
   source_path: `/Volumes/VTR6500/RECORD/A/${over.name}`,
@@ -157,37 +157,6 @@ test('patchJob does not touch updated_at when nothing changed', () => {
 
   expect(patchJob(j, { state: 'filtered', code: 'too_short', detail: 'x' }, 'NOW')).toBe(true)
   expect(j.updated_at).toBe('NOW')
-})
-
-// ── migration (irreversible) ───────────────────────────────────────
-
-test('migrateLegacyState: buckets become states, error artifacts are dropped', () => {
-  const v1 = {
-    processed_source_ids: {
-      p1: { source_path: '/V/RECORD/A/20260729120629.mp3', processed_at: '2026-07-29T05:00:00Z', status: 'completed', title: 'A note', final_paths: { notes: '/w/a.md' } },
-      p2: { source_path: '/V/RECORD/A/20260728100157.mp3', processed_at: '2026-07-28T05:00:00Z', status: 'summary_failed_transcript_saved', title: null },
-    },
-    skipped_source_ids: {
-      s1: { source_path: '/V/RECORD/A/20260708153622.mp3', reason: 'too_small:10116<100000', seen_at: '2026-07-27T07:00:00Z', size_bytes: 10116 },
-      // The zombie class: a recorder unplugged mid-run left 127 of these.
-      e1: { source_path: '/V/RECORD/A/20260525175151.mp3', reason: 'error:ENOENT: no such file or directory', seen_at: '2026-07-27T07:02:17Z' },
-    },
-  }
-  const { version, jobs } = migrateLegacyState(v1, 'NOW')
-  expect(version).toBe(2)
-  expect(Object.keys(jobs).sort()).toEqual(['p1', 'p2', 's1'])
-  expect(jobs.p1).toMatchObject({ state: 'done', title: 'A note', paths: { notes: '/w/a.md' }, name: '20260729120629.mp3' })
-  expect(jobs.p2).toMatchObject({ state: 'error', code: 'summary_failed' })
-  expect(jobs.s1).toMatchObject({ state: 'filtered', code: 'too_small', detail: '10116<100000' })
-  // recorded_at comes from the recorder's local-time filename, not the stored UTC stamp.
-  expect(jobs.p1!.recorded_at).toBe('2026-07-29T12:06:29')
-})
-
-test('migrateLegacyState maps an empty file to an empty state', () => {
-  // Only reachable when the file genuinely parsed as `{}` — telling that apart
-  // from a parse failure is the caller's job (readLegacyState), because getting
-  // it wrong here silently re-transcribes the entire history.
-  expect(migrateLegacyState({}, 'NOW').jobs).toEqual({})
 })
 
 // ── classify (decides what runs, and what stops running) ────────────────────
