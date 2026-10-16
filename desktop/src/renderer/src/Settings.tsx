@@ -17,6 +17,7 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [version, setVersion] = useState('')
+  const [pendingApiKey, setPendingApiKey] = useState<{ providerId: string; key: string } | null>(null)
 
   useEffect(() => {
     void vn.configGet().then(config => {
@@ -30,6 +31,9 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
     setSaving(true)
     setMessage(null)
     try {
+      if (pendingApiKey?.key) {
+        await vn.piSetApiKey(pendingApiKey.providerId, pendingApiKey.key)
+      }
       await vn.configSet({ env, self: { name: self.name, aliases: self.aliases } })
       onClose()
     } catch (error) {
@@ -55,6 +59,18 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
           <ModelAuthCard
             currentModel={env.VOICENOTE_PI_MODEL ?? ''}
             onModelChange={model => setEnv({ ...env, VOICENOTE_PI_MODEL: model })}
+            onAuthRemoved={async (_providerId, envKeys) => {
+              const config = await vn.configGet()
+              setEnv(current => {
+                const next = { ...current }
+                for (const key of envKeys) {
+                  if (Object.hasOwn(config.env, key)) next[key] = config.env[key]!
+                  else delete next[key]
+                }
+                return next
+              })
+            }}
+            onPendingKeyChange={(providerId, key) => setPendingApiKey(key ? { providerId, key } : null)}
             disabled={saving}
           />
         </section>

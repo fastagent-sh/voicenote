@@ -6,7 +6,8 @@ export interface ModelAuthCardProps {
   onModelChange: (model: string) => void
   disabled?: boolean
   onStatusChange?: () => void
-  compact?: boolean
+  onPendingKeyChange?: (providerId: string, key: string) => void
+  onAuthRemoved?: (providerId: string, envKeys: string[]) => void
 }
 
 export function ModelAuthCard({
@@ -14,7 +15,8 @@ export function ModelAuthCard({
   onModelChange,
   disabled = false,
   onStatusChange,
-  compact = false,
+  onPendingKeyChange,
+  onAuthRemoved,
 }: ModelAuthCardProps) {
   const [providerStatuses, setProviderStatuses] = useState<ProviderInfo[]>([])
   const [selectedProviderId, setSelectedProviderId] = useState<string>('openai-codex')
@@ -26,7 +28,7 @@ export function ModelAuthCard({
   const [oauthPending, setOauthPending] = useState(false)
   const [oauthError, setOauthError] = useState<string | null>(null)
   const [oauthStatusText, setOauthStatusText] = useState<string | null>(null)
-  const [loginPrompt, setLoginPrompt] = useState<{ id: number; question: string } | null>(null)
+  const [loginPrompt, setLoginPrompt] = useState<Extract<LoginEvent, { event: 'prompt' }> | null>(null)
   const [promptAnswer, setPromptAnswer] = useState('')
   const [message, setMessage] = useState<string | null>(null)
 
@@ -51,11 +53,11 @@ export function ModelAuthCard({
   useEffect(() => {
     return vn.on('login:event', (event: LoginEvent) => {
       if (event.event === 'prompt') {
-        setLoginPrompt({ id: event.id, question: event.prompt.message })
-        setPromptAnswer('')
+        setLoginPrompt(event)
+        setPromptAnswer(event.prompt.type === 'select' ? event.prompt.options[0]?.id ?? '' : '')
       }
       if (event.event === 'prompt_closed') {
-        setLoginPrompt(null)
+        setLoginPrompt(current => current?.id === event.id ? null : current)
         setPromptAnswer('')
       }
       if (event.event === 'auth_url') {
@@ -69,12 +71,15 @@ export function ModelAuthCard({
         setOauthStatusText('授权成功')
         setOauthError(null)
         setLoginPrompt(null)
+        setPromptAnswer('')
         void loadProviderStatuses()
       }
       if (event.event === 'error') {
         setOauthError(`登录失败: ${event.message}`)
         setOauthStatusText(null)
         setOauthPending(false)
+        setLoginPrompt(null)
+        setPromptAnswer('')
       }
     })
   }, [])
@@ -87,7 +92,7 @@ export function ModelAuthCard({
   const currentStatus = providerStatuses.find(p => p.id === currentProviderId)
   const isConfigured = currentStatus?.configured ?? false
   const currentProviderMeta = currentStatus ?? {
-    name: currentProviderId, hasApiKey: false, hasOAuth: false,
+    name: currentProviderId, hasApiKey: false, hasOAuth: false, envKeys: [] as string[],
   }
   const availableModels = (currentStatus?.models ?? []).map(m => ({
     id: `${currentProviderId}/${m.id}`,
@@ -105,6 +110,7 @@ export function ModelAuthCard({
   const handleProviderChange = (newProviderId: string) => {
     setEditingKey(false)
     setApiKeyInput('')
+    onPendingKeyChange?.(currentProviderId, '')
     setManualModel(newProviderId === 'custom')
     if (newProviderId === 'custom') {
       setAuthMethodChoice('api_key')
@@ -131,7 +137,9 @@ export function ModelAuthCard({
       await vn.piSetApiKey(currentProviderId, apiKeyInput.trim())
       setEditingKey(false)
       setApiKeyInput('')
+      onPendingKeyChange?.(currentProviderId, '')
       await loadProviderStatuses()
+      onStatusChange?.()
     } catch (e: any) {
       setMessage(`保存 API Key 失败: ${e.message}`)
     } finally {
@@ -140,11 +148,15 @@ export function ModelAuthCard({
   }
 
   const handleRemoveAuth = async () => {
+    const keys = currentProviderMeta.envKeys ?? []
     try {
       await vn.piRemoveAuth(currentProviderId)
       setEditingKey(false)
       setApiKeyInput('')
+      onPendingKeyChange?.(currentProviderId, '')
       await loadProviderStatuses()
+      onAuthRemoved?.(currentProviderId, keys)
+      onStatusChange?.()
     } catch (e: any) {
       setMessage(`清除授权失败: ${e.message}`)
     }
@@ -262,7 +274,11 @@ export function ModelAuthCard({
                   autoFocus={editingKey}
                   placeholder={`输入 ${currentProviderMeta.name} API Key (例如 sk-...)`}
                   value={apiKeyInput}
-                  onChange={e => { setEditingKey(true); setApiKeyInput(e.target.value) }}
+                  onChange={e => {
+                    setEditingKey(true)
+                    setApiKeyInput(e.target.value)
+                    onPendingKeyChange?.(currentProviderId, e.target.value.trim())
+                  }}
                   onKeyDown={e => { if (e.key === 'Enter') void handleSaveKey() }}
                   disabled={disabled}
                 />
@@ -275,7 +291,14 @@ export function ModelAuthCard({
                   {keySaving ? '保存中…' : '保存 Key'}
                 </button>
                 {editingKey && (
-                  <button style={{ flex: 'none' }} onClick={() => { setEditingKey(false); setApiKeyInput('') }}>
+                  <button
+                    style={{ flex: 'none' }}
+                    onClick={() => {
+                      setEditingKey(false)
+                      setApiKeyInput('')
+                      onPendingKeyChange?.(currentProviderId, '')
+                    }}
+                  >
                     取消
                   </button>
                 )}
@@ -310,19 +333,32 @@ export function ModelAuthCard({
 
             {loginPrompt && (
               <div style={{ marginTop: 10, padding: 10, background: 'var(--surface)', borderRadius: 6, border: '1px solid var(--line)' }}>
-                <p style={{ margin: '0 0 6px 0', fontSize: 13 }}>{loginPrompt.question}</p>
+                <p style={{ margin: '0 0 6px 0', fontSize: 13 }}>{loginPrompt.prompt.message}</p>
                 <div style={{ display: 'flex', gap: 6 }}>
-                  <input
-                    type="text"
-                    value={promptAnswer}
-                    placeholder="输入代码或内容…"
-                    onChange={e => setPromptAnswer(e.target.value)}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter' && promptAnswer.trim()) {
-                        void vn.piLoginAnswer(loginPrompt.id, promptAnswer.trim())
-                      }
-                    }}
-                  />
+                  {loginPrompt.prompt.type === 'select' ? (
+                    <select
+                      aria-label={loginPrompt.prompt.message}
+                      value={promptAnswer}
+                      onChange={e => setPromptAnswer(e.target.value)}
+                    >
+                      {loginPrompt.prompt.options.map(option => (
+                        <option key={option.id} value={option.id}>{option.label}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      type="text"
+                      aria-label={loginPrompt.prompt.message}
+                      value={promptAnswer}
+                      placeholder={loginPrompt.prompt.placeholder || '输入代码或内容…'}
+                      onChange={e => setPromptAnswer(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' && promptAnswer.trim()) {
+                          void vn.piLoginAnswer(loginPrompt.id, promptAnswer.trim())
+                        }
+                      }}
+                    />
+                  )}
                   <button
                     className="primary"
                     onClick={() => {
@@ -331,7 +367,13 @@ export function ModelAuthCard({
                   >
                     提交
                   </button>
-                  <button onClick={() => void vn.piLoginCancel()}>取消</button>
+                  <button onClick={() => {
+                    setLoginPrompt(null)
+                    setPromptAnswer('')
+                    void vn.piLoginCancel()
+                  }}>
+                    取消
+                  </button>
                 </div>
               </div>
             )}

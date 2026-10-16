@@ -37,8 +37,11 @@ export function runCommand(command: string, args: string[], timeoutMs = 20000): 
 }
 
 export function resolveCli(): { cliPath: string; compiled: boolean } {
-  const cliPath = fileURLToPath(import.meta.url)
-  return { cliPath, compiled: /\$bunfs|~BUN/i.test(cliPath) }
+  const currentPath = fileURLToPath(import.meta.url)
+  const compiled = /\$bunfs|~BUN/i.test(currentPath)
+  const dir = dirname(currentPath)
+  const cliPath = existsSync(join(dir, 'cli.ts')) ? join(dir, 'cli.ts') : join(dir, 'cli.js')
+  return { cliPath, compiled }
 }
 
 export function plistPath(): string {

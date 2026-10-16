@@ -67,6 +67,11 @@ app.whenReady().then(async () => {
  check(window.savedConfigs.at(-1).env.VOLCANO_ASR_KEY === 'unsaved-asr-key', 'ASR key lost on save');
  change(document.querySelector('select'), 'kimi-coding'); await tick();
  check(!button('授权登录') && !button('OAuth 登录'), 'Kimi must not offer device-only OAuth');
+ const kimiInput = [...document.querySelectorAll('input')].find(e => e.placeholder.includes('Kimi API Key'));
+ check(kimiInput, 'Kimi API key input not found');
+ change(kimiInput, 'my-unclicked-kimi-key'); await tick();
+ document.querySelector('header button.primary').click(); await tick();
+ check(window.savedKeys.some(k => k[0] === 'kimi-coding' && k[1] === 'my-unclicked-kimi-key'), 'pending API key was not saved on main save');
  change(document.querySelector('select'), 'minimax'); await tick();
  const modelSelect = document.querySelectorAll('select')[1];
  check(modelSelect.value === 'minimax/MiniMax-M2.7', 'default model did not come from runtime');

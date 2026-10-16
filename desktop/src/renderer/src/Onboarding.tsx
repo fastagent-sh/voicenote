@@ -20,6 +20,7 @@ export function Onboarding({ status, onDone, onRefresh }: {
   const [recordDir, setRecordDir] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [pendingApiKey, setPendingApiKey] = useState<{ providerId: string; key: string } | null>(null)
 
   useEffect(() => {
     void vn.configGet().then(config => {
@@ -37,6 +38,9 @@ export function Onboarding({ status, onDone, onRefresh }: {
     setSaving(true)
     setError(null)
     try {
+      if (pendingApiKey?.key) {
+        await vn.piSetApiKey(pendingApiKey.providerId, pendingApiKey.key)
+      }
       await vn.configSet({
         env: {
           VOLCANO_ASR_KEY: asrKey.trim(),
@@ -67,7 +71,7 @@ export function Onboarding({ status, onDone, onRefresh }: {
             currentModel={model}
             onModelChange={m => setModel(m)}
             onStatusChange={onRefresh}
-            compact
+            onPendingKeyChange={(providerId, key) => setPendingApiKey(key ? { providerId, key } : null)}
           />
         </section>
 

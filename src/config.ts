@@ -325,6 +325,7 @@ export async function configSetData(payload: ConfigSetPayload): Promise<{ ok: tr
     current.speakers = speakers
   }
   await writeConfigJson(current)
+  resetConfigCache()
   return { ok: true, path: CONFIG_ENV_PATH, ...(ignored.length ? { ignoredKeys: ignored } : {}) }
 }
 
