@@ -31,7 +31,7 @@ export function extractFirstJsonObject(text: string): string {
  * characters JSON forbids raw are touched, and only inside strings, so valid
  * JSON passes through unchanged.
  */
-export function escapeControlCharsInStrings(text: string): string {
+function escapeControlCharsInStrings(text: string): string {
   const ESCAPES: Record<string, string> = { '\n': '\\n', '\r': '\\r', '\t': '\\t' }
   let out = ''
   let inString = false

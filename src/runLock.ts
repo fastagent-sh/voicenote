@@ -1,5 +1,5 @@
-// Pure logic behind the Windows run-lock ownership check (cli.ts's
-// acquireRunLockWindows). Extracted (no fs, no process) so its one subtle
+// Pure logic behind the Windows run-lock ownership check (core.ts's
+// acquireRunLock). Extracted (no fs, no process) so its one subtle
 // invariant is tested: a transient READ failure must map to 'unknown', never
 // to 'reclaimed'. The heartbeat and release paths branch on these three
 // states, and collapsing 'unknown' into 'reclaimed' (or 'mine') is exactly
