@@ -23,7 +23,10 @@ export function onPipelineEvent(listener: Listener): () => void {
 
 export function emitPipelineEvent(event: PipelineEvent): void {
   for (const listener of listeners) {
-    // A broken listener must not take down a running pipeline.
-    try { listener(event) } catch { /* ignore */ }
+    try {
+      listener(event)
+    } catch (e) {
+      console.error('Failed to emit pipeline event to listener:', e)
+    }
   }
 }
