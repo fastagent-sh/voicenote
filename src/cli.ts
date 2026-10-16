@@ -81,11 +81,17 @@ cli.command('login [provider]', 'Sign in to a provider (default: openai-codex / 
     const wantApiKey = Boolean(opts.apiKey) || (!hasOAuth && hasApiKey)
     if (wantApiKey) {
       if (!hasApiKey) {
-        console.error(`Provider '${providerId}' does not support API key authentication.`)
+        if (opts.json) console.log(JSON.stringify({ event: 'error', message: `Provider '${providerId}' does not support API key authentication.` }))
+        else console.error(`Provider '${providerId}' does not support API key authentication.`)
         process.exitCode = 1
         return
       }
       let key = typeof opts.apiKey === 'string' ? opts.apiKey.trim() : ''
+      if (!key && opts.json) {
+        console.log(JSON.stringify({ event: 'error', message: `API key is required in --json mode. Use --api-key <key>` }))
+        process.exitCode = 1
+        return
+      }
       if (!key) {
         const readline = await import('node:readline/promises')
         const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
@@ -101,7 +107,8 @@ cli.command('login [provider]', 'Sign in to a provider (default: openai-codex / 
         return
       }
       await setPiApiKey(providerId, key)
-      console.log(`\n✓ API key for ${p.name} saved to ${config.pi.authPath}.`)
+      if (opts.json) console.log(JSON.stringify({ event: 'success', provider: providerId }))
+      else console.log(`\n✓ API key for ${p.name} saved to ${config.pi.authPath}.`)
       return
     }
 

@@ -1,7 +1,9 @@
 import { expect, test } from 'bun:test'
+import { existsSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { removeImportedSource } from './core.ts'
 import { runAsync, startFakeModel } from './testing/fakeModel.ts'
 
 for (const artifact of ['transcript', 'audio'] as const) {
@@ -63,3 +65,19 @@ await runPipeline(undefined, {})
     }
   }, 30_000)
 }
+
+test('removeImportedSource refuses to remove files in same-prefix peer directories', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'vn-prefix-safety-'))
+  const workspace = join(home, 'workspace')
+  const backupDir = join(workspace, '_inbox_backup')
+  await mkdir(backupDir, { recursive: true })
+  const backupFile = join(backupDir, 'important.mp3')
+  await writeFile(backupFile, 'keep me')
+  try {
+    const config = { workspace } as any
+    await removeImportedSource(config, backupFile)
+    expect(existsSync(backupFile)).toBe(true)
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})

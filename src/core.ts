@@ -12,7 +12,7 @@ import { applyOutcome, buildJobsView, classify, emptyState, ignoreRecording, loc
 import { createHash, randomUUID } from 'node:crypto'
 import { appendFile, chmod, mkdir, readFile, writeFile, copyFile, rename, unlink, stat, readdir, rmdir, utimes } from 'node:fs/promises'
 import { createReadStream, existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, appendFileSync, openSync, closeSync, statSync, readSync, unlinkSync, renameSync } from 'node:fs'
-import { basename, dirname, extname, join, resolve } from 'node:path'
+import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
@@ -2588,13 +2588,14 @@ export async function importRecording(file: string, opts: { json?: boolean }): P
   else console.log(`${result.status}: ${result.name}`)
 }
 
-async function removeImportedSource(config: Config, path: string): Promise<void> {
-  const inbox = inboxPathFor(config)
-  if (!resolve(path).startsWith(resolve(inbox))) return
-  try { await unlink(path) }
-  catch (e: any) { if (e?.code !== 'ENOENT') { warnSideEffect(`remove imported source ${path}`, e); return } }
-  await rmdir(dirname(path)).catch((e: any) => {
-    if (e?.code !== 'ENOENT' && e?.code !== 'ENOTEMPTY') warnSideEffect(`remove empty import dir ${dirname(path)}`, e)
+export async function removeImportedSource(config: Config, path: string): Promise<void> {
+  const inbox = resolve(inboxPathFor(config))
+  const target = resolve(path)
+  if (!target.startsWith(inbox + sep)) return
+  try { await unlink(target) }
+  catch (e: any) { if (e?.code !== 'ENOENT') { warnSideEffect(`remove imported source ${target}`, e); return } }
+  await rmdir(dirname(target)).catch((e: any) => {
+    if (e?.code !== 'ENOENT' && e?.code !== 'ENOTEMPTY') warnSideEffect(`remove empty import dir ${dirname(target)}`, e)
   })
 }
 

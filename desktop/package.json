@@ -42,7 +42,8 @@
       "package.json"
     ],
     "asarUnpack": [
-      "node_modules/@earendil-works/pi-coding-agent/**"
+      "node_modules/@earendil-works/pi-coding-agent/**",
+      "node_modules/@earendil-works/pi-ai/**"
     ],
     "mac": {
       "category": "public.app-category.productivity",

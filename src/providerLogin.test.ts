@@ -95,3 +95,11 @@ test.skipIf(process.platform === 'win32')('cli login command catches errors and 
   expect(result.stderr).toContain('Login to OpenAI failed: Simulated OAuth failure')
   expect(result.stderr).not.toContain('UnhandledPromiseRejection')
 })
+
+test('cli login in json mode requires api key without hanging', () => {
+  const result = spawnSync(process.execPath, [
+    'src/cli.ts', 'login', 'deepseek', '--json',
+  ], { encoding: 'utf8', timeout: 5000 })
+  expect(result.status).toBe(1)
+  expect(result.stdout).toContain('API key is required in --json mode')
+})
