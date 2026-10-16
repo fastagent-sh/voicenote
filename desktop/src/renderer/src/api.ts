@@ -1,3 +1,5 @@
+import type { LoginPromptView } from '../../../../src/loginInteraction.ts'
+
 /** The preload bridge, typed for the renderer. */
 export type Status = {
   version: string
@@ -52,6 +54,21 @@ export type RecorderFile = {
 
 export type RecorderFiles = { dir: string; present: boolean; items: RecorderFile[] }
 
+export type ModelInfo = { id: string; name: string }
+export type ProviderInfo = {
+  id: string
+  name: string
+  configured: boolean
+  source?: string
+  authType?: 'api_key' | 'oauth'
+  hasApiKey: boolean
+  hasOAuth: boolean
+  models: ModelInfo[]
+  defaultModelId?: string
+  envKeys: string[]
+  apiKey?: string
+}
+
 export type PipelineEvent =
   | { type: 'job_start'; id: string; name: string; durationSeconds: number | null }
   | { type: 'job_step'; step: string }
@@ -60,8 +77,10 @@ export type PipelineEvent =
   | { type: 'note_delta'; delta: string }
   | { type: 'note_tool'; name: string }
 export type LoginEvent =
+  | { event: 'prompt'; id: number; prompt: LoginPromptView }
+  | { event: 'prompt_closed'; id: number }
   | { event: 'auth_url'; url: string }
-  | { event: 'device_code'; userCode: string; verificationUri: string }
+  | { event: 'progress'; message: string }
   | { event: 'success'; provider: string }
   | { event: 'error'; message: string }
 
@@ -84,7 +103,13 @@ type Api = {
   pathForFile: (file: File) => string
   pickAudio: () => Promise<string | null>
   pickDirectory: () => Promise<string | null>
-  login: () => Promise<void>
+  login: (providerId?: string) => Promise<void>
+  piProviders: () => Promise<ProviderInfo[]>
+  piSetApiKey: (providerId: string, apiKey: string) => Promise<{ ok: true }>
+  piRemoveAuth: (providerId: string) => Promise<{ ok: true }>
+  piLoginOAuth: (providerId: string) => Promise<{ ok: true }>
+  piLoginAnswer: (id: number, value: string) => Promise<void>
+  piLoginCancel: () => Promise<void>
   openPath: (path: string) => Promise<string>
   revealPath: (path: string) => Promise<void>
   readNote: (path: string) => Promise<string>

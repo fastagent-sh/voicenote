@@ -11,7 +11,8 @@
     "dist": "npm run build && electron-builder"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.86.0",
+    "@earendil-works/pi-coding-agent": "^1.2.0",
+    "@earendil-works/pi-ai": "^1.2.0",
     "electron-updater": "^6.8.9",
     "marked": "^16.4.2",
     "undici": "^8"
@@ -41,7 +42,8 @@
       "package.json"
     ],
     "asarUnpack": [
-      "node_modules/@earendil-works/pi-coding-agent/**"
+      "node_modules/@earendil-works/pi-coding-agent/**",
+      "node_modules/@earendil-works/pi-ai/**"
     ],
     "mac": {
       "category": "public.app-category.productivity",

@@ -62,20 +62,22 @@ export function Onboarding({ status, onDone, onRefresh }: {
         <p className="hint">三步就能开始：把录音变成可读的纪要。</p>
 
         <section>
-          <h3><span className={signedIn ? 'step-dot done' : 'step-dot'}>1</span> 登录 ChatGPT</h3>
-          <p className="hint">纪要由 ChatGPT 的模型生成，需要你自己的账号。</p>
+          <h3><span className={signedIn ? 'step-dot done' : 'step-dot'}>1</span> 配置纪要模型 (ChatGPT / DeepSeek 等)</h3>
+          <p className="hint">纪要由 AI 模型生成。支持 ChatGPT 账号授权登录，或在设置中配置 DeepSeek 等模型的 API Key。</p>
           <div className="sheet-row">
-            <span>{signedIn ? '已登录' : loginState === 'waiting' ? '已打开浏览器，授权后自动继续…' : '未登录'}</span>
-            <button className={signedIn ? '' : 'primary'} onClick={() => { setLoginState('waiting'); void vn.login() }}>
-              {signedIn ? '重新登录' : '登录'}
-            </button>
+            <span>{signedIn ? '已配置认证' : loginState === 'waiting' ? '已打开浏览器，授权后自动继续…' : '未配置'}</span>
+            <div className="row-actions">
+              <button className={signedIn ? '' : 'primary'} onClick={() => { setLoginState('waiting'); void vn.login() }}>
+                {signedIn ? '重新登录 ChatGPT' : '登录 ChatGPT'}
+              </button>
+            </div>
           </div>
         </section>
 
         <section>
           <h3><span className={hasKey ? 'step-dot done' : 'step-dot'}>2</span> 填写转写密钥</h3>
           <p className="hint">语音转文字用火山引擎豆包，在控制台复制 API Key 粘贴到这里。</p>
-          <input type="password" value={asrKey} placeholder="火山 ASR API Key" onChange={e => setAsrKey(e.target.value)} />
+          <input type="text" value={asrKey} placeholder="火山 ASR API Key" onChange={e => setAsrKey(e.target.value)} />
         </section>
 
         <section>

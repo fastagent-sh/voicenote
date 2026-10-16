@@ -69,11 +69,11 @@ button.primary:hover:not(:disabled) { filter: brightness(1.06); background: var(
 button.link { border: none; background: none; color: var(--accent); padding: 4px 2px; }
 button.link:hover { background: none; text-decoration: underline; }
 
-input[type="text"], input[type="password"], input[type="search"], input:not([type]) {
+input[type="text"], input[type="password"], input[type="search"], input:not([type]), select {
   font: inherit; padding: 6px 10px; border-radius: 7px; width: 100%;
   border: 1px solid var(--line-strong); background: var(--panel); color: var(--ink);
 }
-input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
 
 .mono { font-variant-numeric: tabular-nums; }
 .hint { color: var(--muted); font-size: 12.5px; }
@@ -260,6 +260,12 @@ button.link.inline { padding: 0; font-size: inherit; vertical-align: baseline; }
 }
 .step-dot.done { background: var(--ok); color: #fff; }
 .path { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.oauth-pending-box {
+  display: flex; gap: 8px; align-items: center; padding: 8px 10px; margin-top: 8px;
+  border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2);
+  font-size: 12.5px; color: var(--ink-2);
+}
 
 /* ── recorder card + file list ─────────────────────────────────────────── */
 .device-card {

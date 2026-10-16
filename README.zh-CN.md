@@ -165,7 +165,7 @@ vn forget <id|filename>         # 让某条录音重新被处理
 vn log                          # 打印今天日志末尾(--lines N / -f 跟随 / --err 含 launchd.err / --date YYYY-MM-DD)
 vn errors                       # 打印最近 ERROR 日志
 vn import /path/to/audio.mp3    # 把一个本地录音复制进持久化手动导入队列
-vn login                        # 登录 ChatGPT, 纪要后端用(默认浏览器回调; 无头机器用 `--device-code`)。无需开 pi TUI
+vn login                        # Sign in to ChatGPT through browser OAuth; no device-code setting needed
 vn upgrade                      # reinstall latest npm package
 vn install-launch-agent
 vn status

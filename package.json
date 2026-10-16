@@ -42,7 +42,8 @@
     "access": "public"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.86.0",
+    "@earendil-works/pi-coding-agent": "^1.2.0",
+    "@earendil-works/pi-ai": "^1.2.0",
     "cac": "latest",
     "undici": "^8.10.2"
   },

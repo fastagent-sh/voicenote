@@ -2,7 +2,9 @@
 // scheduling and config, with no command parsing and no process exit. `vn`
 // (cli.ts) and the desktop app are both callers.
 import { parseLockOwner } from './runLock.ts'
-import { loginWithBrowser, loginWithDeviceCode, PI_PROVIDER_ID } from './chatgptAuth.ts'
+import { createPiRuntime, openPiCredentials, providerEnvKeys, providerLoginMethods, preferredModelId } from './piRuntime.ts'
+import { promptInTerminal, type LoginInteraction } from './loginInteraction.ts'
+import { loginWithBrowser, PI_PROVIDER_ID } from './chatgptAuth.ts'
 import { installProxyFromEnv, runAgentPrompt } from './piAgent.ts'
 import { parseSummaryJson } from './summaryJson.ts'
 import { emitPipelineEvent } from './progress.ts'
@@ -10,7 +12,7 @@ import { applyOutcome, buildJobsView, classify, emptyState, ignoreRecording, loc
 import { createHash, randomUUID } from 'node:crypto'
 import { appendFile, chmod, mkdir, readFile, writeFile, copyFile, rename, unlink, stat, readdir, rmdir, utimes } from 'node:fs/promises'
 import { createReadStream, existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, appendFileSync, openSync, closeSync, statSync, readSync, unlinkSync, renameSync } from 'node:fs'
-import { basename, dirname, extname, join, resolve } from 'node:path'
+import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
@@ -79,6 +81,8 @@ type Recording = {
   contentHash: string
   recordedAt: Date
   imported: boolean
+  resuming?: boolean
+  localAudioPath?: string
 }
 
 type LocalFiles = {
@@ -160,6 +164,11 @@ const ENV_KEYS = [
   'LOCAL_PROXY_HOST', 'LOCAL_PROXY_PORT', 'LOCAL_NO_PROXY',
   'OPENAI_API_KEY',
   'DEEPSEEK_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'MINIMAX_API_KEY',
+  'KIMI_API_KEY',
+  'OPENROUTER_API_KEY',
+  'QWEN_API_KEY',
 ]
 
 // The Volcano ASR endpoint must NEVER go through the SOCKS/HTTP proxy that pi
@@ -233,6 +242,16 @@ function readSettings(file: Record<string, unknown>): Settings {
     const inherited = process.env[key]
     if (inherited !== undefined) settings[key] = inherited
     else if (typeof file[key] === 'string') settings[key] = file[key] as string
+  }
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && (key.endsWith('_API_KEY') || key.endsWith('_KEY')) && !settings[key]) {
+      settings[key] = value
+    }
+  }
+  for (const [key, value] of Object.entries(file)) {
+    if (typeof value === 'string' && (key.endsWith('_API_KEY') || key.endsWith('_KEY')) && !settings[key]) {
+      settings[key] = value
+    }
   }
   return settings
 }
@@ -318,7 +337,11 @@ export function getConfig(): Config {
   // directory, so every summary failed with "No API key found" while doctor
   // kept reporting the credentials as present.
   const childEnv: Record<string, string> = { ...proxy, PI_CODING_AGENT_DIR: piAgentDir }
-  for (const key of ['OPENAI_API_KEY', 'DEEPSEEK_API_KEY']) if (s[key]) childEnv[key] = s[key]!
+  for (const [key, value] of Object.entries(s)) {
+    if ((key.endsWith('_API_KEY') || key.endsWith('_KEY')) && typeof value === 'string' && value) {
+      childEnv[key] = value
+    }
+  }
   configCache = Object.freeze({
     recordDir: expandHome(s.VOICENOTE_RECORD_DIR || `/Volumes/${deviceVolume}/RECORD`),
     workspace,
@@ -894,15 +917,17 @@ function layout(config: Config, rec: Recording, title?: string | null): LocalFil
 // re-running ASR is money spent for nothing. Keying this off `notes_failed`
 // instead meant `vn forget` (which drops the record) silently re-paid for ASR,
 // even though the transcript was still sitting there.
-function resumableTranscriptFiles(config: Config, rec: Recording, store: StateFile, mode: RunMode, force: boolean): LocalFiles | null {
-  if (force || mode !== 'notes') return null
-  // Paths recorded by an earlier attempt win: that attempt may already have
-  // moved its outputs to titled names.
+function recordingFiles(config: Config, rec: Recording, store: StateFile): LocalFiles {
   const fallback = layout(config, rec)
   const recorded = store.jobs[rec.sourceId]?.paths || {}
-  const files = Object.fromEntries(
+  return Object.fromEntries(
     Object.entries(fallback).map(([key, path]) => [key, typeof recorded[key] === 'string' ? recorded[key] : path]),
   ) as LocalFiles
+}
+
+function resumableTranscriptFiles(config: Config, rec: Recording, store: StateFile, mode: RunMode, force: boolean): LocalFiles | null {
+  if (force || mode !== 'notes') return null
+  const files = recordingFiles(config, rec, store)
   return existsSync(files.transcript) ? files : null
 }
 
@@ -1202,26 +1227,23 @@ ${transcript}`
 // ───────────────────────────────────────────────────────────────────────
 
 // ───────────────────────────────────────────────────────────────────────
-// ChatGPT (OpenAI Codex) OAuth login. The browser callback is the default;
-// --device-code is available for accounts that opted into that flow. This
-// exposes the login as a plain command for non-TUI and GUI users.
+// ChatGPT browser OAuth is shared by CLI and desktop callers.
 // The flow lives in chatgptAuth.ts; here we only persist the result to pi's
 // auth.json in the exact shape it reads: { type: 'oauth', ...creds }.
 // ───────────────────────────────────────────────────────────────────────
 
 async function persistPiOAuth(authPath: string, providerId: string, creds: Record<string, unknown>): Promise<void> {
-  await mkdir(dirname(authPath), { recursive: true })
-  let existing: Json = {}
-  if (existsSync(authPath)) {
-    try { existing = JSON.parse(await readFile(authPath, 'utf8')) as Json } catch (e) { warnSideEffect(`parse ${authPath}`, e) }
-  }
-  existing[providerId] = { type: 'oauth', ...creds }
-  const tmp = `${authPath}.tmp-${process.pid}`
-  await writeFile(tmp, JSON.stringify(existing, null, 2) + '\n', { mode: 0o600 })
-  await rename(tmp, authPath)
+  const storage = await openPiCredentials(authPath)
+  await storage.modify(providerId, async () => ({
+    ...creds,
+    type: 'oauth',
+    access: String(creds.access),
+    refresh: String(creds.refresh),
+    expires: Number(creds.expires),
+  }), { signal: AbortSignal.timeout(10_000) })
 }
 
-export async function loginChatGPT(opts: { json?: boolean; deviceCode?: boolean; emit?: (o: Record<string, unknown>) => void }): Promise<void> {
+export async function loginChatGPT(opts: { json?: boolean; signal?: AbortSignal; emit?: (o: Record<string, unknown>) => void }): Promise<void> {
   // OpenAI's OAuth endpoint is geo-blocked in some regions. getConfig() resolves
   // the proxy into this process's env, but Node's fetch ignores those variables,
   // so the dispatcher has to be installed too — without it the token exchange
@@ -1232,22 +1254,7 @@ export async function loginChatGPT(opts: { json?: boolean; deviceCode?: boolean;
   const json = !!opts.json
   const emit = opts.emit ?? ((o: Record<string, unknown>) => { if (json) console.log(JSON.stringify(o)) })
   try {
-    const creds = opts.deviceCode
-      // Device-code flow: no localhost server, but the account must first enable
-      // "device code authorization for Codex" in ChatGPT > Settings > Security.
-      ? await loginWithDeviceCode((info) => {
-        if (json) emit({ event: 'device_code', userCode: info.userCode, verificationUri: info.verificationUri, intervalSeconds: info.intervalSeconds, expiresInSeconds: info.expiresInSeconds })
-        else {
-          console.log('\nTo sign in to ChatGPT (device code):')
-          console.log(`  1. Open ${info.verificationUri}`)
-          console.log(`  2. Enter code: ${info.userCode}`)
-          console.log('\nIf you see "Enable device code authorization", turn it on in')
-          console.log('ChatGPT > Settings > Security — or just rerun `vn login` (browser flow).')
-          console.log('\nWaiting for authorization…')
-        }
-      })
-      // Default: browser-callback flow (same as the official Codex CLI).
-      : await loginWithBrowser((url) => {
+    const creds = await loginWithBrowser((url) => {
         if (json) emit({ event: 'auth_url', url })
         else {
           console.log('\nOpening your browser to sign in to ChatGPT…')
@@ -1255,7 +1262,7 @@ export async function loginChatGPT(opts: { json?: boolean; deviceCode?: boolean;
         }
         // Best-effort auto-open; the URL is printed/emitted above as fallback.
         void openPath(url)
-      })
+      }, opts.signal)
     await persistPiOAuth(authPath, PI_PROVIDER_ID, creds as unknown as Record<string, unknown>)
     if (json) emit({ event: 'success', provider: PI_PROVIDER_ID })
     else console.log(`\n✓ Signed in. Credentials saved to ${authPath}. Verify with: vn doctor`)
@@ -1265,9 +1272,180 @@ export async function loginChatGPT(opts: { json?: boolean; deviceCode?: boolean;
       message += ' — OpenAI blocks this region without a proxy. Set LOCAL_PROXY_HOST/LOCAL_PROXY_PORT (or http_proxy) and retry; Volcano stays direct.'
     }
     if (json) emit({ event: 'error', message })
-    else console.error(`\nLogin failed: ${message}`)
+    if (opts.emit) throw new Error(message, { cause: e })
+    if (!json) console.error(`\nLogin failed: ${message}`)
     process.exitCode = 1
   }
+}
+
+export type PiModelItem = { id: string; name: string }
+
+export type PiProviderItem = {
+  id: string
+  name: string
+  configured: boolean
+  source?: string
+  authType?: 'api_key' | 'oauth'
+  hasApiKey: boolean
+  hasOAuth: boolean
+  models: PiModelItem[]
+  defaultModelId?: string
+  envKeys: string[]
+  apiKey?: string
+}
+
+export async function getPiAuthProviders(): Promise<PiProviderItem[]> {
+  const config = getConfig()
+  const { runtime, credentials } = await createPiRuntime(config.pi.agentDir, config.childEnv)
+  const providers = runtime.getProviders()
+  const list: PiProviderItem[] = []
+  for (const p of providers) {
+    if (p.id === 'google') continue
+    const { hasApiKey, hasOAuth } = providerLoginMethods(p)
+    if (!hasApiKey && !hasOAuth) continue
+
+    const status = runtime.getProviderAuthStatus(p.id)
+    const models = runtime.getModels(p.id).map(m => ({ id: m.id, name: m.name }))
+    const auth = await runtime.checkAuth(p.id)
+    const stored = await credentials.read(p.id, { signal: AbortSignal.timeout(10_000) })
+    const apiKey = auth?.type === 'api_key' ? (await runtime.getAuth(p.id))?.auth.apiKey : undefined
+    list.push({
+      id: p.id,
+      name: p.name,
+      configured: Boolean(auth),
+      source: stored ? 'stored' : status.source,
+      authType: auth?.type,
+      hasApiKey,
+      hasOAuth,
+      models,
+      defaultModelId: preferredModelId(p.id, models),
+      envKeys: await providerEnvKeys(p.id, config.childEnv),
+      apiKey,
+    })
+  }
+
+  const priority = [
+    'deepseek',
+    'openai-codex',
+    'openai',
+    'anthropic',
+    'kimi-coding',
+    'minimax',
+    'qwen-token-plan-cn',
+    'openrouter',
+    'github-copilot',
+    'xai',
+  ]
+  list.sort((a, b) => {
+    const ai = priority.indexOf(a.id)
+    const bi = priority.indexOf(b.id)
+    if (ai !== -1 && bi !== -1) return ai - bi
+    if (ai !== -1) return -1
+    if (bi !== -1) return 1
+    return a.name.localeCompare(b.name)
+  })
+  return list
+}
+
+export async function setPiApiKey(providerId: string, apiKey: string): Promise<void> {
+  const trimmed = apiKey.trim()
+  if (!trimmed) throw new Error('API key cannot be empty')
+  const storage = await openPiCredentials(getConfig().pi.authPath)
+  await storage.modify(providerId, async () => ({ type: 'api_key', key: trimmed }), { signal: AbortSignal.timeout(10_000) })
+}
+
+export async function removePiAuth(providerId: string): Promise<void> {
+  const authPath = getConfig().pi.authPath
+  const storage = await openPiCredentials(authPath)
+  const current = loadConfigJson()
+  const keys = await providerEnvKeys(providerId, configFileEnv(current))
+  for (const key of keys) delete current[key]
+  await storage.delete(providerId, { signal: AbortSignal.timeout(10_000) })
+  await writeConfigJson(current)
+  resetConfigCache()
+  const inherited = keys.filter(key => process.env[key])
+  if (inherited.length) {
+    throw new Error(`Stored credentials removed; ${inherited.join(', ')} is still inherited from the environment. Unset it and restart VoiceNote.`)
+  }
+}
+
+function getOrCreateDeviceId(): string {
+  try {
+    const current = loadConfigJson()
+    if (typeof current.deviceId === 'string' && current.deviceId) {
+      return current.deviceId
+    }
+    const id = randomUUID()
+    current.deviceId = id
+    void writeConfigJson(current).catch(() => {})
+    return id
+  } catch {
+    return randomUUID()
+  }
+}
+
+export async function loginPiProvider(providerId: string, opts: {
+  json?: boolean
+  emit?: (o: Record<string, unknown>) => void
+  prompt?: LoginInteraction['prompt']
+  signal?: AbortSignal
+} = {}): Promise<void> {
+  const signal = AbortSignal.any([AbortSignal.timeout(15 * 60_000), ...(opts.signal ? [opts.signal] : [])])
+  if (providerId === 'openai-codex') {
+    return loginChatGPT({ ...opts, signal })
+  }
+  const config = getConfig()
+  const authPath = config.pi.authPath
+  await installProxyFromEnv()
+  const json = !!opts.json
+  const emit = opts.emit ?? ((o: Record<string, unknown>) => { if (json) console.log(JSON.stringify(o)) })
+  const { runtime } = await createPiRuntime(config.pi.agentDir, config.childEnv)
+  const provider = runtime.getProvider(providerId)
+  if (!provider) throw new Error(`Unknown provider '${providerId}'`)
+  if (!providerLoginMethods(provider).hasOAuth) throw new Error(`Provider '${providerId}' does not support browser OAuth. Use an API key.`)
+
+  try {
+    await runtime.login(providerId, 'oauth', {
+      signal,
+      prompt: prompt => {
+        if (prompt.type === 'select' && prompt.options.some(option => option.id === 'browser')) {
+          return Promise.resolve('browser')
+        }
+        const promptSignal = AbortSignal.any([signal, ...(prompt.signal ? [prompt.signal] : [])])
+        if (opts.prompt) return opts.prompt({ ...prompt, signal: promptSignal })
+        if (json) throw new Error('Interactive login requires a prompt handler')
+        return promptInTerminal(prompt, promptSignal)
+      },
+      notify: (event) => {
+        if (event.type === 'auth_url') {
+          if (json) emit({ event: 'auth_url', url: event.url })
+          else console.log(`\nSign in to ${provider.name} in your browser:\n  ${event.url}\n${event.instructions ?? ''}`)
+          void openPath(event.url)
+        } else if (event.type === 'device_code') {
+          throw new Error('Device-code sign-in is not supported. Use browser OAuth or an API key.')
+        } else if (event.type === 'progress' || event.type === 'info') {
+          if (json) emit({ event: 'progress', message: event.message })
+          else console.log(event.message)
+        }
+      },
+    }, {
+      getDeviceId: () => getOrCreateDeviceId(),
+      agentName: 'VoiceNote',
+    })
+    if (json) emit({ event: 'success', provider: providerId })
+    else console.log(`\n✓ Signed in to ${provider.name}. Credentials saved to ${authPath}.`)
+  } catch (e: any) {
+    const message = String(e?.message || e)
+    if (json) emit({ event: 'error', message })
+    throw new Error(`Login to ${provider.name} failed: ${message}`, { cause: e })
+  }
+}
+
+export async function isPiAuthConfigured(authPath: string, model: string | null): Promise<boolean> {
+  const { runtime } = await createPiRuntime(dirname(authPath), getConfig().childEnv)
+  if (!model) return runtime.getAvailableSnapshot().length > 0
+  const provider = model.split('/')[0]
+  return provider ? Boolean(await runtime.checkAuth(provider)) : false
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -1288,7 +1466,11 @@ function readStdin(): Promise<string> {
 
 function configFileEnv(raw = loadConfigJson()): Record<string, string> {
   const env: Record<string, string> = {}
-  for (const k of ENV_KEYS) if (typeof raw[k] === 'string') env[k] = raw[k] as string
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v === 'string' && (ENV_KEYS.includes(k) || k.endsWith('_API_KEY') || k.endsWith('_KEY'))) {
+      env[k] = v
+    }
+  }
   return env
 }
 
@@ -1316,11 +1498,11 @@ async function writeConfigJson(value: Record<string, unknown>): Promise<void> {
 export async function configSetData(payload: ConfigSetPayload): Promise<{ ok: true; path: string; ignoredKeys?: string[] }> {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('Config payload must be a JSON object')
   const current = loadConfigJson()
-  const known = ENV_KEYS as readonly string[]
+  const isKnown = (key: string) => ENV_KEYS.includes(key) || key.endsWith('_API_KEY') || key.endsWith('_KEY')
   const ignored: string[] = []
   if (payload.env) {
     for (const [key, value] of Object.entries(payload.env)) {
-      if (!known.includes(key)) { ignored.push(key); continue }
+      if (!isKnown(key)) { ignored.push(key); continue }
       if (value === null) delete current[key]
       else if (typeof value === 'string') current[key] = value
       else throw new Error(`Config value ${key} must be a string or null`)
@@ -1364,6 +1546,7 @@ type PiRunOptions = {
 async function runPi(config: Config, opts: PiRunOptions): Promise<string> {
   return runAgentPrompt({
     agentDir: config.pi.agentDir,
+    env: config.childEnv,
     cwd: opts.cwd,
     // Unset means pi's own default model. There is no second provider to fall
     // back to either way.
@@ -1558,14 +1741,17 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
     transcript = await readSavedTranscript(files.transcript)
     console.log(`✓ Reusing transcript: ${files.transcript}`)
     if (!existsSync(files.audio)) {
-      await mkdir(dirname(files.audio), { recursive: true })
-      await copyFile(rec.sourcePath, files.audio)
-      console.log(`✓ Local audio restored: ${files.audio}`)
+      if (rec.sourcePath && existsSync(rec.sourcePath) && isCandidateFile(rec.sourcePath)) {
+        await mkdir(dirname(files.audio), { recursive: true })
+        await copyFile(rec.sourcePath, files.audio)
+        console.log(`✓ Local audio restored: ${files.audio}`)
+      }
     }
   } else {
     progressStep(nextStep(), totalSteps, 'Copy audio to workspace', files.audio)
     await mkdir(dirname(files.audio), { recursive: true })
-    await copyFile(rec.sourcePath, files.audio)
+    const inputAudio = rec.localAudioPath ?? rec.sourcePath
+    if (resolve(inputAudio) !== resolve(files.audio)) await copyFile(inputAudio, files.audio)
     console.log(`✓ Local audio ready: ${files.audio}`)
 
     progressStep(nextStep(), totalSteps, 'Transcribe audio', transcribeBackendLabel)
@@ -1731,6 +1917,10 @@ async function saveState(config: Config, store: StateFile): Promise<void> {
 /** Upsert the scan-time facts; never touches lifecycle fields. */
 function recordFor(store: StateFile, rec: Recording): JobRecord {
   const existing = store.jobs[rec.sourceId]
+  if (rec.resuming) {
+    if (!existing) throw new Error(`Cannot resume unknown job ${rec.sourceId}`)
+    return existing
+  }
   const next: JobRecord = existing ?? {
     name: basename(rec.sourcePath), source_path: rec.sourcePath, content_hash: rec.contentHash, recorded_at: localIso(rec.recordedAt),
     size_bytes: rec.sizeBytes, duration_seconds: rec.durationSeconds,
@@ -1836,6 +2026,38 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   const { recordings, complete: scanComplete } = single
     ? { recordings: [await toRecording(config, single)], complete: false }
     : await scanRecordings(config)
+
+  // Queued jobs that already have local transcripts or local audio on disk do not
+  // require the physical recorder to be plugged in to retry or regenerate notes.
+  if (!single) {
+    const seenIds = new Set(recordings.map(r => r.sourceId))
+    for (const [id, job] of Object.entries(store.jobs)) {
+      if (job.state !== 'queued' || seenIds.has(id)) continue
+      const rec: Recording = {
+        sourcePath: job.source_path,
+        sizeBytes: job.size_bytes,
+        modifiedAt: job.updated_at,
+        durationSeconds: job.duration_seconds,
+        sourceId: id,
+        contentHash: job.content_hash || '',
+        recordedAt: new Date(job.recorded_at),
+        imported: job.origin === 'import',
+        resuming: true,
+      }
+      const files = recordingFiles(config, rec, store)
+      const hasAudio = existsSync(files.audio)
+      if (!existsSync(files.transcript) && !hasAudio && !existsSync(rec.sourcePath)) continue
+      const discovered = Object.fromEntries(Object.entries(files).filter(([, path]) => existsSync(path)))
+      // A crash may leave outputs on disk before their paths reach the state file.
+      if (Object.keys(discovered).length) job.paths = { ...job.paths, ...discovered }
+      rec.localAudioPath = hasAudio ? files.audio : undefined
+      recordings.push(rec)
+      seenIds.add(id)
+    }
+  }
+
+  recordings.sort((a, b) => Number(b.imported) - Number(a.imported) || a.recordedAt.getTime() - b.recordedAt.getTime())
+
   if (!single && !recorderPresent && !recordings.length) {
     if (shouldLogIdleStatus(`missing:${config.recordDir}`)) {
       console.log(`Idle: recorder not mounted and no manual imports are queued: ${config.recordDir} (repeated idle logs suppressed for 30m)`)
@@ -1862,17 +2084,17 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
       const name = basename(rec.sourcePath)
       skipCounts.already_done = (skipCounts.already_done || 0) + 1
       ;(skipSamples.already_done ||= []).push(name)
-      if (!opts.dryRun) await removeImportedSource(rec.sourcePath)
+      if (!opts.dryRun) await removeImportedSource(config, rec.sourcePath)
       if (verboseSkips) console.log(`  Skip: ${name} (already_done)`)
       continue
     }
     const entry = recordFor(store, rec)
-    const verdict = classify(rec, store.jobs[rec.sourceId], single || rec.imported ? manualLimits : automaticLimits, { force, notesMode: mode === 'notes', now: Date.now() })
+    const verdict = classify(rec, store.jobs[rec.sourceId], single || rec.imported || rec.resuming ? manualLimits : automaticLimits, { force, notesMode: mode === 'notes', now: Date.now() })
     if (verdict.run) { eligible.push(rec); continue }
     skipCounts[verdict.code] = (skipCounts[verdict.code] || 0) + 1
     ;(skipSamples[verdict.code] ||= []).push(entry.name)
     if (verdict.persist) patchJob(entry, { state: 'filtered', code: verdict.code, detail: verdict.detail }, nowIso())
-    if (rec.imported && verdict.code === 'already_done' && !opts.dryRun) await removeImportedSource(rec.sourcePath)
+    if (rec.imported && verdict.code === 'already_done' && !opts.dryRun) await removeImportedSource(config, rec.sourcePath)
     if (verboseSkips) console.log(`  Skip: ${entry.name} (${verdict.code}${verdict.detail ? `: ${verdict.detail}` : ''})`)
   }
   // Only prune against a listing we believe to be complete: if the recorder went
@@ -1887,7 +2109,9 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
     ? `Skipped samples: ${Object.entries(skipSamples).map(([reason, names]) => `${reason}: ${names.slice(0, 3).join(', ')}${names.length > 3 ? `…(+${names.length - 3})` : ''}`).join(' | ')}`
     : ''
   const latestOnly = Boolean(opts.latest)
-  const targets = latestOnly ? eligible.slice(-1) : eligible
+  const targets = latestOnly && eligible.length
+    ? [eligible.reduce((latest, rec) => rec.recordedAt > latest.recordedAt ? rec : latest)]
+    : eligible
   // Preflight: if there is work but the run cannot complete, skip BEFORE spending
   // ASR money, rather than failing per-recording on every 60s StartInterval tick.
   // Idle-suppressed so a misconfigured daemon doesn't spam logs. Skipped for
@@ -1969,10 +2193,10 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
       clearCurrent()
       await saveState(config, store)   // per job, not per batch: a kill -9 costs one job, not the batch
     }
-    if (importedDone) await removeImportedSource(rec.sourcePath)
+    if (importedDone) await removeImportedSource(config, rec.sourcePath)
     // Whole recorder went away — every remaining recorder target would fail the
     // same way. Local imports do not depend on the recorder and keep running.
-    if (!single && !existsSync(config.recordDir) && targets.slice(targetIndex + 1).some(target => !target.imported)) {
+    if (!single && !existsSync(config.recordDir) && targets.slice(targetIndex + 1).some(target => !target.imported && !target.resuming)) {
       console.error(`Recorder disappeared mid-run (${config.recordDir}); stopping. Remaining recordings stay queued.`)
       break
     }
@@ -2364,11 +2588,14 @@ export async function importRecording(file: string, opts: { json?: boolean }): P
   else console.log(`${result.status}: ${result.name}`)
 }
 
-async function removeImportedSource(path: string): Promise<void> {
-  try { await unlink(path) }
-  catch (e: any) { if (e?.code !== 'ENOENT') { warnSideEffect(`remove imported source ${path}`, e); return } }
-  await rmdir(dirname(path)).catch((e: any) => {
-    if (e?.code !== 'ENOENT' && e?.code !== 'ENOTEMPTY') warnSideEffect(`remove empty import dir ${dirname(path)}`, e)
+export async function removeImportedSource(config: Config, path: string): Promise<void> {
+  const inbox = resolve(inboxPathFor(config))
+  const target = resolve(path)
+  if (!target.startsWith(inbox + sep)) return
+  try { await unlink(target) }
+  catch (e: any) { if (e?.code !== 'ENOENT') { warnSideEffect(`remove imported source ${target}`, e); return } }
+  await rmdir(dirname(target)).catch((e: any) => {
+    if (e?.code !== 'ENOENT' && e?.code !== 'ENOTEMPTY') warnSideEffect(`remove empty import dir ${dirname(target)}`, e)
   })
 }
 
@@ -2690,7 +2917,13 @@ export async function collectDoctor() {
     // Provider/model/credentials are pi's own configuration; `pi.available` is
     // all we can honestly report about whether a summary can run.
     summary: { backend: 'pi', model: pi.model, thinking: pi.thinking, tools: pi.tools || null, contextDir: pi.tools ? pi.contextDir : null },
-    pi: { version: piVersion, available: !!piVersion, auth: existsSync(pi.authPath), authPath: pi.authPath, agentDir: pi.agentDir },
+    pi: {
+      version: piVersion,
+      available: !!piVersion,
+      auth: await isPiAuthConfigured(pi.authPath, pi.model),
+      authPath: pi.authPath,
+      agentDir: pi.agentDir,
+    },
     // Outbound proxy for HTTPS endpoints (updater/GitHub). The GUI reads this to
     // route its own update check, so it reports the resolved value.
     proxy: { url: config.childEnv.https_proxy ?? null },

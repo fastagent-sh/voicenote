@@ -6,7 +6,7 @@
 export function extractFirstJsonObject(text: string): string {
   const raw = text.trim()
   // Models often wrap JSON in a ```json fence; strip it before looking inside.
-  const trimmed = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```\s*$/i)?.[1]?.trim() ?? raw
+  const trimmed = raw.match(/^```(?:json)?\s*([\s\S]*?)(?:```\s*)?$/i)?.[1]?.trim() ?? raw
   if (trimmed.startsWith('{') && trimmed.endsWith('}')) return trimmed
   // Find the first balanced {...}
   let depth = 0, start = -1, inString = false, escape = false
@@ -22,6 +22,7 @@ export function extractFirstJsonObject(text: string): string {
     if (ch === '{') { if (depth === 0) start = i; depth++ }
     else if (ch === '}') { depth--; if (depth === 0 && start !== -1) return trimmed.slice(start, i + 1) }
   }
+  if (start !== -1) return trimmed.slice(start)
   return trimmed
 }
 
@@ -30,20 +31,46 @@ export function extractFirstJsonObject(text: string): string {
  * characters JSON forbids raw are touched, and only inside strings, so valid
  * JSON passes through unchanged.
  */
-function escapeControlCharsInStrings(text: string): string {
+export function escapeControlCharsInStrings(text: string): string {
   const ESCAPES: Record<string, string> = { '\n': '\\n', '\r': '\\r', '\t': '\\t' }
   let out = ''
   let inString = false
   let escaped = false
-  for (const ch of text) {
-    if (escaped) { out += ch; escaped = false; continue }
-    if (ch === '\\') { out += ch; escaped = true; continue }
-    if (ch === '"') { inString = !inString; out += ch; continue }
-    if (inString && ESCAPES[ch]) { out += ESCAPES[ch]; continue }
-    // Any other raw control char inside a string would also be rejected.
-    if (inString && ch < ' ') { out += '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0'); continue }
-    out += ch
+  const stack: string[] = []
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!
+    if (inString) {
+      if (escaped) {
+        escaped = false
+        if ('"\\/bfnrt'.includes(ch)) {
+          out += '\\' + ch
+        } else if (ch === 'u') {
+          const hex = text.slice(i + 1, i + 5)
+          if (/^[0-9a-fA-F]{4}$/.test(hex)) out += '\\u'
+          else out += '\\\\u'
+        } else {
+          out += '\\\\' + ch
+        }
+        continue
+      }
+      if (ch === '\\') { escaped = true; continue }
+      if (ch === '"') { inString = false; out += ch; continue }
+      if (ESCAPES[ch]) { out += ESCAPES[ch]; continue }
+      // Any other raw control char inside a string would also be rejected.
+      if (ch < ' ') { out += '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0'); continue }
+      out += ch
+    } else {
+      if (ch === '"') inString = true
+      else if (ch === '{') stack.push('}')
+      else if (ch === '[') stack.push(']')
+      else if (ch === '}' || ch === ']') {
+        if (stack.length && stack[stack.length - 1] === ch) stack.pop()
+      }
+      out += ch
+    }
   }
+  if (inString) out += '"'
+  while (stack.length) out += stack.pop()
   return out
 }
 
@@ -52,11 +79,7 @@ export function parseSummaryJson(text: string): unknown {
   const jsonText = extractFirstJsonObject(text) || '{}'
   try {
     return JSON.parse(jsonText)
-  } catch (first) {
-    try {
-      return JSON.parse(escapeControlCharsInStrings(jsonText))
-    } catch {
-      throw first
-    }
+  } catch {
+    return JSON.parse(escapeControlCharsInStrings(jsonText))
   }
 }

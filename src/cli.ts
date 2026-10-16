@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // The `vn` command: argument parsing on top of core.ts, nothing else.
 import { cac } from 'cac'
+import { createPiRuntime, providerLoginMethods } from './piRuntime.ts'
 import {
   VERSION,
-  configGet, configSet, doctor, ensureScheduler, forgetRecording, importRecording,
-  installScheduler, jobsList, lastMeeting, listMeetings, loginChatGPT, openTarget,
-  ignoreJob, printSchedulerStatus, regenerateNotes, retryRecording, runPipeline, showErrors, showLog,
+  configGet, configSet, doctor, ensureScheduler, forgetRecording, getConfig, importRecording,
+  installScheduler, jobsList, lastMeeting, listMeetings, loginChatGPT, loginPiProvider, openTarget,
+  ignoreJob, printSchedulerStatus, regenerateNotes, retryRecording, runPipeline, setPiApiKey, showErrors, showLog,
   uninstallScheduler, upgradeSelf,
 } from './core.ts'
 
@@ -59,10 +60,70 @@ cli.command('upgrade', 'Upgrade to the latest published version via npm i -g').a
 cli.command('doctor', 'Check environment')
   .option('--json', 'Output structured status as JSON (for the GUI)')
   .action((opts: { json?: boolean }) => doctor(opts))
-cli.command('login', 'Sign in to ChatGPT (Codex OAuth) for the pi summary backend')
+cli.command('login [provider]', 'Sign in to a provider (default: openai-codex / ChatGPT OAuth, or deepseek, openai, anthropic, etc.)')
   .option('--json', 'Emit machine-readable JSON events (for the GUI client)')
-  .option('--device-code', 'Use the device-code flow instead of the browser callback (needs the ChatGPT security-settings opt-in)')
-  .action((opts: { json?: boolean; deviceCode?: boolean }) => loginChatGPT(opts))
+  .option('--api-key [key]', 'Set or prompt for an API key instead of OAuth')
+  .action(async (provider: string | undefined, opts: { json?: boolean; apiKey?: string | boolean }) => {
+    const providerId = provider || 'openai-codex'
+    if (providerId === 'openai-codex' && !opts.apiKey) {
+      return loginChatGPT(opts)
+    }
+    const config = getConfig()
+    const { runtime } = await createPiRuntime(config.pi.agentDir, config.childEnv)
+    const p = runtime.getProvider(providerId)
+    if (!p) {
+      console.error(`Unknown provider '${providerId}'.`)
+      process.exitCode = 1
+      return
+    }
+
+    const { hasApiKey, hasOAuth } = providerLoginMethods(p)
+    const wantApiKey = Boolean(opts.apiKey) || (!hasOAuth && hasApiKey)
+    if (wantApiKey) {
+      if (!hasApiKey) {
+        if (opts.json) console.log(JSON.stringify({ event: 'error', message: `Provider '${providerId}' does not support API key authentication.` }))
+        else console.error(`Provider '${providerId}' does not support API key authentication.`)
+        process.exitCode = 1
+        return
+      }
+      let key = typeof opts.apiKey === 'string' ? opts.apiKey.trim() : ''
+      if (!key && opts.json) {
+        console.log(JSON.stringify({ event: 'error', message: `API key is required in --json mode. Use --api-key <key>` }))
+        process.exitCode = 1
+        return
+      }
+      if (!key) {
+        const readline = await import('node:readline/promises')
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+        try {
+          key = (await rl.question(`Enter API key for ${p.name}: `)).trim()
+        } finally {
+          rl.close()
+        }
+      }
+      if (!key) {
+        console.error('API key cannot be empty.')
+        process.exitCode = 1
+        return
+      }
+      await setPiApiKey(providerId, key)
+      if (opts.json) console.log(JSON.stringify({ event: 'success', provider: providerId }))
+      else console.log(`\n✓ API key for ${p.name} saved to ${config.pi.authPath}.`)
+      return
+    }
+
+    if (hasOAuth) {
+      try {
+        await loginPiProvider(providerId, opts)
+      } catch (e: any) {
+        if (!opts.json) console.error(`\n${e?.message || e}`)
+        process.exitCode = 1
+      }
+      return
+    }
+    console.error(`Provider '${providerId}' does not support interactive login.`)
+    process.exitCode = 1
+  })
 cli.command('config <action>', 'Read/write file-based config. action: get (print JSON) | set (write from stdin JSON)')
   .action((action: string) => {
     if (action === 'set') return configSet()

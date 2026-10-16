@@ -20,13 +20,9 @@ const SCOPE = 'openid profile email offline_access api.connectors.read api.conne
 const ORIGINATOR = 'codex_cli_rs'
 // Only these two callback ports are registered for this client_id.
 const CALLBACK_PORTS = [1455, 1457]
-const DEVICE_USER_CODE_URL = `${AUTH_BASE}/api/accounts/deviceauth/usercode`
-const DEVICE_TOKEN_URL = `${AUTH_BASE}/api/accounts/deviceauth/token`
-const DEVICE_REDIRECT_URI = `${AUTH_BASE}/deviceauth/callback`
-const DEVICE_TIMEOUT_MS = 15 * 60 * 1000
+const LOGIN_TIMEOUT_MS = 15 * 60 * 1000
 const JWT_CLAIM_PATH = 'https://api.openai.com/auth'
 
-export const DEVICE_VERIFICATION_URI = `${AUTH_BASE}/codex/device`
 /** Provider key under which pi reads these credentials in auth.json. */
 export const PI_PROVIDER_ID = 'openai-codex'
 
@@ -35,13 +31,6 @@ export interface ChatGPTCredential {
   refresh: string
   expires: number
   accountId: string
-}
-
-export interface DeviceCodeInfo {
-  userCode: string
-  verificationUri: string
-  intervalSeconds: number
-  expiresInSeconds: number
 }
 
 const b64url = (b: Buffer) => b.toString('base64url')
@@ -64,11 +53,12 @@ export function buildAuthorizeUrl(redirectUri: string, challenge: string, state:
   return url.toString()
 }
 
-async function postForm(url: string, body: Record<string, string>): Promise<any> {
+async function postForm(url: string, body: Record<string, string>, signal: AbortSignal): Promise<any> {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams(body),
+    signal,
   })
   if (!res.ok) throw new Error(`${url} failed (${res.status}): ${(await res.text().catch(() => '')) || res.statusText}`)
   return res.json()
@@ -100,21 +90,18 @@ export function accountIdFromAccessToken(token: string): string | null {
   }
 }
 
-async function exchangeCode(code: string, verifier: string, redirectUri: string): Promise<ChatGPTCredential> {
+async function exchangeCode(code: string, verifier: string, redirectUri: string, signal: AbortSignal): Promise<ChatGPTCredential> {
   return credentialFromTokens(await postForm(TOKEN_URL, {
     grant_type: 'authorization_code',
     client_id: CLIENT_ID,
     code,
     code_verifier: verifier,
     redirect_uri: redirectUri,
-  }))
+  }, signal))
 }
 
-/**
- * Browser flow: serve the OAuth callback on an allowlisted localhost port and
- * wait (no timeout — the caller's process lifetime is the timeout).
- */
-export async function loginWithBrowser(onAuthUrl: (url: string) => void): Promise<ChatGPTCredential> {
+export async function loginWithBrowser(onAuthUrl: (url: string) => void, signal = AbortSignal.timeout(LOGIN_TIMEOUT_MS)): Promise<ChatGPTCredential> {
+  signal.throwIfAborted()
   const verifier = b64url(randomBytes(32))
   const challenge = b64url(createHash('sha256').update(verifier).digest())
   const state = b64url(randomBytes(32))
@@ -142,12 +129,17 @@ export async function loginWithBrowser(onAuthUrl: (url: string) => void): Promis
   })
 
   const port = await listenOnAllowlistedPort(server)
+  const abort = () => rejectCode(signal.reason)
+  signal.addEventListener('abort', abort, { once: true })
   try {
+    signal.throwIfAborted()
     const redirectUri = `http://localhost:${port}/auth/callback`
     onAuthUrl(buildAuthorizeUrl(redirectUri, challenge, state))
-    return await exchangeCode(await codePromise, verifier, redirectUri)
+    return await exchangeCode(await codePromise, verifier, redirectUri, signal)
   } finally {
+    signal.removeEventListener('abort', abort)
     server.close()
+    server.closeAllConnections()
   }
 }
 
@@ -164,61 +156,4 @@ function listenOnAllowlistedPort(server: ReturnType<typeof createServer>): Promi
     }
     throw new Error(`Ports ${CALLBACK_PORTS.join(' and ')} are both busy; OpenAI accepts no other callback port. Close whatever holds them (another sign-in?) and retry.`)
   })()
-}
-
-/**
- * Device-code flow: no local server, but the account must have enabled
- * "device code authorization for Codex" in ChatGPT > Settings > Security.
- */
-export async function loginWithDeviceCode(onDeviceCode: (info: DeviceCodeInfo) => void): Promise<ChatGPTCredential> {
-  const res = await fetch(DEVICE_USER_CODE_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ client_id: CLIENT_ID }),
-  })
-  if (res.status === 404) throw new Error('Device-code login is not enabled for this account. Use the browser flow (`vn login`).')
-  if (!res.ok) throw new Error(`Device code request failed (${res.status}): ${(await res.text().catch(() => '')) || res.statusText}`)
-  const start: any = await res.json()
-  const intervalSeconds = Number(start?.interval)
-  if (!start?.device_auth_id || !start.user_code || !Number.isFinite(intervalSeconds)) {
-    throw new Error(`Invalid device code response: ${JSON.stringify(start)}`)
-  }
-  onDeviceCode({
-    userCode: start.user_code,
-    verificationUri: DEVICE_VERIFICATION_URI,
-    intervalSeconds,
-    expiresInSeconds: DEVICE_TIMEOUT_MS / 1000,
-  })
-
-  const deadline = Date.now() + DEVICE_TIMEOUT_MS
-  let waitMs = Math.max(intervalSeconds, 1) * 1000
-  while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, waitMs))
-    const poll = await fetch(DEVICE_TOKEN_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ device_auth_id: start.device_auth_id, user_code: start.user_code }),
-    })
-    const body = await poll.text().catch(() => '')
-    if (poll.ok) {
-      const json: any = body ? JSON.parse(body) : {}
-      if (!json?.authorization_code || !json.code_verifier) throw new Error(`Invalid device auth token response: ${body}`)
-      return exchangeCode(json.authorization_code, json.code_verifier, DEVICE_REDIRECT_URI)
-    }
-    const code = deviceErrorCode(body)
-    if (code === 'slow_down') waitMs += 1000
-    else if (poll.status !== 403 && poll.status !== 404 && code !== 'deviceauth_authorization_pending') {
-      throw new Error(`Device auth failed (${poll.status})${body ? `: ${body}` : ''}`)
-    }
-  }
-  throw new Error('Device-code sign-in timed out. Rerun and enter the code sooner.')
-}
-
-function deviceErrorCode(body: string): string | undefined {
-  try {
-    const error = JSON.parse(body)?.error
-    return typeof error === 'object' ? error?.code : error
-  } catch {
-    return undefined
-  }
 }
