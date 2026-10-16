@@ -221,6 +221,14 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
     availableModels.unshift({ id: currentModel, label: currentModel })
   }
 
+  useEffect(() => {
+    if (currentStatus?.apiKey || (currentProviderMeta.hasApiKey && !currentProviderMeta.hasOAuth)) {
+      setAuthMethodChoice('api_key')
+    } else if (isConfigured && currentProviderMeta.hasOAuth) {
+      setAuthMethodChoice('oauth')
+    }
+  }, [currentProviderId, currentStatus?.configured, currentStatus?.apiKey])
+
   const handleProviderChange = (newProviderId: string) => {
     setEditingKey(false)
     setApiKeyInput('')
@@ -228,13 +236,13 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
       setEnv({ ...env, VOICENOTE_PI_MODEL: 'custom/model-id' })
       return
     }
+    const targetStatus = providerStatuses.find(p => p.id === newProviderId)
     const targetPreset = PROVIDERS.find(p => p.id === newProviderId)
-    // Always default to the most advanced / recommended model for this provider
     const bestModel = PROVIDER_RECOMMENDED_MODELS[newProviderId]
       || targetPreset?.models[0]?.id
       || `${newProviderId}/default`
     setEnv({ ...env, VOICENOTE_PI_MODEL: bestModel })
-    if (targetPreset?.hasApiKey && !targetPreset.hasOAuth) {
+    if (targetStatus?.apiKey || (targetPreset?.hasApiKey && !targetPreset.hasOAuth)) {
       setAuthMethodChoice('api_key')
     } else {
       setAuthMethodChoice('oauth')
@@ -351,6 +359,9 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
                 value={currentModel}
                 onChange={e => handleModelChange(e.target.value)}
               >
+                {!currentModel && (
+                  <option value="">使用引擎默认推荐 ({availableModels[0]?.label ?? '默认'})</option>
+                )}
                 {availableModels.map(m => (
                   <option key={m.id} value={m.id}>{m.label}</option>
                 ))}
@@ -360,108 +371,120 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
 
           {/* Authentication area for selected provider */}
           <div style={{ borderTop: '1px solid var(--line)', marginTop: 12, paddingTop: 12 }}>
-            <div className="sheet-row" style={{ marginBottom: 8 }}>
-              <span style={{ fontWeight: 550 }}>认证凭证 ({currentProviderMeta.name})</span>
-              {isConfigured ? (
-                <span className="pill ok">✓ 已配置 {currentStatus?.source === 'environment' ? '(环境变量)' : ''}</span>
-              ) : (
-                <span className="pill" style={{ color: 'var(--warn)' }}>未配置认证</span>
-              )}
-            </div>
+            {(() => {
+              const isOAuthConfigured = isConfigured && !currentStatus?.apiKey
+              const isApiKeyConfigured = Boolean(currentStatus?.apiKey) || (currentStatus?.source === 'environment')
+              const currentTabConfigured = authMethodChoice === 'api_key'
+                ? isApiKeyConfigured
+                : (currentProviderMeta.hasOAuth ? isOAuthConfigured : isConfigured)
 
-            {/* Toggle if both OAuth and API key are available */}
-            {currentProviderMeta.hasApiKey && currentProviderMeta.hasOAuth && (
-              <div className="segmented" style={{ marginBottom: 10, width: 'fit-content' }}>
-                <button
-                  type="button"
-                  className={authMethodChoice === 'oauth' ? 'on' : ''}
-                  onClick={() => setAuthMethodChoice('oauth')}
-                >
-                  OAuth 登录
-                </button>
-                <button
-                  type="button"
-                  className={authMethodChoice === 'api_key' ? 'on' : ''}
-                  onClick={() => setAuthMethodChoice('api_key')}
-                >
-                  API Key
-                </button>
-              </div>
-            )}
+              return (
+                <>
+                  <div className="sheet-row" style={{ marginBottom: 8 }}>
+                    <span style={{ fontWeight: 550 }}>认证凭证 ({currentProviderMeta.name})</span>
+                    {currentTabConfigured ? (
+                      <span className="pill ok">✓ 已配置 {currentStatus?.source === 'environment' ? '(环境变量)' : ''}</span>
+                    ) : (
+                      <span className="pill" style={{ color: 'var(--warn)' }}>未配置认证</span>
+                    )}
+                  </div>
 
-            {/* API Key Form */}
-            {(authMethodChoice === 'api_key' || (currentProviderMeta.hasApiKey && !currentProviderMeta.hasOAuth)) && (
-              <div>
-                {isConfigured && !editingKey ? (
-                  <div className="sheet-row">
-                    <span className="mono" style={{ fontSize: 13, userSelect: 'text' }}>
-                      {currentStatus?.apiKey ? `Key: ${currentStatus.apiKey}` : 'API Key 已配置'}
-                    </span>
-                    <div className="row-actions">
-                      <button onClick={() => { setEditingKey(true); setApiKeyInput(currentStatus?.apiKey || '') }}>修改 Key</button>
-                      <button className="link" onClick={() => void handleRemoveAuth()} style={{ color: 'var(--danger)' }}>清除</button>
+                  {/* Toggle if both OAuth and API key are available */}
+                  {currentProviderMeta.hasApiKey && currentProviderMeta.hasOAuth && (
+                    <div className="segmented" style={{ marginBottom: 10, width: 'fit-content' }}>
+                      <button
+                        type="button"
+                        className={authMethodChoice === 'oauth' ? 'on' : ''}
+                        onClick={() => setAuthMethodChoice('oauth')}
+                      >
+                        OAuth 登录
+                      </button>
+                      <button
+                        type="button"
+                        className={authMethodChoice === 'api_key' ? 'on' : ''}
+                        onClick={() => setAuthMethodChoice('api_key')}
+                      >
+                        API Key
+                      </button>
                     </div>
-                  </div>
-                ) : (
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                    <input
-                      type="text"
-                      autoFocus={editingKey}
-                      placeholder={`输入 ${currentProviderMeta.name} API Key (例如 sk-...)`}
-                      value={apiKeyInput}
-                      onChange={e => setApiKeyInput(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter') void handleSaveKey() }}
-                    />
-                    <button
-                      className="primary"
-                      style={{ flex: 'none', whiteSpace: 'nowrap' }}
-                      onClick={() => void handleSaveKey()}
-                      disabled={keySaving || !apiKeyInput.trim()}
-                    >
-                      {keySaving ? '保存中…' : '保存 Key'}
-                    </button>
-                    {editingKey && (
-                      <button style={{ flex: 'none' }} onClick={() => setEditingKey(false)}>
-                        取消
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
+                  )}
 
-            {/* OAuth Login */}
-            {(authMethodChoice === 'oauth' || (!currentProviderMeta.hasApiKey && currentProviderMeta.hasOAuth)) && (
-              <div>
-                <div className="sheet-row">
-                  <span className="hint">
-                    {isConfigured ? '已通过浏览器完成账号授权，可正常生成纪要。' : '需要完成一次浏览器授权以绑定账号。'}
-                  </span>
-                  <div className="row-actions">
-                    <button
-                      className={isConfigured ? '' : 'primary'}
-                      onClick={() => void handleStartOAuth()}
-                      disabled={oauthPending}
-                    >
-                      {oauthPending ? '正在授权…' : isConfigured ? '重新登录' : '授权登录'}
-                    </button>
-                    {isConfigured && (
-                      <button className="link" onClick={() => void handleRemoveAuth()} style={{ color: 'var(--danger)' }}>
-                        退出
-                      </button>
-                    )}
-                  </div>
-                </div>
+                  {/* API Key Form */}
+                  {(authMethodChoice === 'api_key' || (currentProviderMeta.hasApiKey && !currentProviderMeta.hasOAuth)) && (
+                    <div>
+                      {isApiKeyConfigured && !editingKey ? (
+                        <div className="sheet-row">
+                          <span className="mono" style={{ fontSize: 13, userSelect: 'text' }}>
+                            {currentStatus?.apiKey ? `Key: ${currentStatus.apiKey}` : 'API Key 已配置 (环境变量)'}
+                          </span>
+                          <div className="row-actions">
+                            <button onClick={() => { setEditingKey(true); setApiKeyInput(currentStatus?.apiKey || '') }}>修改 Key</button>
+                            <button className="link" onClick={() => void handleRemoveAuth()} style={{ color: 'var(--danger)' }}>清除</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                          <input
+                            type="text"
+                            autoFocus={editingKey}
+                            placeholder={`输入 ${currentProviderMeta.name} API Key (例如 sk-...)`}
+                            value={apiKeyInput}
+                            onChange={e => setApiKeyInput(e.target.value)}
+                            onKeyDown={e => { if (e.key === 'Enter') void handleSaveKey() }}
+                          />
+                          <button
+                            className="primary"
+                            style={{ flex: 'none', whiteSpace: 'nowrap' }}
+                            onClick={() => void handleSaveKey()}
+                            disabled={keySaving || !apiKeyInput.trim()}
+                          >
+                            {keySaving ? '保存中…' : '保存 Key'}
+                          </button>
+                          {editingKey && (
+                            <button style={{ flex: 'none' }} onClick={() => setEditingKey(false)}>
+                              取消
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
-                {oauthPending && (
-                  <div className="oauth-pending-box" style={{ marginTop: 8 }}>
-                    <span className="pulse" />
-                    <span style={{ flex: 1 }}>{oauthStatusText || '已在浏览器打开登录页，请在网页中完成授权…'}</span>
-                    <button onClick={() => { setOauthPending(false); setOauthStatusText(null) }}>取消</button>
-                  </div>
-                )}
-              </div>
-            )}
+                  {/* OAuth Login */}
+                  {(authMethodChoice === 'oauth' || (!currentProviderMeta.hasApiKey && currentProviderMeta.hasOAuth)) && (
+                    <div>
+                      <div className="sheet-row">
+                        <span className="hint">
+                          {isOAuthConfigured ? '已通过浏览器完成账号授权，可正常生成纪要。' : '需要完成一次浏览器授权以绑定账号。'}
+                        </span>
+                        <div className="row-actions">
+                          <button
+                            className={isOAuthConfigured ? '' : 'primary'}
+                            onClick={() => void handleStartOAuth()}
+                            disabled={oauthPending}
+                          >
+                            {oauthPending ? '正在授权…' : isOAuthConfigured ? '重新登录' : '授权登录'}
+                          </button>
+                          {isOAuthConfigured && (
+                            <button className="link" onClick={() => void handleRemoveAuth()} style={{ color: 'var(--danger)' }}>
+                              退出
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {oauthPending && (
+                        <div className="oauth-pending-box" style={{ marginTop: 8 }}>
+                          <span className="pulse" />
+                          <span style={{ flex: 1 }}>{oauthStatusText || '已在浏览器打开登录页，请在网页中完成授权…'}</span>
+                          <button onClick={() => { setOauthPending(false); setOauthStatusText(null) }}>取消</button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
+              )
+            })()}
           </div>
         </section>
 

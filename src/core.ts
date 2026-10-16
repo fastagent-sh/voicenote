@@ -161,6 +161,12 @@ const ENV_KEYS = [
   'LOCAL_PROXY_HOST', 'LOCAL_PROXY_PORT', 'LOCAL_NO_PROXY',
   'OPENAI_API_KEY',
   'DEEPSEEK_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'MINIMAX_API_KEY',
+  'KIMI_API_KEY',
+  'OPENROUTER_API_KEY',
+  'GEMINI_API_KEY',
+  'QWEN_API_KEY',
 ]
 
 // The Volcano ASR endpoint must NEVER go through the SOCKS/HTTP proxy that pi
@@ -234,6 +240,16 @@ function readSettings(file: Record<string, unknown>): Settings {
     const inherited = process.env[key]
     if (inherited !== undefined) settings[key] = inherited
     else if (typeof file[key] === 'string') settings[key] = file[key] as string
+  }
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && (key.endsWith('_API_KEY') || key.endsWith('_KEY')) && !settings[key]) {
+      settings[key] = value
+    }
+  }
+  for (const [key, value] of Object.entries(file)) {
+    if (typeof value === 'string' && (key.endsWith('_API_KEY') || key.endsWith('_KEY')) && !settings[key]) {
+      settings[key] = value
+    }
   }
   return settings
 }
@@ -1460,17 +1476,21 @@ function providerEnvKeyConfigured(providerId: string, childEnv: Record<string, s
 }
 
 export function isPiAuthConfigured(authPath: string, model: string | null): boolean {
-  const requiredProvider = (model ? model.split('/')[0] : 'openai-codex') || 'openai-codex'
   const childEnv = getConfig().childEnv
 
-  if (requiredProvider && providerEnvKeyConfigured(requiredProvider, childEnv)) {
-    return true
+  if (model) {
+    const requiredProvider = model.split('/')[0]
+    if (requiredProvider && providerEnvKeyConfigured(requiredProvider, childEnv)) return true
+  } else {
+    const defaultCandidates = ['deepseek', 'openai-codex', 'openai', 'anthropic', 'kimi-coding', 'qwen-token-plan-cn', 'minimax', 'openrouter']
+    if (defaultCandidates.some(p => providerEnvKeyConfigured(p, childEnv))) return true
   }
 
   if (existsSync(authPath)) {
     try {
       const data = JSON.parse(readFileSync(authPath, 'utf8'))
       if (data && typeof data === 'object') {
+        const requiredProvider = model ? model.split('/')[0] : null
         if (requiredProvider && data[requiredProvider]) return true
         if (!model && Object.keys(data).length > 0) return true
       }
@@ -1497,7 +1517,11 @@ function readStdin(): Promise<string> {
 
 function configFileEnv(raw = loadConfigJson()): Record<string, string> {
   const env: Record<string, string> = {}
-  for (const k of ENV_KEYS) if (typeof raw[k] === 'string') env[k] = raw[k] as string
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v === 'string' && (ENV_KEYS.includes(k) || k.endsWith('_API_KEY') || k.endsWith('_KEY'))) {
+      env[k] = v
+    }
+  }
   return env
 }
 
@@ -1525,11 +1549,11 @@ async function writeConfigJson(value: Record<string, unknown>): Promise<void> {
 export async function configSetData(payload: ConfigSetPayload): Promise<{ ok: true; path: string; ignoredKeys?: string[] }> {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('Config payload must be a JSON object')
   const current = loadConfigJson()
-  const known = ENV_KEYS as readonly string[]
+  const isKnown = (key: string) => ENV_KEYS.includes(key) || key.endsWith('_API_KEY') || key.endsWith('_KEY')
   const ignored: string[] = []
   if (payload.env) {
     for (const [key, value] of Object.entries(payload.env)) {
-      if (!known.includes(key)) { ignored.push(key); continue }
+      if (!isKnown(key)) { ignored.push(key); continue }
       if (value === null) delete current[key]
       else if (typeof value === 'string') current[key] = value
       else throw new Error(`Config value ${key} must be a string or null`)

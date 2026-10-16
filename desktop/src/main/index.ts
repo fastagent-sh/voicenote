@@ -310,6 +310,7 @@ function registerIpc(): void {
   })
   ipcMain.handle('login', async (_e, providerId?: string) => {
     await loginPiProvider(providerId || 'openai-codex', { json: true, emit: (event) => broadcast('login:event', event) })
+    resetConfigCache()
   })
   ipcMain.handle('pi:providers', () => getPiAuthProviders())
   ipcMain.handle('pi:set-api-key', async (_e, providerId: string, apiKey: string) => {
