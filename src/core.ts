@@ -1370,6 +1370,21 @@ export async function removePiAuth(providerId: string): Promise<void> {
   }
 }
 
+function getOrCreateDeviceId(): string {
+  try {
+    const current = loadConfigJson()
+    if (typeof current.deviceId === 'string' && current.deviceId) {
+      return current.deviceId
+    }
+    const id = randomUUID()
+    current.deviceId = id
+    void writeConfigJson(current).catch(() => {})
+    return id
+  } catch {
+    return randomUUID()
+  }
+}
+
 export async function loginPiProvider(providerId: string, opts: {
   json?: boolean
   emit?: (o: Record<string, unknown>) => void
@@ -1414,6 +1429,9 @@ export async function loginPiProvider(providerId: string, opts: {
           else console.log(event.message)
         }
       },
+    }, {
+      getDeviceId: () => getOrCreateDeviceId(),
+      agentName: 'VoiceNote',
     })
     if (json) emit({ event: 'success', provider: providerId })
     else console.log(`\n✓ Signed in to ${provider.name}. Credentials saved to ${authPath}.`)

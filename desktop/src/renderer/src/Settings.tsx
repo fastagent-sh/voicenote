@@ -26,6 +26,7 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
   const [authMethodChoice, setAuthMethodChoice] = useState<'oauth' | 'api_key'>('oauth')
   const [oauthPending, setOauthPending] = useState(false)
   const [oauthStatusText, setOauthStatusText] = useState<string | null>(null)
+  const [oauthError, setOauthError] = useState<string | null>(null)
   const [loginPrompt, setLoginPrompt] = useState<Extract<LoginEvent, { event: 'prompt' }> | null>(null)
   const [loginAnswer, setLoginAnswer] = useState('')
 
@@ -51,6 +52,7 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
     return vn.on('login:event', (event: LoginEvent) => {
       if (event.event === 'auth_url') {
         setOauthStatusText('已打开浏览器，请在网页中完成授权…')
+        setOauthError(null)
       }
       if (event.event === 'prompt') {
         setLoginPrompt(event)
@@ -68,7 +70,8 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
         void loadProviderStatuses()
       }
       if (event.event === 'error') {
-        setOauthStatusText(`登录失败: ${event.message}`)
+        setOauthError(`登录失败: ${event.message}`)
+        setOauthStatusText(null)
         setOauthPending(false)
       }
     })
@@ -178,10 +181,12 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
 
   const handleStartOAuth = async () => {
     setOauthPending(true)
+    setOauthError(null)
     setOauthStatusText('正在打开浏览器登录页面…')
     try {
       await vn.piLoginOAuth(currentProviderId)
     } catch (e: any) {
+      setOauthError(`登录失败: ${e.message}`)
       setMessage(`登录失败: ${e.message}`)
     } finally {
       setOauthPending(false)
@@ -366,6 +371,12 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
                           )}
                         </div>
                       </div>
+
+                      {oauthError && (
+                        <div style={{ color: 'var(--danger)', fontSize: 12.5, marginTop: 8 }}>
+                          {oauthError}
+                        </div>
+                      )}
 
                       {oauthPending && (
                         <div className="oauth-pending-box" style={{ marginTop: 8 }}>
