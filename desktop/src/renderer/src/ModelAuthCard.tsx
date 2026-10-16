@@ -51,7 +51,7 @@ export function ModelAuthCard({
   useEffect(() => {
     return vn.on('login:event', (event: LoginEvent) => {
       if (event.event === 'prompt') {
-        setLoginPrompt({ id: event.id, question: event.prompt.question })
+        setLoginPrompt({ id: event.id, question: event.prompt.message })
         setPromptAnswer('')
       }
       if (event.event === 'prompt_closed') {
