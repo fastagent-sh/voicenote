@@ -68,7 +68,7 @@ export {
 }
 import {
   installScheduler, uninstallScheduler, printSchedulerStatus, ensureScheduler,
-  agentStatus, runCommand, readLogTail, dailyLogPath, plistPath,
+  agentStatus, runCommand, readLogTail, dailyLogPath, plistPath, TASK_NAME,
 } from './scheduler.ts'
 export {
   installScheduler, uninstallScheduler, printSchedulerStatus, ensureScheduler,
