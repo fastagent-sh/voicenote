@@ -17,6 +17,7 @@ import {
 import { promptInTerminal, type LoginInteraction } from './loginInteraction.ts'
 import { loginWithBrowser, PI_PROVIDER_ID } from './chatgptAuth.ts'
 import { installProxyFromEnv } from './piAgent.ts'
+import { openPath } from './process.ts'
 
 export type PiModelItem = { id: string; name: string }
 
@@ -32,20 +33,6 @@ export type PiProviderItem = {
   defaultModelId?: string
   envKeys: string[]
   apiKey?: string
-}
-
-async function openPath(target: string, timeoutMs = 5000): Promise<{ stdout: string; stderr: string; code: number }> {
-  const { spawn } = await import('node:child_process')
-  const IS_WINDOWS = process.platform === 'win32'
-  const IS_MAC = process.platform === 'darwin'
-  const command = IS_MAC ? 'open' : IS_WINDOWS ? 'cmd.exe' : 'xdg-open'
-  const args = IS_WINDOWS ? ['/c', 'start', '""', target] : [target]
-  return new Promise((resolve) => {
-    const proc = spawn(command, args, { stdio: 'ignore', windowsHide: true })
-    const timer = setTimeout(() => { proc.kill(); resolve({ stdout: '', stderr: 'timeout', code: 1 }) }, timeoutMs)
-    proc.on('error', (err) => { clearTimeout(timer); resolve({ stdout: '', stderr: String(err), code: 1 }) })
-    proc.on('close', (code) => { clearTimeout(timer); resolve({ stdout: '', stderr: '', code: code ?? 0 }) })
-  })
 }
 
 async function persistPiOAuth(authPath: string, providerId: string, creds: Record<string, unknown>): Promise<void> {

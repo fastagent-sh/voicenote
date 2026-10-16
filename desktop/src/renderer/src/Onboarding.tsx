@@ -31,7 +31,7 @@ export function Onboarding({ status, onDone, onRefresh }: {
     })
   }, [])
 
-  const signedIn = !!status?.pi.auth
+  const hasAuth = !!status?.pi.auth || Boolean(pendingApiKey?.key)
   const hasKey = asrKey.trim().length > 0
 
   const save = async () => {
@@ -65,7 +65,7 @@ export function Onboarding({ status, onDone, onRefresh }: {
         <p className="hint">三步就能开始：把录音变成可读的纪要。</p>
 
         <section>
-          <h3><span className={signedIn ? 'step-dot done' : 'step-dot'}>1</span> 配置纪要模型 (ChatGPT / DeepSeek 等)</h3>
+          <h3><span className={hasAuth ? 'step-dot done' : 'step-dot'}>1</span> 配置纪要模型 (ChatGPT / DeepSeek 等)</h3>
           <p className="hint">纪要由 AI 模型生成。支持 ChatGPT 账号授权登录，或配置 DeepSeek 等模型的 API Key。</p>
           <ModelAuthCard
             currentModel={model}
@@ -106,7 +106,7 @@ export function Onboarding({ status, onDone, onRefresh }: {
         {error && <p className="problem">{error}</p>}
         <div className="sheet-row">
           <button className="link" onClick={onDone}>稍后再说</button>
-          <button className="primary" onClick={() => void save()} disabled={saving || !hasKey}>开始使用</button>
+          <button className="primary" onClick={() => void save()} disabled={saving || !hasAuth || !hasKey}>开始使用</button>
         </div>
       </main>
     </div>

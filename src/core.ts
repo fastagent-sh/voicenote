@@ -3,25 +3,18 @@
 // (cli.ts) and the desktop app are both callers.
 import { volcanoTranscribeAudio } from './asr/volcano.ts'
 import { parseLockOwner } from './runLock.ts'
-import { createPiRuntime, openPiCredentials, providerEnvKeys, providerLoginMethods, preferredModelId } from './piRuntime.ts'
-import { promptInTerminal, type LoginInteraction } from './loginInteraction.ts'
-import { loginWithBrowser, PI_PROVIDER_ID } from './chatgptAuth.ts'
 import { installProxyFromEnv, runAgentPrompt } from './piAgent.ts'
 import { parseSummaryJson } from './summaryJson.ts'
 import { emitPipelineEvent } from './progress.ts'
 import { applyOutcome, buildJobsView, classify, emptyState, ignoreRecording, localIso, MAX_ATTEMPTS, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, requeueForRegenerate, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs.ts'
 import {
-  appConfigDir, appStateDir, CONFIG_DIR, STATE_DIR, CONFIG_ENV_PATH, LOG_DIR,
-  IS_WINDOWS, IS_MAC, ENV_KEYS, VOLCANO_NO_PROXY_HOSTS,
-  type Config, type VolcanoConfig, type PiConfig, type SpeakersConfig, type SpeakerSelf, type SpeakerKnown,
-  type Settings, type ConfigSetPayload,
-  expandHome, loadConfigJson, writeConfigJson, configFileEnv,
+  CONFIG_DIR, STATE_DIR, LOG_DIR, IS_WINDOWS, dailyLogPath,
   getConfig, resetConfigCache, configGetData, configSetData, configGet, configSet,
-  macProxyFromScutil, windowsProxyFromRegistry, systemProxyUrl, proxyEnv,
-  volcanoFrom, volcanoAuthHeaders, settingNumber, normalizeSpeakers, DEFAULT_SPEAKERS,
-  dailyLogPath, readLogTail,
+  macProxyFromScutil, windowsProxyFromRegistry,
+  type Config, type VolcanoConfig, type PiConfig, type SpeakersConfig, type SpeakerSelf, type SpeakerKnown,
 } from './config.ts'
 import { formatElapsed, formatSeconds, pad, withHeartbeat } from './time.ts'
+import { openPath, runCommand } from './process.ts'
 export {
   getConfig, resetConfigCache, configGetData, configSetData, configGet, configSet,
   macProxyFromScutil, windowsProxyFromRegistry,
@@ -31,7 +24,7 @@ import { appendFile, chmod, mkdir, readFile, writeFile, copyFile, rename, unlink
 import { createReadStream, existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, appendFileSync, openSync, closeSync, statSync, readSync, unlinkSync, renameSync } from 'node:fs'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import os from 'node:os'
 
 /**
@@ -70,7 +63,7 @@ export {
 }
 import {
   installScheduler, uninstallScheduler, printSchedulerStatus, ensureScheduler,
-  agentStatus, runCommand, plistPath, TASK_NAME,
+  agentStatus, plistPath, TASK_NAME,
 } from './scheduler.ts'
 export {
   installScheduler, uninstallScheduler, printSchedulerStatus, ensureScheduler,
@@ -343,15 +336,6 @@ function sourceIdFor(path: string, size: number, mtimeMs: number, digest: string
   // Manual imports are content-addressed: dropping the same audio again must
   // find its existing job even after the temporary inbox copy was removed.
   return imported ? `import:${digest}` : createHash('sha256').update(`${path}|${size}|${Math.floor(mtimeMs / 1000)}|${digest}`).digest('hex')
-}
-
-// Cross-platform "reveal in file manager / open URL in default app".
-// macOS `open`, Linux `xdg-open`, Windows `start` (a cmd builtin, so via `cmd /c`;
-// the empty "" is start's title arg so a quoted path/URL isn't swallowed as title).
-function openPath(target: string, timeoutMs = 5000): Promise<{ stdout: string; stderr: string; code: number }> {
-  if (IS_WINDOWS) return runCommand('cmd', ['/c', 'start', '', target], timeoutMs)
-  if (IS_MAC) return runCommand('open', [target], timeoutMs)
-  return runCommand('xdg-open', [target], timeoutMs)
 }
 
 // Cross-platform replacement for `tail -n N [-F] files`. Windows ships no `tail`,
@@ -710,23 +694,6 @@ ${transcript}`
 // optional VOICENOTE_PI_MODEL pins a model; otherwise pi's selected model writes
 // the notes. VoiceNote does not implement a provider fallback chain.
 // ───────────────────────────────────────────────────────────────────────
-
-// ───────────────────────────────────────────────────────────────────────
-// ChatGPT browser OAuth is shared by CLI and desktop callers.
-// The flow lives in chatgptAuth.ts; here we only persist the result to pi's
-// auth.json in the exact shape it reads: { type: 'oauth', ...creds }.
-// ───────────────────────────────────────────────────────────────────────
-
-async function persistPiOAuth(authPath: string, providerId: string, creds: Record<string, unknown>): Promise<void> {
-  const storage = await openPiCredentials(authPath)
-  await storage.modify(providerId, async () => ({
-    ...creds,
-    type: 'oauth',
-    access: String(creds.access),
-    refresh: String(creds.refresh),
-    expires: Number(creds.expires),
-  }), { signal: AbortSignal.timeout(10_000) })
-}
 
 // ───────────────────────────────────────────────────────────────────────
 // File-based config (~/.config/voicenote/config.json) — written by the GUI

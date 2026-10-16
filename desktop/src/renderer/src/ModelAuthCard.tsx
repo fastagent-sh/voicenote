@@ -113,6 +113,7 @@ export function ModelAuthCard({
   }, [currentProviderId, currentStatus?.configured, currentStatus?.authType])
 
   const handleProviderChange = (newProviderId: string) => {
+    setMessage(null)
     setEditingKey(false)
     setApiKeyInput('')
     onPendingKeyChange?.(currentProviderId, '')
@@ -137,6 +138,7 @@ export function ModelAuthCard({
 
   const handleSaveKey = async () => {
     if (!apiKeyInput.trim()) return
+    setMessage(null)
     setKeySaving(true)
     try {
       await vn.piSetApiKey(currentProviderId, apiKeyInput.trim())
@@ -153,21 +155,23 @@ export function ModelAuthCard({
   }
 
   const handleRemoveAuth = async () => {
+    setMessage(null)
     const keys = currentProviderMeta.envKeys ?? []
     try {
       await vn.piRemoveAuth(currentProviderId)
-      setEditingKey(false)
-      setApiKeyInput('')
-      onPendingKeyChange?.(currentProviderId, '')
-      await loadProviderStatuses()
-      onAuthRemoved?.(currentProviderId, keys)
-      onStatusChange?.()
     } catch (e: any) {
-      setMessage(`清除授权失败: ${e.message}`)
+      setMessage(`清除授权: ${e.message}`)
     }
+    setEditingKey(false)
+    setApiKeyInput('')
+    onPendingKeyChange?.(currentProviderId, '')
+    await loadProviderStatuses()
+    onAuthRemoved?.(currentProviderId, keys)
+    onStatusChange?.()
   }
 
   const handleOAuthLogin = async () => {
+    setMessage(null)
     setOauthPending(true)
     setOauthError(null)
     setOauthStatusText('正在发起授权…')
@@ -177,7 +181,6 @@ export function ModelAuthCard({
       setOauthError(e.message || String(e))
     } finally {
       setOauthPending(false)
-      setOauthStatusText(null)
     }
   }
 
@@ -281,6 +284,7 @@ export function ModelAuthCard({
                   placeholder={`输入 ${currentProviderMeta.name} API Key (例如 sk-...)`}
                   value={apiKeyInput}
                   onChange={e => {
+                    if (message) setMessage(null)
                     setEditingKey(true)
                     setApiKeyInput(e.target.value)
                     onPendingKeyChange?.(currentProviderId, e.target.value.trim())

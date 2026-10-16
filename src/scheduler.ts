@@ -13,26 +13,31 @@ import {
   loadConfigJson,
   LOG_DIR,
   dailyLogPath,
-  readLogTail,
+  resetConfigCache,
   STATE_DIR,
   writeConfigJson,
   type Config,
 } from './config.ts'
 import { pad } from './time.ts'
+import { runCommand } from './process.ts'
 
 export const LAUNCH_AGENT_LABEL = 'sh.fastagent.voicenote'
 export const TASK_NAME = 'VoiceNote'
 
-export function runCommand(command: string, args: string[], timeoutMs = 20000): Promise<{ stdout: string; stderr: string; code: number }> {
-  return new Promise((res) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
-    let stdout = '', stderr = ''
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs)
-    child.stdout.on('data', d => stdout += String(d))
-    child.stderr.on('data', d => stderr += String(d))
-    child.on('close', code => { clearTimeout(timer); res({ stdout, stderr, code: code ?? 1 }) })
-    child.on('error', err => { clearTimeout(timer); res({ stdout, stderr: String(err), code: 1 }) })
-  })
+export { runCommand }
+
+export function readLogTail(path: string, maxBytes: number): string {
+  try {
+    const size = statSync(path).size
+    if (size <= 0) return ''
+    const start = Math.max(0, size - maxBytes)
+    const fd = openSync(path, 'r')
+    try {
+      const buf = Buffer.alloc(size - start)
+      readSync(fd, buf, 0, buf.length, start)
+      return buf.toString('utf8')
+    } finally { closeSync(fd) }
+  } catch { return '' }
 }
 
 export function resolveCli(): { cliPath: string; compiled: boolean } {
@@ -146,6 +151,7 @@ export async function installScheduledTask(opts: { load?: boolean } = {}): Promi
     const current = loadConfigJson()
     current.VOICENOTE_FFPROBE_BIN = ffprobe
     await writeConfigJson(current)
+    resetConfigCache()
   }
   const { command, argLine } = schedulerProgramArgs()
   const fullCmd = `"${command}" ${argLine}`
