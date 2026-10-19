@@ -1,4 +1,5 @@
 import type { Job, Status } from './api.ts'
+import { NO_SPEECH, UNUSABLE_AUDIO } from '../../../../src/failureCodes.ts'
 
 /** A problem the user can act on: one sentence, one button. */
 export type Problem = {
@@ -47,11 +48,11 @@ export function explainFailure(job: Pick<Job, 'code' | 'detail'> | string | null
   if (/fetch failed|socket|econnreset|etimedout|enetunreach|econnrefused|network|timed ?out/.test(text)) {
     return problem('网络没连上。如果需要代理,先在设置里填好再重试。', RETRY)
   }
-  if (/20000003|no valid speech|silent/.test(text)) {
+  if (NO_SPEECH.test(detail)) {
     return problem('这段录音里没有检测到人声,跳过即可。')
   }
-  if (/45000|invalid audio|audio convert failed/.test(text)) {
-    return problem('转写服务不接受这个音频文件(格式或内容有问题)。')
+  if (UNUSABLE_AUDIO.test(detail)) {
+    return problem('转写服务不接受这个音频文件(格式或内容有问题)。', RETRY)
   }
   if (/enoent|no such file|left the recorder/.test(text)) {
     return problem('找不到原始录音文件,可能录音笔被拔掉或文件被移动了。')

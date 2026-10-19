@@ -16,22 +16,22 @@ const VERDICTS: Record<string, { label: string; tone: 'ready' | 'done' | 'skip' 
 }
 
 /**
- * Recordings that are too small or too short are accidental button presses —
- * a two-second, 7 KB file. They are noise in a list of work, so they are
- * counted and folded away instead of padding the "unprocessed" number with
- * things nobody will ever process.
+ * Recordings nobody is waiting for: an accidental two-second press, or one the
+ * automatic run already gave up on. They are folded away so the "unprocessed"
+ * count stays a list of work rather than a list of files — each one still opens
+ * with a button that overrules the verdict.
  */
 const SCRAP = new Set(['too_small', 'too_short', 'no_speech', 'bad_audio', 'ignored'])
 
 /**
- * Which verdicts are worth a button. A recording that is too small, too
- * short, silent or unusable holds nothing to transcribe, so offering to
- * process it only invites a run that ends the same way. Age is different: an
- * old recording is a real one the automatic rules skipped, and processing it
- * on request is exactly what the button is for.
+ * Which verdicts are worth a button. Every one of them except an explicit
+ * ignore: the thresholds and the ASR verdicts are guesses the automatic run
+ * makes on the user's behalf, and a 25-second memo is still a recording they
+ * may want transcribed. The button is how they overrule a guess, so hiding it
+ * is how a file ends up unreachable forever.
  */
 function canProcess(verdict: string): boolean {
-  return !SCRAP.has(verdict)
+  return verdict !== 'ignored'
 }
 
 function sizeLabel(bytes: number): string {
@@ -118,7 +118,7 @@ export function Recorder({ running, onClose, onToast }: {
                   disabled={running}
                   onClick={() => void process(item)}
                 >
-                  {item.verdict === 'already_done' ? '重新处理' : '处理'}
+                  {item.state ? '重新处理' : '处理'}
                 </button>
               )}
             </article>
@@ -127,14 +127,15 @@ export function Recorder({ running, onClose, onToast }: {
 
         {filter === 'pending' && scrap.length > 0 && (
           <button className="link" onClick={() => setShowScrap(v => !v)}>
-            {showScrap ? '收起' : `另有 ${scrap.length} 个碎片录音(太短/太小/没有人声),点击展开`}
+            {showScrap ? '收起' : `另有 ${scrap.length} 个没有自动处理的录音,点击展开`}
           </button>
         )}
 
         {data?.present && (
           <p className="hint fine">
-            手动处理会忽略时间范围限制。太短、太小、没有人声的录音没有可处理的内容,所以不提供按钮。
+            手动处理不看时间范围、文件大小和时长,也不理会「没有人声」「音频无法识别」这类自动判断,会把这条录音重新转写一遍。
             「重新处理」会重新转写并重写纪要,要花一次转写费用;只想换一版纪要的话,在纪要页用「重新生成」。
+            「已忽略」的录音不会再处理,要恢复只能在命令行执行 vn forget。
           </p>
         )}
       </main>

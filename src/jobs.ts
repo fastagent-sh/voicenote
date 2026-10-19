@@ -16,6 +16,8 @@
 // caller, never inferred from log text — that inference is what used to wedge
 // a failed job at "Processing" forever.
 
+import { NO_SPEECH, UNUSABLE_AUDIO } from './failureCodes.ts'
+
 // Lifecycle position only. WHY a job is where it is lives in `code`, so no two
 // fields have to agree about the same fact — an earlier cut expressed "gave up"
 // as `code` while leaving `state` alone, and the view and the classifier
@@ -384,6 +386,17 @@ export function parseStateFile(text: string, path: string): StateFile {
       entry.code = setAside
       entry.attempts = 0
     }
+    // The same rule in reverse. An older build read every `45…` status as
+    // unusable audio — including 45000001, which says the request was invalid,
+    // not the file — so it set aside recordings that were never judged at all.
+    // Their verdict no longer matches the reason recorded with it: queue them
+    // again instead of leaving a healthy recording hidden behind a wrong label.
+    if (entry.state === 'filtered' && entry.code === 'bad_audio' && !UNUSABLE_AUDIO.test(entry.detail ?? '')) {
+      entry.state = 'queued'
+      entry.code = null
+      entry.detail = null
+      entry.attempts = 0
+    }
     jobs[id] = entry
   }
   return { version: 2, jobs }
@@ -415,9 +428,8 @@ const FILTER_LABELS: Record<string, string> = {
  * things the user still has to deal with.
  */
 function setAsideCode(message: string): JobCode | null {
-  const text = message.toLowerCase()
-  if (/20000003|no valid speech|silent audio/.test(text)) return 'no_speech'
-  if (/45000|invalid audio|audio convert failed/.test(text)) return 'bad_audio'
+  if (NO_SPEECH.test(message)) return 'no_speech'
+  if (UNUSABLE_AUDIO.test(message)) return 'bad_audio'
   return null
 }
 

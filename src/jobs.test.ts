@@ -379,11 +379,24 @@ test('old unusable-audio failures are reclassified on read', () => {
     jobs: {
       a: { name: 'a.mp3', state: 'error', code: 'transcribe_failed', attempts: 1, detail: 'Volcano: 20000003 silent audio (no speech detected) (attempt 1/3)' },
       b: { name: 'b.mp3', state: 'error', code: 'transcribe_failed', attempts: 1, detail: 'fetch failed' },
+      c: { name: 'c.mp3', state: 'error', code: 'transcribe_failed', attempts: 1, detail: 'Volcano submit failed: status=45000151 message=audio format not supported' },
+      // 45000001 is "invalid request parameters" — our request was wrong, not
+      // the file — so it must stay a retryable failure rather than branding a
+      // good recording unusable forever.
+      d: { name: 'd.mp3', state: 'error', code: 'transcribe_failed', attempts: 1, detail: 'Volcano submit failed: status=45000001 message=invalid request' },
+      // ...and a recording the older build already set aside on that evidence
+      // goes back in the queue, while one with a real format error stays put.
+      e: { name: 'e.mp3', state: 'filtered', code: 'bad_audio', attempts: 0, detail: 'Volcano query failed: status=45000001 message=invalid request' },
+      f: { name: 'f.mp3', state: 'filtered', code: 'bad_audio', attempts: 0, detail: 'Volcano submit failed: status=45000151 message=audio format not supported' },
     },
   })
   const parsed = parseStateFile(file, '/tmp/jobs.json')
   expect(parsed.jobs.a).toMatchObject({ state: 'filtered', code: 'no_speech', attempts: 0 })
   expect(parsed.jobs.b).toMatchObject({ state: 'error', code: 'transcribe_failed', attempts: 1 })
+  expect(parsed.jobs.c).toMatchObject({ state: 'filtered', code: 'bad_audio', attempts: 0 })
+  expect(parsed.jobs.d).toMatchObject({ state: 'error', code: 'transcribe_failed', attempts: 1 })
+  expect(parsed.jobs.e).toMatchObject({ state: 'queued', code: null, detail: null, attempts: 0 })
+  expect(parsed.jobs.f).toMatchObject({ state: 'filtered', code: 'bad_audio' })
 })
 
 // A 14-second button press that is also old used to be reported as "too old",

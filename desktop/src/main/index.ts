@@ -60,7 +60,7 @@ function broadcast(channel: string, payload?: unknown): void {
  * silently: picking a file and seeing nothing happen is worse than waiting.
  * An entry with no `file` means "scan the recorder".
  */
-type RunRequest = { reason: 'manual' | 'recorder' | 'retry' | 'file'; file?: string }
+type RunRequest = { reason: 'manual' | 'recorder' | 'retry' | 'file'; file?: string; force?: boolean }
 const queuedRuns: RunRequest[] = []
 
 /** Starts a run, or queues it behind the one in flight. Never blocks a caller. */
@@ -76,7 +76,7 @@ function requestRun(request: RunRequest): { queued: boolean } {
 
 function startRun(request: RunRequest): void {
   broadcast('run:state', { running: true, reason: request.reason })
-  running = runPipeline(request.file, {})
+  running = runPipeline(request.file, { force: request.force })
     .catch((error: unknown) => { broadcast('run:error', String((error as Error)?.message ?? error)) })
     .finally(() => {
       running = null
@@ -327,9 +327,12 @@ function registerIpc(): void {
   // Ignoring touches the same state file as a run, so it waits for the lock
   // the same way a retry does.
   ipcMain.handle('ignore', (_e, id: string) => requeue(id, async (jobId) => { await ignoreJob(jobId) }))
-  // Processing one file by path bypasses the age/size filters, which is the
-  // point: the user picked this recording explicitly.
-  ipcMain.handle('run-file', (_e, path: string) => requestRun({ reason: 'file', file: path }))
+  // Processing one file by path is the recorder list's only escape hatch: it
+  // bypasses the age/size filters and the conclusions of earlier runs (no
+  // speech, unusable audio, already done), because the user pointed at this
+  // recording and disagreed. A recording set aside for good wins: `ignored`
+  // outranks force in the classifier.
+  ipcMain.handle('run-file', (_e, path: string) => requestRun({ reason: 'file', file: path, force: true }))
   ipcMain.handle('import', async (_e, path: string) => {
     await importRecording(path, { json: true })
     return requestRun({ reason: 'manual' })
