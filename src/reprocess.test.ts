@@ -9,10 +9,9 @@ import { dirname, join } from 'node:path'
  * The recorder list's reprocess button runs a file with --force, which is what
  * makes an earlier verdict reversible: a recording set aside as unusable audio
  * (or already processed) runs again. Without it the cheap path stays cheap — a
- * plain `vn run <file>` still reuses a saved transcript — and an explicit
- * ignore stays final.
+ * plain `vn run <file>` still reuses a saved transcript.
  */
-test('a named file overrides earlier verdicts, except ignore', async () => {
+test('--force overrides an earlier verdict for a named file', async () => {
   const home = await mkdtemp(join(tmpdir(), 'vn-reprocess-'))
   const workspace = join(home, 'workspace')
   const configDir = join(home, process.platform === 'win32' ? 'voicenote' : '.config/voicenote')
@@ -73,11 +72,12 @@ test('a named file overrides earlier verdicts, except ignore', async () => {
     expect(done.status, done.stderr).toBe(0)
     expect(done.stdout).toContain(`"source_id": "${id}"`)
 
-    // An explicit ignore outranks even --force.
+    // An older build could set a recording aside for good; that verdict no
+    // longer exists, so nothing needs forcing to run it again.
     await stateWith({ code: 'ignored' })
-    const ignored = run(['run', source, '--dry-run', '--verbose', '--force'])
-    expect(ignored.status, ignored.stderr).toBe(0)
-    expect(ignored.stdout).not.toContain(`"source_id": "${id}"`)
+    const stale = run(['run', source, '--dry-run', '--verbose'])
+    expect(stale.status, stale.stderr).toBe(0)
+    expect(stale.stdout).toContain(`"source_id": "${id}"`)
   } finally {
     await rm(home, { recursive: true, force: true })
   }

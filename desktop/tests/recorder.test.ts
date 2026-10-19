@@ -4,11 +4,11 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { runAsync } from '../../src/testing/fakeModel.ts'
 
-// A recording the pipeline set aside stays reachable by hand: the row keeps its
-// button and clicking it runs that file. An explicit ignore is the only verdict
-// without one. Rendered in a real Electron window against a fake preload bridge,
-// so nothing on disk or in the real config is touched.
-test.skipIf(process.platform !== 'darwin')('a set-aside recording keeps its reprocess button', async () => {
+// Every recording on the device can be processed by hand, whatever the pipeline
+// decided about it, and clicking the button runs that file. Rendered in a real
+// Electron window against a fake preload bridge, so nothing on disk or in the
+// real config is touched.
+test.skipIf(process.platform !== 'darwin')('every listed recording offers a button', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'vn-recorder-ui-'))
   const renderer = resolve('desktop/src/renderer/src/Recorder.tsx')
   const react = resolve('desktop/node_modules/react/index.js')
@@ -34,7 +34,7 @@ createRoot(document.getElementById('root')!).render(createElement(Recorder, {
     const items = [
       row({ sourceId: 'bad', verdict: 'bad_audio', detail: 'Volcano: 45000151 audio format not supported' }),
       row({ sourceId: 'small', verdict: 'too_small', name: '20261019170635.mp3', path: '/rec/small.mp3', state: null, sizeBytes: 81_000, durationSeconds: 20 }),
-      row({ sourceId: 'ignored', verdict: 'ignored', name: '20260922123420.mp3', path: '/rec/ignored.mp3' }),
+      row({ sourceId: 'done', verdict: 'already_done', name: '20260922123420.mp3', path: '/rec/done.mp3', state: 'done' }),
     ]
     await writeFile(join(dir, 'index.html'), `<!doctype html><meta charset="utf-8"><div id="root"></div><script>
 window.ran = []; window.closed = false;
@@ -57,15 +57,18 @@ app.whenReady().then(async () => {
  const rows = () => [...document.querySelectorAll('.file-row')];
  const rowWith = label => rows().find(r => r.textContent.includes(label));
  for(let i=0;i<50 && !button('刷新');i++) await tick();
- check(!rows().length, 'skipped recordings must start folded away');
- const unfold = [...document.querySelectorAll('button')].find(b => b.textContent.includes('另有 3 个'));
+ check(!rows().length, 'recordings the pipeline skipped must start folded away');
+ const unfold = [...document.querySelectorAll('button')].find(b => b.textContent.includes('另有 2 个'));
  check(unfold, 'folded recordings offer no way to open them');
  unfold.click(); await tick();
- check(rows().length === 3, 'expected every recording to be listed');
+ check(rows().length === 2, 'expected the folded recordings to be listed');
+ check(rows().every(r => r.querySelector('button')), 'every recording must offer a button');
  const reprocess = rowWith('音频无法识别').querySelector('button');
- check(reprocess && reprocess.textContent.trim() === '重新处理', 'a recording set aside as unusable audio cannot be reprocessed');
+ check(reprocess.textContent.trim() === '重新处理', 'a recording set aside as unusable audio cannot be reprocessed');
  check(rowWith('文件太小').querySelector('button').textContent.trim() === '处理', 'an untouched file should be processed, not reprocessed');
- check(!rowWith('已忽略').querySelector('button'), 'an ignored recording must not offer a button');
+ button('全部 3').click(); await tick();
+ check(rows().length === 3, 'expected every recording to be listed');
+ check(rowWith('已处理').querySelector('button').textContent.trim() === '重新处理', 'a processed recording cannot be run again');
  reprocess.click(); await tick();
  check(window.ran.length === 1 && window.ran[0] === '/rec/bad.mp3', 'clicking reprocess did not run that file');
 })()\`);

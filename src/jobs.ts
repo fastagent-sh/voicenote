@@ -28,8 +28,8 @@ type JobState = 'queued' | 'running' | 'done' | 'filtered' | 'error' | 'gave_up'
 type JobCode =
   | 'transcribe_failed' | 'summary_failed' | 'interrupted'
   // Reasons a recording is set aside rather than failed: the file is fine, it
-  // just holds nothing worth transcribing, or the user said to drop it.
-  | 'too_small' | 'too_short' | 'too_old' | 'no_speech' | 'bad_audio' | 'ignored'
+  // just holds nothing worth transcribing.
+  | 'too_small' | 'too_short' | 'too_old' | 'no_speech' | 'bad_audio'
   | null
 
 export type JobRecord = {
@@ -79,7 +79,7 @@ type FilterCode = Extract<JobCode, 'too_small' | 'too_short' | 'too_old'>
 type Verdict =
   | { run: true }
   | { run: false; persist: true; code: FilterCode; detail: string | null }
-  | { run: false; persist: false; code: 'already_done' | 'gave_up' | 'no_speech' | 'bad_audio' | 'ignored'; detail: string | null }
+  | { run: false; persist: false; code: 'already_done' | 'gave_up' | 'no_speech' | 'bad_audio'; detail: string | null }
 
 type ScanFacts = { recordedAt: Date; sizeBytes: number; durationSeconds: number | null }
 type Limits = { maxAgeHours: number; minBytes: number; minDurationSeconds: number }
@@ -95,9 +95,6 @@ export function classify(
   limits: Limits,
   opts: { force: boolean; notesMode: boolean; now: number },
 ): Verdict {
-  // An explicit "ignore" outranks even --force: the user said to leave this
-  // file alone, and a manual run over the whole recorder must respect that.
-  if (entry?.code === 'ignored') return { run: false, persist: false, code: 'ignored', detail: null }
   if (opts.force) return { run: true }
   // Answers that will not change on a retry, so they are never re-paid for.
   if (entry?.code === 'no_speech' || entry?.code === 'bad_audio') {
@@ -224,15 +221,6 @@ export function requeueFailed(entry: JobRecord, now: string): boolean {
   if (entry.state !== 'error' && entry.state !== 'gave_up') return false
   patchJob(entry, { state: 'queued', detail: null, attempts: 0 }, now)
   return true
-}
-
-/**
- * Set a recording aside for good: the file stays on the recorder, but no run
- * picks it up again. This is the way out of a dead end — a failure whose
- * retry would fail identically still has to be removable from the list.
- */
-export function ignoreRecording(entry: JobRecord, now: string): void {
-  patchJob(entry, { state: 'filtered', code: 'ignored', detail: null, attempts: 0 }, now)
 }
 
 /**
@@ -397,6 +385,14 @@ export function parseStateFile(text: string, path: string): StateFile {
       entry.detail = null
       entry.attempts = 0
     }
+    // "Ignore" is gone from the product: a record an older build set aside that
+    // way is a recording nobody has processed yet.
+    if (j.code === 'ignored') {
+      entry.state = 'queued'
+      entry.code = null
+      entry.detail = null
+      entry.attempts = 0
+    }
     jobs[id] = entry
   }
   return { version: 2, jobs }
@@ -418,7 +414,6 @@ const FILTER_LABELS: Record<string, string> = {
   too_old: 'too old',
   no_speech: 'no speech',
   bad_audio: 'unusable audio',
-  ignored: 'ignored',
 }
 
 /**

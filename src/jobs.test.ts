@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { applyOutcome, buildJobsView, classify, emptyState, ignoreRecording, MAX_ATTEMPTS, MAX_INTERRUPTIONS, parseJobsLimit, parseStateFile, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, startAttempt, type JobRecord, type StateFile } from './jobs.ts'
+import { applyOutcome, buildJobsView, classify, emptyState, MAX_ATTEMPTS, MAX_INTERRUPTIONS, parseJobsLimit, parseStateFile, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, startAttempt, type JobRecord, type StateFile } from './jobs.ts'
 
 const rec = (over: Partial<JobRecord> & { name: string; recorded_at: string; state: JobRecord['state'] }): JobRecord => ({
   source_path: `/Volumes/VTR6500/RECORD/A/${over.name}`,
@@ -362,13 +362,15 @@ test('unusable audio is set aside, not queued for retry', () => {
   expect(verdict).toMatchObject({ run: false, persist: false, code: 'no_speech' })
 })
 
-test('ignoring a recording outranks even --force', () => {
-  const j = rec({ name: 'a.mp3', recorded_at: '', state: 'gave_up', code: 'transcribe_failed', attempts: 3 })
-  ignoreRecording(j, 'T')
-  expect(j).toMatchObject({ state: 'filtered', code: 'ignored' })
+// Nothing is a dead end any more: a recording an older build marked as ignored
+// (the feature is gone) is requeued on read and runs like any other.
+test('a record left as ignored by an older build is queued again', () => {
+  const { jobs } = parseStateFile(JSON.stringify({ version: 2, jobs: {
+    a: { name: 'a.mp3', recorded_at: '', state: 'filtered', code: 'ignored', attempts: 0 },
+  } }), '/tmp/jobs.json')
+  expect(jobs.a).toMatchObject({ state: 'queued', code: null, detail: null, attempts: 0 })
   const facts = { recordedAt: new Date(), sizeBytes: 5_000_000, durationSeconds: 600 }
-  expect(classify(facts, j, LIMITS, opts())).toMatchObject({ run: false, code: 'ignored' })
-  expect(classify(facts, j, LIMITS, { ...opts(), force: true })).toMatchObject({ run: false, code: 'ignored' })
+  expect(classify(facts, jobs.a, LIMITS, opts())).toEqual({ run: true })
 })
 
 // Records written before "no speech" was recognised are stuck in the failure

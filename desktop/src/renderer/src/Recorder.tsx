@@ -11,7 +11,6 @@ const VERDICTS: Record<string, { label: string; tone: 'ready' | 'done' | 'skip' 
   too_short: { label: '时长太短', tone: 'skip' },
   no_speech: { label: '没有人声', tone: 'skip' },
   bad_audio: { label: '音频无法识别', tone: 'skip' },
-  ignored: { label: '已忽略', tone: 'skip' },
   gave_up: { label: '多次失败后停止', tone: 'bad' },
 }
 
@@ -21,18 +20,7 @@ const VERDICTS: Record<string, { label: string; tone: 'ready' | 'done' | 'skip' 
  * count stays a list of work rather than a list of files — each one still opens
  * with a button that overrules the verdict.
  */
-const SCRAP = new Set(['too_small', 'too_short', 'no_speech', 'bad_audio', 'ignored'])
-
-/**
- * Which verdicts are worth a button. Every one of them except an explicit
- * ignore: the thresholds and the ASR verdicts are guesses the automatic run
- * makes on the user's behalf, and a 25-second memo is still a recording they
- * may want transcribed. The button is how they overrule a guess, so hiding it
- * is how a file ends up unreachable forever.
- */
-function canProcess(verdict: string): boolean {
-  return verdict !== 'ignored'
-}
+const SCRAP = new Set(['too_small', 'too_short', 'no_speech', 'bad_audio'])
 
 function sizeLabel(bytes: number): string {
   return bytes >= 1e6 ? `${(bytes / 1e6).toFixed(0)} MB` : `${Math.max(1, Math.round(bytes / 1000))} KB`
@@ -112,15 +100,13 @@ export function Recorder({ running, onClose, onToast }: {
                 </div>
               </div>
               <span className={`verdict ${verdict.tone}`} title={item.detail ?? undefined}>{verdict.label}</span>
-              {canProcess(item.verdict) && (
-                <button
-                  className={verdict.tone === 'ready' ? 'primary' : ''}
-                  disabled={running}
-                  onClick={() => void process(item)}
-                >
-                  {item.state ? '重新处理' : '处理'}
-                </button>
-              )}
+              <button
+                className={verdict.tone === 'ready' ? 'primary' : ''}
+                disabled={running}
+                onClick={() => void process(item)}
+              >
+                {item.state ? '重新处理' : '处理'}
+              </button>
             </article>
           )
         })}
@@ -133,9 +119,8 @@ export function Recorder({ running, onClose, onToast }: {
 
         {data?.present && (
           <p className="hint fine">
-            手动处理不看时间范围、文件大小和时长,也不理会「没有人声」「音频无法识别」这类自动判断,会把这条录音重新转写一遍。
+            每条录音都能手动处理,不看时间范围、文件大小和时长,也不理会「没有人声」「音频无法识别」这类自动判断。
             「重新处理」会重新转写并重写纪要,要花一次转写费用;只想换一版纪要的话,在纪要页用「重新生成」。
-            「已忽略」的录音不会再处理,要恢复只能在命令行执行 vn forget。
           </p>
         )}
       </main>

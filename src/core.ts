@@ -6,7 +6,7 @@ import { parseLockOwner } from './runLock.ts'
 import { installProxyFromEnv, runAgentPrompt } from './piAgent.ts'
 import { parseSummaryJson } from './summaryJson.ts'
 import { emitPipelineEvent } from './progress.ts'
-import { applyOutcome, buildJobsView, classify, emptyState, ignoreRecording, localIso, MAX_ATTEMPTS, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, requeueForRegenerate, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs.ts'
+import { applyOutcome, buildJobsView, classify, emptyState, localIso, MAX_ATTEMPTS, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, requeueForRegenerate, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs.ts'
 import {
   CONFIG_DIR, STATE_DIR, LOG_DIR, IS_WINDOWS, dailyLogPath,
   getConfig, resetConfigCache, configGetData, configSetData, configGet, configSet,
@@ -1511,21 +1511,6 @@ export async function retryRecording(id: string): Promise<void> {
     if (!requeueFailed(entry, nowIso())) throw new Error(`Cannot retry a recording in state '${entry.state}'.`)
     await saveState(config, store)
     console.log(`queued ${entry.name} for retry`)
-  } finally { await lock.release() }
-}
-
-/** Set a recording aside: it stays on the recorder, no run picks it up again. */
-export async function ignoreJob(id: string): Promise<void> {
-  const config = getConfig()
-  const lock = await acquireRunLock()
-  if (!lock) throw new Error('A voicenote run is in progress. Try again once it finishes.')
-  try {
-    const store = await loadState(config)
-    const entry = store.jobs[id]
-    if (!entry) throw new Error('Recording no longer exists in the processing list.')
-    ignoreRecording(entry, nowIso())
-    await saveState(config, store)
-    console.log(`ignored ${entry.name}`)
   } finally { await lock.release() }
 }
 

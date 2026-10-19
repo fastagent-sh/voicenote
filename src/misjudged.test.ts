@@ -9,9 +9,9 @@ import { runAsync, startFakeModel } from './testing/fakeModel.ts'
 /**
  * End to end on a recorder image that reproduces the reported state: one
  * recording set aside as "unusable audio" on a 45000001 (invalid request —
- * our bug), one genuinely unreadable (45000151), one ignored, and two
- * accidental presses. Only the misjudged one may be transcribed, and it must
- * come out as a note.
+ * our bug), one genuinely unreadable (45000151), one an older build had set
+ * aside as ignored, and two accidental presses. Both of the first and third
+ * must be transcribed and come out as notes; nothing else may cost an ASR call.
  */
 test.skipIf(process.platform === 'win32')('a recording misjudged as unusable audio is transcribed again', async () => {
   const home = await mkdtemp(join(tmpdir(), 'vn-misjudged-'))
@@ -28,6 +28,7 @@ for a in "$@"; do f="$a"; done
 case "$f" in
   *164558*) echo 840 ;;
   *123420*) echo 1740 ;;
+  *120457*) echo 1740 ;;
   *153708*) echo 25 ;;
   *) echo 20 ;;
 esac
@@ -101,16 +102,20 @@ await runPipeline(undefined, {})
     expect(misjudged).toMatchObject({ state: 'done', code: null })
     expect(existsSync(misjudged.paths.notes)).toBe(true)
 
-    // Untouched: a file the service really cannot read, one the user ignored,
-    // and two accidental presses.
+    // "Ignoring" is gone as a feature, so the recording an older build had set
+    // aside is processed like any other.
+    const previouslyIgnored = byName('20260922120457.mp3')
+    expect(previouslyIgnored).toMatchObject({ state: 'done', code: null })
+    expect(existsSync(previouslyIgnored.paths.notes)).toBe(true)
+
+    // Untouched: a file the service really cannot read, and two accidental presses.
     expect(byName('20260922123420.mp3')).toMatchObject({ state: 'filtered', code: 'bad_audio' })
-    expect(byName('20260922120457.mp3')).toMatchObject({ state: 'filtered', code: 'ignored' })
     expect(byName('20261019170635.mp3')).toMatchObject({ state: 'filtered', code: 'too_small' })
     expect(byName('20260922153708.mp3')).toMatchObject({ state: 'filtered', code: 'too_short' })
 
-    // Exactly one recording reached the service, and exactly one note was written.
-    expect((await readFile(asrLog, 'utf8')).trim().split('\n')).toEqual(['submit', 'query'])
-    expect(fake.requests).toHaveLength(1)
+    // Exactly two recordings reached the service, and two notes were written.
+    expect((await readFile(asrLog, 'utf8')).trim().split('\n')).toEqual(['submit', 'query', 'submit', 'query'])
+    expect(fake.requests).toHaveLength(2)
     expect(fake.requests[0]!.user).toContain('hello')
   } finally {
     await fake.stop()

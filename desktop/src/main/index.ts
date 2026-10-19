@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import {
-  collectDoctor, configGetData, configSetData, getConfig, getPiAuthProviders, ignoreJob, importRecording,
+  collectDoctor, configGetData, configSetData, getConfig, getPiAuthProviders, importRecording,
   jobsListData, listRecorderFiles, loginChatGPT, loginPiProvider, NOTE_HTML_CSS, regenerateNotes,
   removePiAuth, resetConfigCache, retryRecording, runPipeline, setPiApiKey, VERSION,
 } from '../../../src/core.ts'
@@ -324,14 +324,10 @@ function registerIpc(): void {
   ipcMain.handle('retry', (_e, id: string) => requeue(id, retryRecording))
   ipcMain.handle('regenerate', (_e, id: string) => requeue(id, regenerateNotes))
   ipcMain.handle('recorder-files', () => listRecorderFiles())
-  // Ignoring touches the same state file as a run, so it waits for the lock
-  // the same way a retry does.
-  ipcMain.handle('ignore', (_e, id: string) => requeue(id, async (jobId) => { await ignoreJob(jobId) }))
-  // Processing one file by path is the recorder list's only escape hatch: it
+  // Processing one file by path is the recorder list's escape hatch: it
   // bypasses the age/size filters and the conclusions of earlier runs (no
   // speech, unusable audio, already done), because the user pointed at this
-  // recording and disagreed. A recording set aside for good wins: `ignored`
-  // outranks force in the classifier.
+  // recording and disagreed. There is no verdict left that outranks it.
   ipcMain.handle('run-file', (_e, path: string) => requestRun({ reason: 'file', file: path, force: true }))
   ipcMain.handle('import', async (_e, path: string) => {
     await importRecording(path, { json: true })
