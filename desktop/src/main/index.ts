@@ -15,6 +15,7 @@ import {
 } from '../../../src/core.ts'
 import { onPipelineEvent } from '../../../src/progress.ts'
 import { LoginPrompts } from '../../../src/loginInteraction.ts'
+import { searchText } from './searchText.ts'
 
 const dirname = fileURLToPath(new URL('.', import.meta.url))
 // Tray art: template images (black + alpha) so macOS recolours them for the
@@ -60,7 +61,7 @@ function broadcast(channel: string, payload?: unknown): void {
  * silently: picking a file and seeing nothing happen is worse than waiting.
  * An entry with no `file` means "scan the recorder".
  */
-type RunRequest = { reason: 'manual' | 'recorder' | 'retry' | 'file'; file?: string; force?: boolean }
+type RunRequest = { reason: 'manual' | 'recorder' | 'retry' | 'file'; file?: string; force?: boolean; jobId?: string }
 const queuedRuns: RunRequest[] = []
 
 /** Starts a run, or queues it behind the one in flight. Never blocks a caller. */
@@ -76,7 +77,7 @@ function requestRun(request: RunRequest): { queued: boolean } {
 
 function startRun(request: RunRequest): void {
   broadcast('run:state', { running: true, reason: request.reason })
-  running = runPipeline(request.file, { force: request.force })
+  running = runPipeline(request.file, { force: request.force, jobId: request.jobId })
     .catch((error: unknown) => { broadcast('run:error', String((error as Error)?.message ?? error)) })
     .finally(() => {
       running = null
@@ -172,10 +173,11 @@ async function searchNotes(query: string): Promise<{ path: string; title: string
       if (!entry.endsWith('.md')) continue
       const path = join(dir, entry)
       const text = await readFile(path, 'utf8').catch(() => '')
-      const at = text.toLowerCase().indexOf(needle)
+      const plain = searchText(text)
+      const at = plain.toLowerCase().indexOf(needle)
       if (at < 0) continue
       const title = text.match(/^#\s+(.+)$/m)?.[1] ?? entry.replace(/\.md$/, '')
-      const snippet = text.slice(Math.max(0, at - 60), at + 120).replace(/\s+/g, ' ').trim()
+      const snippet = plain.slice(Math.max(0, at - 60), at + 120).trim()
       const info = await stat(path).catch(() => null)
       results.push({ path, title, snippet, mtime: info?.mtimeMs ?? 0 })
     }
@@ -307,18 +309,18 @@ function registerIpc(): void {
       void active.then(async () => {
         try {
           await apply(id)
+          requestRun({ reason: 'retry', jobId: id })
         } catch (error) {
           broadcast('run:error', String((error as Error)?.message ?? error))
         } finally {
           pendingRetries.delete(id)
           broadcast('retry:pending', [...pendingRetries])
         }
-        requestRun({ reason: 'retry' })
       })
       return { queued: true }
     }
     await apply(id)
-    requestRun({ reason: 'retry' })
+    requestRun({ reason: 'retry', jobId: id })
     return { queued: false }
   }
   ipcMain.handle('retry', (_e, id: string) => requeue(id, retryRecording))

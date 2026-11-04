@@ -12,7 +12,7 @@ import { runAsync, startFakeModel } from './testing/fakeModel.ts'
 // process; keeping it large also exercises a realistic request size.
 async function runWithFakeModel(
   config: (agentDir: string) => Record<string, string>,
-  opts: { agentDirIn?: (home: string) => string; pinModel?: boolean } = {},
+  opts: { agentDirIn?: (home: string) => string; pinModel?: boolean; reply?: string; finishReason?: 'stop' | 'length'; error?: string } = {},
 ) {
   const home = await mkdtemp(join(tmpdir(), 'voicenote-summary-'))
   const configDir = join(home, process.platform === 'win32' ? 'voicenote' : '.config/voicenote')
@@ -21,6 +21,8 @@ async function runWithFakeModel(
   // config directory, not in pi's.
   const agentDir = (opts.agentDirIn ?? ((h: string) => join(configDir, 'pi-agent')))(home)
   const fake = await startFakeModel(agentDir)
+  if (opts.reply !== undefined) fake.reply = opts.reply
+  if (opts.finishReason) fake.finishReason = opts.finishReason
   try {
     await mkdir(configDir, { recursive: true })
     await mkdir(join(workspace, '_transcripts', '2026-09'), { recursive: true })
@@ -40,11 +42,20 @@ async function runWithFakeModel(
       timeoutMs: 60_000,
     })
     expect(run.status).toBe(0)
-    expect(run.stdout).not.toContain('Stub notes')
     const metaFile = (await Array.fromAsync(new Glob('_metadata/**/*.json').scan({ cwd: workspace })))[0]
     const meta = JSON.parse(await readFile(join(workspace, metaFile!), 'utf8'))
-    expect(meta.title).toBe('Fake note')
-    expect(meta.llm_backend).toBe('pi')
+    if (opts.error) {
+      expect(run.stdout).toContain('Stub notes')
+      expect(meta.summary_error).toContain(opts.error)
+      expect(meta.status).toBe('summary_failed_transcript_saved')
+      expect(await readFile(meta.local_paths.transcript, 'utf8')).toContain('hello world')
+    } else {
+      expect(run.stdout).not.toContain('Stub notes')
+      expect(meta.title).toBe('Fake note')
+      expect(meta.llm_backend).toBe('pi')
+      expect(await readFile(meta.local_paths.notes, 'utf8')).toContain('Text with "quotes" and \\backslashes.')
+      expect(meta.discussion_flow).toBeUndefined()
+    }
     return { fake, run }
   } finally {
     await fake.stop()
@@ -56,6 +67,14 @@ test('the configured model writes the notes, and gets the transcript as the prom
   const { fake } = await runWithFakeModel(() => ({}))
   expect(fake.requests).toHaveLength(1)
   expect(fake.requests[0]!.user).toContain('hello world')
+}, 90_000)
+
+test('rejects a response without a title and preserves the transcript', async () => {
+  await runWithFakeModel(() => ({}), { reply: 'No title', error: 'Markdown H1' })
+}, 90_000)
+
+test('rejects a truncated response and preserves the transcript', async () => {
+  await runWithFakeModel(() => ({}), { finishReason: 'length', error: 'length' })
 }, 90_000)
 
 // vn must never pick a provider: with no VOICENOTE_PI_MODEL, whatever pi has

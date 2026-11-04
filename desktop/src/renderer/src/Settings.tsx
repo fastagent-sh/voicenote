@@ -15,6 +15,7 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
   const [env, setEnv] = useState<Record<string, string>>({})
   const [self, setSelf] = useState<{ name: string | null; aliases: string[] }>({ name: null, aliases: [] })
   const [saving, setSaving] = useState(false)
+  const [showAsrKey, setShowAsrKey] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [version, setVersion] = useState('')
   const [pendingApiKey, setPendingApiKey] = useState<{ providerId: string; key: string } | null>(null)
@@ -95,15 +96,18 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
         <section>
           <h3>处理设置</h3>
           {FIELDS.map(field => (
-            <label key={field.key}>
-              <span>{field.label}</span>
-              <input
-                type="text"
-                value={env[field.key] ?? ''}
-                placeholder={field.hint ?? ''}
-                onChange={e => setEnv({ ...env, [field.key]: e.target.value })}
-              />
-            </label>
+            <div key={field.key}>
+              <label>
+                <span>{field.label}</span>
+                <input
+                  type={field.key === 'VOLCANO_ASR_KEY' && !showAsrKey ? 'password' : 'text'}
+                  value={env[field.key] ?? ''}
+                  placeholder={field.hint ?? ''}
+                  onChange={e => setEnv({ ...env, [field.key]: e.target.value })}
+                />
+              </label>
+              {field.key === 'VOLCANO_ASR_KEY' && <button type="button" onClick={() => setShowAsrKey(show => !show)}>{showAsrKey ? '隐藏密钥' : '显示密钥'}</button>}
+            </div>
           ))}
         </section>
 

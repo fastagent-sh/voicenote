@@ -6,11 +6,10 @@ export type Problem = {
   message: string
   /** "第 1 次尝试,共 3 次" — the machinery behind the message, kept small. */
   attempts?: string
-  action?: { label: string; kind: 'login' | 'settings' | 'retry' }
+  action?: { label: string; kind: 'settings' | 'retry' }
 }
 
 const RETRY = { label: '重试', kind: 'retry' } as const
-const LOGIN = { label: '重新登录', kind: 'login' } as const
 const SETTINGS = { label: '去设置', kind: 'settings' } as const
 
 /** `… (attempt 2/3)` / `… — gave up after 3 attempts; …` → a short Chinese note. */
@@ -39,8 +38,10 @@ export function explainFailure(job: Pick<Job, 'code' | 'detail'> | string | null
   if (code === 'interrupted') {
     return problem('上次处理没跑完就被打断了(退出应用、电脑休眠或断电)。', RETRY)
   }
-  if (/no api key|unauthorized|invalid.*(key|token|credential)|\b401\b|oauth/.test(text)) {
-    return problem('ChatGPT 登录已失效,纪要没能生成。', LOGIN)
+  if (/no api key|unauthorized|invalid[^\n]*(key|token|credential)|\b401\b|\b403\b|forbidden/.test(text)) {
+    if (code === 'transcribe_failed') return problem('转写服务认证失败，请检查火山 ASR 密钥。修改设置后，返回这里重试。', SETTINGS)
+    if (code === 'summary_failed') return problem('纪要模型认证失败，请检查当前模型的授权。修改设置后，返回这里重试。', SETTINGS)
+    return problem('服务认证失败，请检查原始错误和设置。', SETTINGS)
   }
   if (/quota|usage limit|rate limit|\b429\b|billing|credit/.test(text)) {
     return problem('模型额度用完了,过一会儿再试。', RETRY)

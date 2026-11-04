@@ -60,6 +60,11 @@ app.whenReady().then(async () => {
  check(window.savedKeys.length === 0, 'cancelled key was persisted');
  check(window.savedConfigs.length === 1, 'settings were not saved');
  const asr = [...document.querySelectorAll('label')].find(e => e.textContent.includes('火山 ASR 密钥')).querySelector('input');
+ check(asr.type === 'password', 'ASR key must be hidden by default');
+ button('显示密钥').click(); await tick();
+ check(asr.type === 'text', 'ASR key cannot be revealed');
+ button('隐藏密钥').click(); await tick();
+ check(asr.type === 'password', 'ASR key cannot be hidden again');
  change(asr, 'unsaved-asr-key'); await tick();
  button('清除').click(); await tick(); await tick();
  check(asr.value === 'unsaved-asr-key', 'clearing provider erased unsaved ASR key');

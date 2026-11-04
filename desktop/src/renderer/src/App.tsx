@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { marked } from 'marked'
 import { vn, type Job, type JobsResponse, type LoginEvent, type PipelineEvent, type Status } from './api.ts'
-import { parseDraft } from './draft.ts'
 import { clock, estimateRemaining, friendlyTime, isFresh, spokenDuration, timeGroup } from './format.ts'
 import { explainFailure, topProblem } from './problems.ts'
 import { NoteDetail } from './NoteDetail.tsx'
@@ -74,9 +73,7 @@ function ActiveDetail({ job, live }: { job: Job; live: Live }) {
     if (following.current) endRef.current?.scrollIntoView({ block: 'end' })
   }, [live.note])
 
-  // The body opens with its own H1, so the title field is not rendered again.
-  const draft = parseDraft(live.note)
-  const draftHtml = draft.body ? marked.parse(draft.body, { async: false }) : ''
+  const draftHtml = live.note ? marked.parse(live.note, { async: false }) : ''
 
   const index = stepIndex(live.step ?? job.step)
   const duration = live.durationSeconds ?? job.durationSeconds
@@ -113,7 +110,7 @@ function ActiveDetail({ job, live }: { job: Job; live: Live }) {
       </ol>
 
       {live.tool && <div className="tool-hint">正在查阅历史笔记,对齐人名和项目称呼…</div>}
-      {draft.body
+      {live.note
         ? (
           <>
             <article className="note-body draft" dangerouslySetInnerHTML={{ __html: draftHtml + '<span class="caret"></span>' }} />
@@ -126,11 +123,10 @@ function ActiveDetail({ job, live }: { job: Job; live: Live }) {
   )
 }
 
-function FailureDetail({ job, pending, onRetry, onLogin, onSettings, onOpen }: {
+function FailureDetail({ job, pending, onRetry, onSettings, onOpen }: {
   job: Job
   pending: boolean
   onRetry: () => void
-  onLogin: () => void
   onSettings: () => void
   onOpen: (path: string) => void
 }) {
@@ -149,9 +145,8 @@ function FailureDetail({ job, pending, onRetry, onLogin, onSettings, onOpen }: {
         {!pending && problem.attempts && <p className="hint">{problem.attempts}</p>}
         {pending && <p className="hint">原因：{problem.message}</p>}
         <div className="row-actions">
-          {!pending && problem.action?.kind === 'login' && <button className="primary" onClick={onLogin}>{problem.action.label}</button>}
           {!pending && problem.action?.kind === 'settings' && <button className="primary" onClick={onSettings}>{problem.action.label}</button>}
-          {!pending && problem.action?.kind === 'retry' && job.id && <button className="primary" onClick={onRetry}>重试</button>}
+          {!pending && problem.action && job.id && <button className={problem.action.kind === 'retry' ? 'primary' : undefined} onClick={onRetry}>重试</button>}
           {job.transcript && <button onClick={() => onOpen(job.transcript!)}>打开转写稿</button>}
           {job.detail && <button className="link" onClick={() => setRaw(v => !v)}>{raw ? '收起原始错误' : '原始错误'}</button>}
         </div>
@@ -169,9 +164,15 @@ export function App() {
   const [running, setRunning] = useState(false)
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<{ path: string; title: string; snippet: string }[]>([])
+  const [searchVersion, setSearchVersion] = useState(0)
   const [selected, setSelected] = useState<{ kind: 'job'; id: string } | { kind: 'path'; path: string; title: string } | null>(null)
   const [screen, setScreen] = useState<'main' | 'settings' | 'recorder'>('main')
   const [skipSetup, setSkipSetup] = useState(false)
+  const initialSetupRequired = useRef<boolean | null>(null)
+  if (status && jobs && initialSetupRequired.current === null) {
+    const hasHistory = jobs.items.some(job => ['done', 'notes_failed', 'error', 'gave_up'].includes(job.status))
+    initialSetupRequired.current = !hasHistory && (!status.volcano.configured || !status.pi.auth)
+  }
   const [toast, setToast] = useState<string | null>(null)
   const [dropping, setDropping] = useState(false)
   const [pendingRetries, setPendingRetries] = useState<string[]>([])
@@ -208,6 +209,7 @@ export function App() {
         else if (event.type === 'note_delta') setLive(prev => ({ ...prev, note: prev.note + event.delta }))
         else if (event.type === 'note_tool') setLive(prev => ({ ...prev, tool: event.name }))
         else if (event.type === 'job_done') {
+          setSearchVersion(v => v + 1)
           setToast(event.stub ? '转写完成,但纪要没能生成' : `已完成：${event.title ?? ''}`)
           // The list is ordered by recording date, so a note made from an old
           // recording appears far down it. Show it instead of making the user
@@ -231,7 +233,7 @@ export function App() {
       vn.on('update:manual', (version: string) => setUpdate(u => ({ ...u, ready: version, manual: true }))),
       vn.on('recorder:connected', () => setToast('检测到录音笔,开始处理')),
       vn.on('login:event', (event: LoginEvent) => {
-        if (event.event === 'success') { setToast('已登录 ChatGPT'); void refresh() }
+        if (event.event === 'success') { setToast('授权成功，返回任务后可重试'); void refresh() }
         else if (event.event === 'error') setToast(`登录失败：${event.message}`)
         else if (event.event === 'auth_url') setToast('已打开浏览器,授权后自动继续')
       }),
@@ -241,9 +243,10 @@ export function App() {
 
   useEffect(() => {
     if (query.trim().length < 2) { setHits([]); return }
-    const id = setTimeout(() => { void vn.search(query).then(setHits) }, 200)
-    return () => clearTimeout(id)
-  }, [query])
+    let cancelled = false
+    const id = setTimeout(() => { void vn.search(query).then(results => { if (!cancelled) setHits(results) }) }, 200)
+    return () => { cancelled = true; clearTimeout(id) }
+  }, [query, searchVersion])
 
   useEffect(() => {
     if (!toast) return
@@ -306,7 +309,7 @@ export function App() {
   if (screen === 'recorder') {
     return <Recorder running={running} onClose={() => { setScreen('main'); void refresh() }} onToast={setToast} />
   }
-  if (!skipSetup && status !== null && (!status.volcano.configured || !status.pi.auth)) {
+  if (!skipSetup && initialSetupRequired.current) {
     // `refresh` itself, not a fresh arrow per render: Onboarding keys an effect
     // on this prop, and a new identity every render reloaded the saved config
     // over whatever the user was typing.
@@ -441,7 +444,6 @@ export function App() {
         {problem && (
           <div className="callout callout-top">
             <span>{problem.message}</span>
-            {problem.action?.kind === 'login' && <button className="primary" onClick={() => void act(() => vn.login())}>{problem.action.label}</button>}
             {problem.action?.kind === 'settings' && <button className="primary" onClick={() => setScreen('settings')}>{problem.action.label}</button>}
           </div>
         )}
@@ -452,7 +454,6 @@ export function App() {
             job={selectedJob}
             pending={!!selectedJob.id && pendingRetries.includes(selectedJob.id)}
             onRetry={() => { if (selectedJob.id) void act(() => vn.retry(selectedJob.id!), '已加入重试队列') }}
-            onLogin={() => void act(() => vn.login())}
             onSettings={() => setScreen('settings')}
             onOpen={(path) => void act(() => vn.openPath(path))}
           />

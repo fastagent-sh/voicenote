@@ -17,6 +17,7 @@ export type FakeModel = {
   requests: { system: string; user: string }[]
   /** Replies with this text; set to null to fail the request with a 500. */
   reply: string | null
+  finishReason: 'stop' | 'length'
   stop: () => Promise<void>
 }
 
@@ -28,7 +29,7 @@ const MODEL = 'fake-model'
  * vn passes as PI_CODING_AGENT_DIR (models.json and auth.json live there).
  */
 export async function startFakeModel(agentDir: string): Promise<FakeModel> {
-  const state: Pick<FakeModel, 'requests' | 'reply'> = { requests: [], reply: '{"title":"Fake note","markdown":"# Fake note"}' }
+  const state: Pick<FakeModel, 'requests' | 'reply' | 'finishReason'> = { requests: [], reply: '# Fake note\n\nText with "quotes" and \\backslashes.', finishReason: 'stop' }
 
   const server: Server = createServer((req, res) => {
     let body = ''
@@ -50,7 +51,7 @@ export async function startFakeModel(agentDir: string): Promise<FakeModel> {
       // Streaming is what pi asks for; a single content chunk is a valid stream.
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' })
       res.write(`data: ${JSON.stringify({ id: 'fake', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { role: 'assistant', content: state.reply } }] })}\n\n`)
-      res.write(`data: ${JSON.stringify({ id: 'fake', object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`)
+      res.write(`data: ${JSON.stringify({ id: 'fake', object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: state.finishReason }] })}\n\n`)
       res.write('data: [DONE]\n\n')
       res.end()
     })
@@ -77,6 +78,8 @@ export async function startFakeModel(agentDir: string): Promise<FakeModel> {
     get requests() { return state.requests },
     get reply() { return state.reply },
     set reply(value: string | null) { state.reply = value },
+    get finishReason() { return state.finishReason },
+    set finishReason(value) { state.finishReason = value },
     stop: () => new Promise<void>((resolve, reject) => server.close(e => e ? reject(e) : resolve())),
   }
 }

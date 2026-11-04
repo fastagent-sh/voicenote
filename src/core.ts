@@ -4,7 +4,6 @@
 import { volcanoTranscribeAudio } from './asr/volcano.ts'
 import { parseLockOwner } from './runLock.ts'
 import { installProxyFromEnv, runAgentPrompt } from './piAgent.ts'
-import { parseSummaryJson } from './summaryJson.ts'
 import { emitPipelineEvent } from './progress.ts'
 import { applyOutcome, buildJobsView, classify, emptyState, localIso, MAX_ATTEMPTS, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, requeueForRegenerate, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs.ts'
 import {
@@ -624,9 +623,9 @@ Core principles:
 11. Explicitly flag uncertain or likely mis-transcribed words; do not treat them as facts.
 12. Default is Integrated notes mode: the input transcript may not have been separately cleaned. Before generating content, internally perform necessary cleanup: fix obvious typos, unify terminology, restore speakers, merge verbal repetition, fix punctuation and sentence breaks; but never invent information not in the source, and never scrub away the genuine thinking process.
 
-Write all output content (title, markdown, structured fields) in the dominant language of the transcript.
+Write the notes in the dominant language of the transcript.
 
-Output must be valid JSON, no markdown fences.
+Output only Markdown, without a surrounding code fence. Start with an # H1 title that captures the topic and value.
 
 ${speakerContextBlock(config.speakers)}`
 
@@ -648,25 +647,7 @@ Recording info:
 - File size: ${rec.sizeBytes} bytes
 - Duration: ${rec.durationSeconds} seconds
 
-Output JSON with these fields:
-{
-  "title": "A title in the transcript's language that captures the real topic and value; avoid generic 'meeting minutes' phrasing",
-  "date": "YYYY-MM-DD",
-  "start_time": "HH:mm|null",
-  "end_time": "HH:mm|null",
-  "participants": ["Only actually identified real names (including the user's); never Speaker A/B"],
-  "organizations": ["string"],
-  "projects": ["string"],
-  "markdown": "Full markdown body. Must start with an # H1 title. Structure is entirely yours based on the semantics; do not include the trailing source details block, the system appends it.",
-  "discussion_flow": [{"stage": "discussion stage/topic", "what_happened": "what happened in this stage", "speaker_positions": [{"speaker": "real name or Speaker label", "position": "view/concern/reasoning"}], "turning_point": "key pivot or change of view|null", "outcome": "stage consensus/disagreement/open|null"}],
-  "consensus_points": [{"point": "consensus reached", "how_reached": "how this consensus formed through discussion/argument|null"}],
-  "disagreements": [{"issue": "point of disagreement", "positions": [{"speaker": "real name or Speaker label", "position": "stance and reasoning"}], "status": "resolved|unresolved|partially_resolved|null"}],
-  "action_items": [{"task": "string", "owner": "string|null", "due_date": "YYYY-MM-DD|null", "priority": "high|medium|low|null", "note": "string|null"}],
-  "decisions": [{"decision": "string", "reason": "string|null", "owner": "string|null", "date": "YYYY-MM-DD|null", "how_reached": "how this decision was reached|null"}],
-  "open_questions": [{"question": "string", "next_step": "string|null"}],
-  "key_quotes_or_details": ["string"],
-  "transcription_uncertainties": ["string"]
-}
+Output the full Markdown note starting with an # H1 title. Do not include a source details block; the system appends it.
 
 Markdown quality requirements:
 - The first screen must have a high signal-to-noise ratio: the reader should know why this content is worth keeping without reading the full transcript.
@@ -675,7 +656,7 @@ Markdown quality requirements:
 - If there are action items, use concrete actionable language; if there are none, do not fabricate any.
 - If there are ideas/judgments, write out the reasoning chain, not just conclusions.
 - If there was discussion, debate, or joint reasoning, preserve the key process: view raised → challenge/addition → response/rebuttal → revision/pivot → consensus/disagreement. Do not compress it into a single "in the end they concluded…".
-- The markdown body should primarily reconstruct the process in natural language; do not just fill discussion_flow/consensus_points/disagreements as metadata and stop — those structured fields only aid your thinking and indexing.
+- Reconstruct the process in natural language.
 - For important consensus, explain how it was reached; for important disagreements, state who held what view, why, and whether it was resolved.
 - If a conclusion went through option comparison or trade-offs, write out the compared options, the criteria, and why one was dropped or chosen.
 - For long meetings, review by topic/stage rather than as a running log, but keep each stage's key turning points and representative speakers' views.
@@ -787,31 +768,21 @@ async function summarizeTranscript(config: Config, transcript: string, rec: Reco
   const messages = summaryMessages(config, transcript, rec, localAudioPath)
   const systemPrompt = String(messages[0]!.content)
   const userPrompt = String(messages[1]!.content)
-  const text = await chatComplete({ systemPrompt, userPrompt, config })
-  try {
-    return parseSummaryJson(text) as Json
-  } catch (e: any) {
-    throw new Error(`summary returned non-JSON output (${e?.message || e}). First 400 chars: ${text.slice(0, 400)}`)
-  }
+  const markdown = await chatComplete({ systemPrompt, userPrompt, config })
+  const title = /^#\s+(.+?)\s*#*\s*(?:\r?\n|$)/.exec(markdown)?.[1]?.trim()
+  if (!title) throw new Error('Summary must start with a non-empty Markdown H1 title')
+  return { title, markdown }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Metadata + markdown
 // ────────────────────────────────────────────────────────────────────────────
 
-function isSpeakerLabel(text: string): boolean {
-  return /^\s*speaker\s+[a-z]\s*$/i.test(text) || /^\s*说话人\s*[A-ZＡ-Ｚa-zａ-ｚ一二三四五六七八九十0-9]+\s*$/.test(text)
-}
-
 function normalizeMetadata(meta: Json, rec: Recording): Json {
   const d = rec.recordedAt
   meta.date ||= `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
   meta.start_time ||= `${pad(d.getHours())}:${pad(d.getMinutes())}`
   meta.end_time ??= null
-  for (const key of ['participants', 'organizations', 'projects', 'discussion_flow', 'consensus_points', 'disagreements', 'action_items', 'decisions', 'open_questions', 'key_quotes_or_details', 'transcription_uncertainties']) {
-    if (!Array.isArray(meta[key])) meta[key] = []
-  }
-  meta.participants = meta.participants.filter((p: any) => typeof p === 'string' && p.trim() && !isSpeakerLabel(p))
   return meta
 }
 
@@ -947,7 +918,7 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
     } catch (e: any) {
       summaryError = e
       console.error(`Summary step failed; transcript is preserved. Error: ${e?.message || e}`)
-      console.error(`Hint: fix LLM auth/credits, then re-run with: vn run --latest`)
+      console.error(`Hint: check the error above, then re-run with: vn run --latest`)
     }
   }
 
@@ -967,21 +938,27 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
   if (summaryError) meta.summary_error = String(summaryError?.message || summaryError)
 
   progressStep(nextStep(), totalSteps, 'Write outputs and index')
+  let oldNoteToRemove: string | null = null
   let failedStubPathToRemove: string | null = null
   if (needsNotes && !summaryError) {
     const titled = layout(config, rec, meta.title)
-    await promoteOutputs(files, titled)
-    // The stub note of a failed attempt is removed only after the real note is
-    // written, so a failure in between still leaves the user a pointer to the
-    // saved transcript.
-    if (files.notes !== titled.notes) failedStubPathToRemove = files.notes
-    files = titled
+    const previous = existsSync(files.notes) ? await readFile(files.notes, 'utf8') : null
+    const hasPreviousNote = previous !== null && !previous.startsWith('# Pending summary: ') && !previous.startsWith('# 待补纪要：')
+    if (hasPreviousNote) {
+      if (files.notes !== titled.notes && existsSync(titled.notes)) throw new Error(`Cannot replace notes: destination already exists: ${titled.notes}`)
+      if (files.notes !== titled.notes) oldNoteToRemove = files.notes
+      files = { ...files, notes: titled.notes }
+    } else {
+      await promoteOutputs(files, titled)
+      if (files.notes !== titled.notes) failedStubPathToRemove = files.notes
+      files = titled
+    }
   }
   await mkdir(dirname(files.notes), { recursive: true })
   await mkdir(dirname(files.metadata), { recursive: true })
 
   if (needsNotes && !summaryError) {
-    await writeFile(files.notes, markdownNotes(meta, files.audio, files.transcript), 'utf8')
+    await writeFileAtomic(files.notes, markdownNotes(meta, files.audio, files.transcript))
     console.log(`✓ Notes: ${files.notes}`)
     if (failedStubPathToRemove) await removeFailedSummaryStub(failedStubPathToRemove)
     if (opts.pdf) {
@@ -993,8 +970,13 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
     // No unconditional "just re-run" promise: after MAX_ATTEMPTS the job is
     // `gave_up` and further runs skip it, so the note has to name both ways out.
     const stubBody = `# Pending summary: ${basename(rec.sourcePath)}\n\n> ⚠ Transcription completed and saved, but the summary stage failed; retry needed.\n\n- Transcript file: \`${files.transcript}\`\n- Original audio: \`${rec.sourcePath}\`\n- Failure reason: ${meta.summary_error}\n- Retry: the next \`vn run\` reuses the saved transcript automatically (no new transcription cost). After ${MAX_ATTEMPTS} failed attempts it stops retrying — run \`vn forget ${basename(rec.sourcePath)}\` to queue it again.\n`
-    await writeFile(files.notes, stubBody, 'utf8')
-    console.log(`⚠ Stub notes (summary failed): ${files.notes}`)
+    try {
+      await writeFile(files.notes, stubBody, { encoding: 'utf8', flag: 'wx' })
+      console.log(`⚠ Stub notes (summary failed): ${files.notes}`)
+    } catch (e: any) {
+      if (e?.code !== 'EEXIST') throw e
+      console.log(`⚠ Existing notes preserved (summary failed): ${files.notes}`)
+    }
   } else if (opts.pdf) {
     console.log('PDF skipped: --pdf only applies to --mode notes.')
   }
@@ -1018,6 +1000,7 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
 
   await writeJson(files.metadata, meta)
   await appendJsonl(await notesIndexPath(config), meta)
+  if (oldNoteToRemove) await unlink(oldNoteToRemove)
   console.log(`✓ Completed: ${meta.title || basename(rec.sourcePath)} (${formatElapsed(Date.now() - jobStarted)} total)`)
   if (needsNotes) console.log(`Final notes: ${files.notes}`)
   else console.log(`Final transcript: ${files.transcript}`)
@@ -1125,10 +1108,7 @@ export async function runPipeline(file: string | undefined, opts: any): Promise<
   const config = getConfig()
   opts = { ...opts, file }
   const lock = await acquireRunLock()
-  if (!lock) {
-    console.log('voicenote pipeline already running; skip')
-    return
-  }
+  if (!lock) throw new Error('Another VoiceNote process is running. Retry after it finishes.')
   try {
     await runPipelineLocked(config, opts)
   } finally {
@@ -1161,7 +1141,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   if (!single) {
     const seenIds = new Set(recordings.map(r => r.sourceId))
     for (const [id, job] of Object.entries(store.jobs)) {
-      if (job.state !== 'queued' || seenIds.has(id)) continue
+      if (job.state !== 'queued' || seenIds.has(id) || (opts.jobId && opts.jobId !== id)) continue
       const rec: Recording = {
         sourcePath: job.source_path,
         sizeBytes: job.size_bytes,
@@ -1187,6 +1167,9 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
 
   recordings.sort((a, b) => Number(b.imported) - Number(a.imported) || a.recordedAt.getTime() - b.recordedAt.getTime())
 
+  if (opts.jobId && !recordings.some(rec => rec.sourceId === opts.jobId)) {
+    throw new Error('Recording and saved files are unavailable. Reconnect the recorder and retry.')
+  }
   if (!single && !recorderPresent && !recordings.length) {
     if (shouldLogIdleStatus(`missing:${config.recordDir}`)) {
       console.log(`Idle: recorder not mounted and no manual imports are queued: ${config.recordDir} (repeated idle logs suppressed for 30m)`)
@@ -1205,6 +1188,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   const automaticLimits = { maxAgeHours: config.maxAgeHours, minBytes: config.minBytes, minDurationSeconds: config.minDurationSeconds }
   const manualLimits = { maxAgeHours: 0, minBytes: 0, minDurationSeconds: 0 }
   for (const rec of recordings) {
+    if (opts.jobId && rec.sourceId !== opts.jobId) continue
     seen.add(rec.sourceId)
     const completedDuplicate = rec.imported && !store.jobs[rec.sourceId]
       ? completedJobByHash(store, rec.contentHash)
@@ -1218,7 +1202,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
       continue
     }
     const entry = recordFor(store, rec)
-    const verdict = classify(rec, store.jobs[rec.sourceId], single || rec.imported || rec.resuming ? manualLimits : automaticLimits, { force, notesMode: mode === 'notes', now: Date.now() })
+    const verdict = classify(rec, store.jobs[rec.sourceId], single || opts.jobId || rec.imported || rec.resuming ? manualLimits : automaticLimits, { force, notesMode: mode === 'notes', now: Date.now() })
     if (verdict.run) { eligible.push(rec); continue }
     skipCounts[verdict.code] = (skipCounts[verdict.code] || 0) + 1
     ;(skipSamples[verdict.code] ||= []).push(entry.name)
@@ -1229,7 +1213,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   // Only prune against a listing we believe to be complete: if the recorder went
   // away mid-glob the scan is partial, and pruning would wipe live queue entries
   // (they'd return on the next scan, but their retry counters would not).
-  const dropped = pruneUnseen(store.jobs, seen, !single && scanComplete && existsSync(config.recordDir))
+  const dropped = pruneUnseen(store.jobs, seen, !single && !opts.jobId && scanComplete && existsSync(config.recordDir))
   // The only routine path that deletes state — never do it silently.
   if (dropped.length) console.log(`Forgot ${dropped.length} record(s) whose source is no longer on the recorder: ${dropped.slice(0, 3).map(j => j.name).join(', ')}${dropped.length > 3 ? `…(+${dropped.length - 3})` : ''}`)
   const skipSummary = Object.entries(skipCounts).map(([reason, count]) => `${reason}=${count}`).join(', ') || 'none'
@@ -1238,21 +1222,23 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
     ? `Skipped samples: ${Object.entries(skipSamples).map(([reason, names]) => `${reason}: ${names.slice(0, 3).join(', ')}${names.length > 3 ? `…(+${names.length - 3})` : ''}`).join(' | ')}`
     : ''
   const latestOnly = Boolean(opts.latest)
-  const targets = latestOnly && eligible.length
-    ? [eligible.reduce((latest, rec) => rec.recordedAt > latest.recordedAt ? rec : latest)]
-    : eligible
+  let targets = eligible
   // Preflight: if there is work but the run cannot complete, skip BEFORE spending
   // ASR money, rather than failing per-recording on every 60s StartInterval tick.
   // Idle-suppressed so a misconfigured daemon doesn't spam logs. Skipped for
   // --dry-run, which is a zero-side-effect diagnostic and should still print the
   // plan even on an unconfigured machine.
   if (targets.length && !opts.dryRun) {
-    const needsAsr = targets.some(rec => !resumableTranscriptFiles(config, rec, store, mode, force))
-    if (needsAsr && !config.volcano) {
-      if (shouldLogIdleStatus(`asr-misconfig:${config.recordDir}`)) console.error('ASR not configured: Volcano needs VOLCANO_ASR_KEY. Skipping; run `vn doctor`, fix config, then re-run.')
-      return
+    if (!config.volcano) {
+      const ready = targets.filter(rec => resumableTranscriptFiles(config, rec, store, mode, force))
+      if (ready.length !== targets.length) {
+        if (opts.jobId) throw new Error('ASR not configured: set VOLCANO_ASR_KEY before retrying.')
+        console.error('ASR not configured: Volcano needs VOLCANO_ASR_KEY. Skipping recordings that need transcription.')
+      }
+      targets = ready
     }
   }
+  if (latestOnly && targets.length) targets = [targets.reduce((latest, rec) => rec.recordedAt > latest.recordedAt ? rec : latest)]
   if (!targets.length) {
     if (verboseSkips || shouldLogIdleStatus(`idle:${config.recordDir}:${recordings.length}:${skipSummary}:${samplesLine}`)) {
       console.log(scanLine)
@@ -1508,6 +1494,15 @@ export async function retryRecording(id: string): Promise<void> {
     const store = await loadState(config)
     const entry = store.jobs[id]
     if (!entry) throw new Error('Recording no longer exists in the processing list.')
+    const rec: Recording = {
+      sourcePath: entry.source_path, sourceId: id, sizeBytes: entry.size_bytes,
+      modifiedAt: entry.updated_at, durationSeconds: entry.duration_seconds,
+      contentHash: entry.content_hash || '', recordedAt: new Date(entry.recorded_at), imported: entry.origin === 'import',
+    }
+    const files = recordingFiles(config, rec, store)
+    if (![entry.source_path, files.audio, files.transcript].some(path => existsSync(path))) {
+      throw new Error('Recording and saved files are unavailable. Reconnect the recorder and retry.')
+    }
     if (!requeueFailed(entry, nowIso())) throw new Error(`Cannot retry a recording in state '${entry.state}'.`)
     await saveState(config, store)
     console.log(`queued ${entry.name} for retry`)

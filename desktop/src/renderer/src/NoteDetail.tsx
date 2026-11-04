@@ -17,12 +17,14 @@ export function NoteDetail(props: Props) {
   const [markdown, setMarkdown] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [playing, setPlaying] = useState(false)
+  const [confirmRegenerate, setConfirmRegenerate] = useState(false)
 
   useEffect(() => {
     let cancelled = false
     setMarkdown(null)
     setError(null)
     setPlaying(false)
+    setConfirmRegenerate(false)
     vn.readNote(path)
       .then(text => { if (!cancelled) setMarkdown(text) })
       .catch(e => { if (!cancelled) setError(String((e as Error).message ?? e)) })
@@ -62,7 +64,7 @@ export function NoteDetail(props: Props) {
           {props.job && (
             props.pending
               ? <span className="hint">已排队重新生成…</span>
-              : <button onClick={props.onRegenerate} title="用保存的转写稿重写纪要,不会重新转写">重新生成</button>
+              : <button onClick={() => setConfirmRegenerate(true)} title="用保存的转写稿重写纪要,不会重新转写">重新生成</button>
           )}
           {audio && <button onClick={() => setPlaying(v => !v)}>{playing ? '收起播放' : '播放录音'}</button>}
           <button onClick={() => { void navigator.clipboard.writeText(markdown ?? ''); props.onToast('已复制 Markdown') }} disabled={!markdown}>复制</button>
@@ -70,6 +72,16 @@ export function NoteDetail(props: Props) {
           <button onClick={() => void vn.revealPath(path)}>在访达中显示</button>
         </div>
       </header>
+
+      {confirmRegenerate && props.job && (
+        <div className="callout" role="alert">
+          <p>重新生成会替换当前纪要，包括手动修改的内容。转写稿和录音会保留。</p>
+          <div className="row-actions">
+            <button className="primary" onClick={() => { setConfirmRegenerate(false); props.onRegenerate() }}>确认重新生成</button>
+            <button onClick={() => setConfirmRegenerate(false)}>取消</button>
+          </div>
+        </div>
+      )}
 
       {playing && audio && <audio className="player" controls autoPlay src={`file://${encodeURI(audio)}`} />}
 

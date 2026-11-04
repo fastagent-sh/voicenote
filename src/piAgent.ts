@@ -92,10 +92,15 @@ export async function runAgentPrompt(opts: AgentRunOptions): Promise<string> {
   })
 
   let text = ''
+  let stopReason = ''
+  let modelError = ''
   const unsubscribe = session.subscribe((event) => {
     if (event.type === 'message_update' && event.assistantMessageEvent.type === 'text_delta') {
-      text += event.assistantMessageEvent.delta
       opts.onProgress?.({ type: 'text', delta: event.assistantMessageEvent.delta })
+    } else if (event.type === 'message_end' && event.message.role === 'assistant') {
+      stopReason = event.message.stopReason
+      modelError = event.message.errorMessage || ''
+      text = event.message.content.filter(block => block.type === 'text').map(block => block.text).join('')
     } else if (event.type === 'tool_execution_start') {
       opts.onProgress?.({ type: 'tool', name: event.toolName })
     }
@@ -112,10 +117,8 @@ export async function runAgentPrompt(opts: AgentRunOptions): Promise<string> {
   }
 
   if (timedOut) throw new Error(`Notes model timed out after ${Math.round(opts.timeoutMs / 1000)}s`)
+  if (stopReason !== 'stop') throw new Error(modelError || session.agent.state.errorMessage || `Notes model did not finish normally (${stopReason || 'no response'})`)
   const trimmed = text.trim()
-  // prompt() resolves even when the model call failed; the error lands in agent
-  // state. Reporting it verbatim is what makes "no API key" or "rate limited"
-  // visible instead of a bare "empty output".
   if (!trimmed) throw new Error(session.agent.state.errorMessage || 'Notes model returned no text')
   return trimmed
 }
