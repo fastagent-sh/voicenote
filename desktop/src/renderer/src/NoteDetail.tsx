@@ -31,13 +31,16 @@ export function NoteDetail(props: Props) {
     return () => { cancelled = true }
   }, [path])
 
-  // Two things the reader does not need twice: the note's own H1 (the header
-  // above already shows the title) and the trailing "Source" block of file
-  // paths (the header's buttons open those files).
-  const body = useMemo(() => {
-    const withoutSource = (markdown ?? '').split('<!-- voicenote:source -->')[0] ?? ''
-    return withoutSource.replace(/^\s*#\s+.+\n+/, '')
-  }, [markdown])
+  const shareable = (markdown ?? '').split('<!-- voicenote:source -->')[0]!.trimEnd()
+  const body = shareable.replace(/^\s*#\s+.+(?:\n+|$)/, '')
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(/^\s*#\s+/.test(shareable) ? shareable : `# ${title}\n\n${shareable}`)
+      props.onToast('已复制 Markdown')
+    } catch (error) {
+      props.onToast(`复制失败：${String((error as Error).message ?? error)}`)
+    }
+  }
   const html = useMemo(() => (body ? marked.parse(body, { async: false }) : ''), [body])
   const audio = props.job?.audio ?? null
 
@@ -67,7 +70,7 @@ export function NoteDetail(props: Props) {
               : <button onClick={() => setConfirmRegenerate(true)} title="用保存的转写稿重写纪要,不会重新转写">重新生成</button>
           )}
           {audio && <button onClick={() => setPlaying(v => !v)}>{playing ? '收起播放' : '播放录音'}</button>}
-          <button onClick={() => { void navigator.clipboard.writeText(markdown ?? ''); props.onToast('已复制 Markdown') }} disabled={!markdown}>复制</button>
+          <button onClick={() => void copy()} disabled={!shareable}>复制</button>
           <button onClick={() => void vn.openNoteAsHtml(title, html)} disabled={!markdown}>浏览器打开</button>
           <button onClick={() => void vn.revealPath(path)}>在访达中显示</button>
         </div>

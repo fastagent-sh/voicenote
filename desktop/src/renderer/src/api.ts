@@ -1,5 +1,9 @@
 import type { LoginPromptView } from '../../../../src/loginInteraction.ts'
 
+import type { ImportResult } from '../../../../src/core.ts'
+
+export type DesktopImportResult = ImportResult | { status: 'failed'; path: string; error: string }
+
 /** The preload bridge, typed for the renderer. */
 export type Status = {
   version: string
@@ -120,9 +124,9 @@ type Api = {
   checkForUpdates: () => Promise<UpdateState>
   installUpdate: () => Promise<{ installable: boolean }>
   openReleases: () => Promise<void>
-  importRecording: (path: string) => Promise<void>
+  importRecordings: (paths: string[]) => Promise<DesktopImportResult[]>
   pathForFile: (file: File) => string
-  pickAudio: () => Promise<string | null>
+  pickAudio: () => Promise<string[]>
   pickDirectory: () => Promise<string | null>
   login: (providerId?: string) => Promise<void>
   piProviders: () => Promise<ProviderInfo[]>
@@ -137,7 +141,7 @@ type Api = {
   search: (query: string) => Promise<{ path: string; title: string; snippet: string }[]>
   openNoteAsHtml: (title: string, html: string) => Promise<string>
   setAutoProcess: (enabled: boolean) => Promise<boolean>
-  on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'run:queued' | 'recorder:connected' | 'retry:pending' | 'queue:pending' | 'update:available' | 'update:not-available' | 'update:ready' | 'update:manual' | 'update:error', listener: (payload: any) => void) => () => void
+  on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'run:queued' | 'recorder:connected' | 'retry:pending' | 'queue:pending' | 'update:changed', listener: (payload: any) => void) => () => void
 }
 
 export const vn = (window as unknown as { vn: Api }).vn

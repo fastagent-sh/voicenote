@@ -11,14 +11,14 @@ const FIELDS: { key: string; label: string; hint?: string }[] = [
   { key: 'LOCAL_PROXY_PORT', label: '代理端口' },
 ]
 
-export function Settings({ status, running = false, onClose, onLogin: _onLogin }: { status: Status | null; running?: boolean; onClose: () => void; onLogin: () => void }) {
+export function Settings({ status, running = false, update, onClose }: { status: Status | null; running?: boolean; update: UpdateState | null; onClose: () => void }) {
   const [env, setEnv] = useState<Record<string, string>>({})
   const [self, setSelf] = useState<{ name: string | null; aliases: string[] }>({ name: null, aliases: [] })
   const [saving, setSaving] = useState(false)
   const [showAsrKey, setShowAsrKey] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
-  const [update, setUpdate] = useState<UpdateState | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
+  const [latest, setLatest] = useState(false)
   const [updateNote, setUpdateNote] = useState<string | null>(null)
   const [pendingApiKey, setPendingApiKey] = useState<{ providerId: string; key: string } | null>(null)
 
@@ -27,54 +27,26 @@ export function Settings({ status, running = false, onClose, onLogin: _onLogin }
       setEnv(config.env)
       setSelf(config.self)
     }).catch(error => setMessage(`无法加载设置: ${String(error)}`))
-    void vn.updateState().then(state => {
-      setUpdate(state)
-      if (state.checking) setCheckingUpdate(true)
-    }).catch(error => setMessage(String(error)))
-    const off = [
-      vn.on('update:available', (ver: string) => {
-        setCheckingUpdate(false)
-        setUpdateNote(null)
-        setUpdate(u => ({ version: u?.version ?? '', ready: u?.ready ?? null, manual: Boolean(u?.manual), ...u, available: ver }))
-      }),
-      vn.on('update:not-available', () => {
-        setCheckingUpdate(false)
-        setUpdateNote('当前已是最新版本')
-        setUpdate(u => (u ? { ...u, available: null, checking: false } : u))
-      }),
-      vn.on('update:ready', (ver: string) => {
-        setCheckingUpdate(false)
-        setUpdateNote(null)
-        setUpdate(u => ({ version: u?.version ?? '', manual: Boolean(u?.manual), ...u, available: ver, ready: ver }))
-      }),
-      vn.on('update:manual', (ver: string) => {
-        setCheckingUpdate(false)
-        setUpdate(u => ({ version: u?.version ?? '', ...u, available: ver, ready: ver, manual: true }))
-      }),
-      vn.on('update:error', (err: string) => {
-        setCheckingUpdate(false)
-        setUpdateNote(`检查更新失败：${err}`)
-      }),
-    ]
-    return () => { off.forEach(fn => fn()) }
   }, [])
 
   const checkUpdates = async () => {
     if (checkingUpdate) return
     setCheckingUpdate(true)
+    setLatest(false)
     setUpdateNote(null)
     try {
       const next = await vn.checkForUpdates()
-      setUpdate(next)
       if (next.packaged === false) setUpdateNote('开发模式不检查安装包更新，可点「查看发布页」查看')
-      else if (next.error) setUpdateNote(`检查更新失败：${next.error}`)
-      else if (!next.ready && !next.available) setUpdateNote('当前已是最新版本')
+      else if (!next.error && !next.checking && !next.ready && !next.available) setLatest(true)
     } catch (error) {
       setUpdateNote(`检查更新失败：${String((error as Error)?.message ?? error)}`)
     } finally {
       setCheckingUpdate(false)
     }
   }
+
+  const busy = checkingUpdate || update?.checking
+  const downloading = Boolean(update?.available && !update.error && !update.ready && !busy)
 
   const installUpdate = async () => {
     try {
@@ -180,8 +152,8 @@ export function Settings({ status, running = false, onClose, onLogin: _onLogin }
                   </button>
                 )
                 : (
-                  <button onClick={() => void checkUpdates()} disabled={checkingUpdate || Boolean(update?.available)}>
-                    {checkingUpdate ? '检查中…' : update?.available ? '下载中…' : '检查更新'}
+                  <button onClick={() => void checkUpdates()} disabled={busy || downloading}>
+                    {busy ? '检查中…' : downloading ? '下载中…' : update?.available && update.error ? '重试下载' : '检查更新'}
                   </button>
                 )}
               <button onClick={() => void vn.openReleases()}>查看发布页</button>
@@ -194,12 +166,12 @@ export function Settings({ status, running = false, onClose, onLogin: _onLogin }
                 : `新版本 ${update.ready} 已下载${running ? '，当前处理完成后可重启更新' : '，点击「重启以更新」即可完成安装'}。`}
             </p>
           )}
-          {!update?.ready && update?.available && (
-            <p className="hint fine">发现新版本 {update.available}，正在后台下载…</p>
+          {downloading && (
+            <p className="hint fine">发现新版本 {update?.available}，正在后台下载…</p>
           )}
-          {!update?.ready && !update?.available && updateNote && (
-            <p className="hint fine">{updateNote}</p>
-          )}
+          {update?.error && <p className="problem" role="alert">{update.available ? '下载失败' : '检查更新失败'}：{update.error}</p>}
+          {latest && !busy && !update?.available && !update?.ready && !update?.error && <p className="hint fine">当前已是最新版本</p>}
+          {updateNote && <p className="hint fine">{updateNote}</p>}
         </section>
 
         {message && <p className="hint">{message}</p>}

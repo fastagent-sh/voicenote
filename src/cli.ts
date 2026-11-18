@@ -40,7 +40,12 @@ cli.command('open [target]', 'Open notes dir, config dir (`config`), logs dir (`
 
 cli.command('import <file>', 'Copy one audio file into the durable manual-import queue')
   .option('--json', 'Output structured status (for the GUI)')
-  .action((file: string, opts: { json?: boolean }) => importRecording(file, opts))
+  .action(async (file: string, opts: { json?: boolean }) => {
+    const result = await importRecording(file)
+    if (opts.json) console.log(JSON.stringify(result))
+    else if (result.status === 'already_done') console.log(`already processed: ${result.title || result.name}`)
+    else console.log(`${result.status}: ${result.name}`)
+  })
 cli.command('forget <key>', 'Drop a recording\'s job record so it is queued again (a saved transcript on disk is still reused)').action((key: string) => forgetRecording(key))
 cli.command('retry <id>', 'Requeue one failed recording while retaining saved outputs').action((id: string) => retryRecording(id))
 cli.command('regenerate <id>', 'Write the notes again from the saved transcript (no new transcription cost)').action((id: string) => regenerateNotes(id))

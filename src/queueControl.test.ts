@@ -113,7 +113,7 @@ test('queue items can be processed one-by-one, prioritized, and removed', async 
     const importStep = await run(`
       const { readFile, writeFile } = await import('node:fs/promises');
       const core = await import('./src/core.ts');
-      await core.importRecording(${JSON.stringify(importSource)}, { json: true });
+      await core.importRecording(${JSON.stringify(importSource)});
       const st = JSON.parse(await readFile(${JSON.stringify(statePath)}, 'utf8'));
       const impId = Object.keys(st.jobs).find(k => k.startsWith('import:')) || 'import:missing';
       // Ensure record exists via dry-run/queue then removeQueuedJob cleans it up
