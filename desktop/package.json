@@ -33,6 +33,7 @@
   "build": {
     "appId": "sh.fastagent.voicenote",
     "productName": "VoiceNote",
+    "icon": "build/voicenote.svg",
     "directories": {
       "output": "release",
       "buildResources": "build"
