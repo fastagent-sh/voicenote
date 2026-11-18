@@ -19,7 +19,28 @@ export type VolcanoQueryResult = {
   audio_info?: { duration?: number }
 }
 
-export async function volcanoSubmitTask(volc: VolcanoConfig, taskId: string, audioBase64: string, format: string): Promise<void> {
+function abortError(): Error {
+  const err = new Error('Aborted')
+  err.name = 'AbortError'
+  return err
+}
+
+function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortError())
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(abortError())
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+export async function volcanoSubmitTask(volc: VolcanoConfig, taskId: string, audioBase64: string, format: string, signal?: AbortSignal): Promise<void> {
   const body = {
     user: { uid: 'voicenote' },
     audio: { data: audioBase64, format },
@@ -37,6 +58,7 @@ export async function volcanoSubmitTask(volc: VolcanoConfig, taskId: string, aud
     method: 'POST',
     headers: volcanoAuthHeaders(volc, taskId, true),
     body: JSON.stringify(body),
+    signal,
   })
   const status = res.headers.get('X-Api-Status-Code') || ''
   const message = res.headers.get('X-Api-Message') || ''
@@ -46,11 +68,12 @@ export async function volcanoSubmitTask(volc: VolcanoConfig, taskId: string, aud
   }
 }
 
-export async function volcanoQueryResult(volc: VolcanoConfig, taskId: string): Promise<VolcanoQueryResult> {
+export async function volcanoQueryResult(volc: VolcanoConfig, taskId: string, signal?: AbortSignal): Promise<VolcanoQueryResult> {
   const res = await fetch('https://openspeech.bytedance.com/api/v3/auc/bigmodel/query', {
     method: 'POST',
     headers: volcanoAuthHeaders(volc, taskId, false),
     body: '{}',
+    signal,
   })
   const status = res.headers.get('X-Api-Status-Code') || ''
   const message = res.headers.get('X-Api-Message') || ''
@@ -86,14 +109,17 @@ export function volcanoFormatTranscript(result: { text?: string; utterances?: Vo
 export async function volcanoTranscribeAudio(
   volc: VolcanoConfig,
   audioPath: string,
-  options?: { durationSeconds?: number | null }
+  options?: { durationSeconds?: number | null; signal?: AbortSignal }
 ): Promise<string> {
+  const signal = options?.signal
+  if (signal?.aborted) throw abortError()
   const format = (extname(audioPath).toLowerCase() || '.mp3').replace(/^\./, '')
   const taskId = randomUUID()
   const audioBase64 = (await readFile(audioPath)).toString('base64')
+  if (signal?.aborted) throw abortError()
   console.log(`Volcano: submit ASR task ${taskId} (resource=${volc.resourceId}, format=${format}, ${(audioBase64.length / 1e6).toFixed(1)} MB upload)`)
 
-  await withHeartbeat('upload audio and submit ASR task', () => volcanoSubmitTask(volc, taskId, audioBase64, format), 30)
+  await withHeartbeat('upload audio and submit ASR task', () => volcanoSubmitTask(volc, taskId, audioBase64, format, signal), 30)
   const started = Date.now()
   const expectedSeconds = options?.durationSeconds || 0
   const maxWaitMs = Math.max(20 * 60 * 1000, Math.ceil(expectedSeconds * 1000 * 1.5))
@@ -109,11 +135,12 @@ export async function volcanoTranscribeAudio(
   }
 
   for (;;) {
-    await new Promise(res => setTimeout(res, 8000))
+    await sleepAbortable(8000, signal)
     let q: VolcanoQueryResult
     try {
-      q = await volcanoQueryResult(volc, taskId)
+      q = await volcanoQueryResult(volc, taskId, signal)
     } catch (e: any) {
+      if (signal?.aborted || e?.name === 'AbortError') throw abortError()
       transientQueryFailure(String(e?.message || e))
       continue
     }

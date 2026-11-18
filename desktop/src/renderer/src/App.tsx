@@ -54,7 +54,7 @@ function Elapsed({ since }: { since: number }) {
 }
 
 /** The running recording: what it is, where it is, and what it has written. */
-function ActiveDetail({ job, live }: { job: Job; live: Live }) {
+function ActiveDetail({ job, live, aborting, onAbort }: { job: Job; live: Live; aborting: boolean; onAbort: () => void }) {
   const endRef = useRef<HTMLDivElement>(null)
   // Follow the growing draft until the reader scrolls up, then leave them
   // alone until they come back to the bottom. Deciding per delta does not
@@ -97,6 +97,15 @@ function ActiveDetail({ job, live }: { job: Job; live: Live }) {
             {duration ? ` · 录音 ${spokenDuration(duration)}` : ''}
           </div>
         </div>
+        <div className="row-actions">
+          <button
+            onClick={onAbort}
+            disabled={aborting}
+            title="中止当前任务并移到待处理队列末尾，继续处理下一条"
+          >
+            {aborting ? '正在中止…' : '中止并移到队尾'}
+          </button>
+        </div>
       </header>
 
       <ol className="steps">
@@ -129,7 +138,7 @@ function QueuedDetail({
   position,
   total,
   running,
-  prioritized,
+  priority,
   isNext,
   confirmRemove,
   onConfirmRemoveChange,
@@ -141,7 +150,7 @@ function QueuedDetail({
   position: number
   total: number
   running: boolean
-  prioritized: boolean
+  priority: number
   isNext: boolean
   confirmRemove: boolean
   onConfirmRemoveChange: (v: boolean) => void
@@ -182,15 +191,17 @@ function QueuedDetail({
         </div>
       </header>
 
-      <div className={`callout ${isNext || prioritized ? 'callout-pending' : 'callout-queue'}`}>
+      <div className={`callout ${isNext || priority > 0 ? 'callout-pending' : 'callout-queue'}`}>
         <p className="callout-title">
           {isNext
             ? '已排在下一个，当前任务完成后立即开始处理。'
-            : prioritized
+            : priority > 0
               ? `已提高优先级，当前排在队列第 ${position} 位（共 ${total} 条等待中）。`
-              : running
-                ? `等待处理中，当前排在队列第 ${position} 位（共 ${total} 条等待中）。`
-                : `待处理队列第 ${position} 位（共 ${total} 条）。`}
+              : priority < 0
+                ? `已移至队列末尾，当前排在队列第 ${position} 位（共 ${total} 条等待中）。`
+                : running
+                  ? `等待处理中，当前排在队列第 ${position} 位（共 ${total} 条等待中）。`
+                  : `待处理队列第 ${position} 位（共 ${total} 条）。`}
         </p>
         <p className="hint">
           {running
@@ -269,6 +280,7 @@ export function App() {
   const [pendingRetries, setPendingRetries] = useState<string[]>([])
   const [pendingQueue, setPendingQueue] = useState<PendingQueue>(EMPTY_PENDING_QUEUE)
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
+  const [aborting, setAborting] = useState(false)
   const [queuedRuns, setQueuedRuns] = useState(0)
   const [update, setUpdate] = useState<{ available: string | null; ready: string | null; manual: boolean }>({ available: null, ready: null, manual: false })
 
@@ -298,11 +310,15 @@ export function App() {
     const poll = setInterval(() => { void vn.jobs(200).then(setJobs) }, 2000)
     const off = [
       vn.on('pipeline:event', (event: PipelineEvent) => {
-        if (event.type === 'job_start') setLive({ id: event.id, step: null, durationSeconds: event.durationSeconds, note: '', tool: null, startedAt: Date.now() })
+        if (event.type === 'job_start') {
+          setAborting(false)
+          setLive({ id: event.id, step: null, durationSeconds: event.durationSeconds, note: '', tool: null, startedAt: Date.now() })
+        }
         else if (event.type === 'job_step') setLive(prev => ({ ...prev, step: event.step, note: event.step.toLowerCase().startsWith('generate') ? '' : prev.note }))
         else if (event.type === 'note_delta') setLive(prev => ({ ...prev, note: prev.note + event.delta }))
         else if (event.type === 'note_tool') setLive(prev => ({ ...prev, tool: event.name }))
         else if (event.type === 'job_done') {
+          setAborting(false)
           setSearchVersion(v => v + 1)
           setToast(event.stub ? '转写完成,但纪要没能生成' : `已完成：${event.title ?? ''}`)
           // The list is ordered by recording date, so a note made from an old
@@ -311,11 +327,18 @@ export function App() {
           if (!event.stub) setSelected({ kind: 'job', id: event.id })
           void refresh()
         }
-        else if (event.type === 'job_failed') { setToast('处理失败,见列表中的提示'); void refresh() }
+        else if (event.type === 'job_failed') { setAborting(false); setToast('处理失败,见列表中的提示'); void refresh() }
+        else if (event.type === 'job_aborted') {
+          setAborting(false)
+          setLive(EMPTY_LIVE)
+          setToast('已中止并移至队列末尾')
+          setSelected(prev => (prev?.kind === 'job' && prev.id === event.id ? null : prev))
+          void refresh()
+        }
       }),
       vn.on('run:state', (state: { running: boolean }) => {
         setRunning(state.running)
-        if (!state.running) setLive(EMPTY_LIVE)
+        if (!state.running) { setAborting(false); setLive(EMPTY_LIVE) }
         void refresh()
       }),
       vn.on('run:error', (message: string) => setToast(message)),
@@ -369,8 +392,8 @@ export function App() {
     const deleted = new Set(pendingQueue.deletes)
     const list = items.filter(job => job.status === 'queued' && (!job.id || !deleted.has(job.id)))
     return [...list].sort((a, b) => {
-      const pa = (a.id ? pendingQueue.priorities[a.id] : 0) || a.priority || 0
-      const pb = (b.id ? pendingQueue.priorities[b.id] : 0) || b.priority || 0
+      const pa = (a.id ? pendingQueue.priorities[a.id] : undefined) ?? a.priority ?? 0
+      const pb = (b.id ? pendingQueue.priorities[b.id] : undefined) ?? b.priority ?? 0
       if (pa !== pb) return pb - pa
       return 0
     })
@@ -454,6 +477,18 @@ export function App() {
     void refresh()
   }
 
+  const abortCurrent = async () => {
+    if (aborting) return
+    setAborting(true)
+    try {
+      const res = await vn.abortCurrentJob()
+      if (!res.aborted) setAborting(false)
+    } catch (error) {
+      setAborting(false)
+      setToast(String((error as Error)?.message ?? error))
+    }
+  }
+
   return (
     <div
       className={dropping ? 'shell dropping' : 'shell'}
@@ -485,27 +520,43 @@ export function App() {
 
         <nav className="list">
           {active && (
-            <button className={selected?.kind === 'job' && selected.id === active.id ? 'row row-active selected' : 'row row-active'} onClick={() => setSelected({ kind: 'job', id: active.id! })}>
-              <span className="spinner" />
-              <span className="row-main">
-                <span className="row-title">{active.title || active.name}</span>
-                <span className="row-sub">处理中 · <Elapsed since={live.startedAt} /></span>
-              </span>
-            </button>
+            <div className={selected?.kind === 'job' && selected.id === active.id ? 'row row-split row-active selected' : 'row row-split row-active'}>
+              <button className="row-hit" onClick={() => setSelected({ kind: 'job', id: active.id! })}>
+                <span className="spinner" />
+                <span className="row-main">
+                  <span className="row-title">{active.title || active.name}</span>
+                  <span className="row-sub">{aborting ? '正在中止…' : <>处理中 · <Elapsed since={live.startedAt} /></>}</span>
+                </span>
+              </button>
+              <div className="row-mini-actions">
+                <button
+                  type="button"
+                  className="mini-btn"
+                  disabled={aborting}
+                  title="中止并移到队尾"
+                  aria-label="中止并移到队尾"
+                  onClick={() => void abortCurrent()}
+                >
+                  ↓
+                </button>
+              </div>
+            </div>
           )}
 
           {queued.length > 0 && <div className="group-head">待处理队列 ({queued.length})</div>}
           {queued.map((job, index) => {
-            const priority = (job.id ? pendingQueue.priorities[job.id] : 0) || job.priority || 0
+            const priority = (job.id ? pendingQueue.priorities[job.id] : undefined) ?? job.priority ?? 0
             const isNext = running && index === 0 && priority > 0
             const isSelected = selected?.kind === 'job' && selected.id === job.id
             const sub = isNext
               ? '排在下一个 · 当前完成后开始'
               : priority > 0
                 ? '已优先排队'
-                : friendlyTime(job.time) || '排队中'
+                : priority < 0
+                  ? '已移至队尾'
+                  : friendlyTime(job.time) || '排队中'
             return (
-              <div key={job.id} className={`row row-queued${isNext ? ' row-priority' : ''}${isSelected ? ' selected' : ''}`}>
+              <div key={job.id} className={`row row-split row-queued${isNext ? ' row-priority' : ''}${isSelected ? ' selected' : ''}`}>
                 <button className="row-hit" onClick={() => { setConfirmRemoveId(null); setSelected({ kind: 'job', id: job.id! }) }}>
                   <span className="row-main">
                     <span className="row-title">
@@ -620,10 +671,12 @@ export function App() {
           </div>
         )}
 
-        {selectedJob?.status === 'running' && <ActiveDetail job={selectedJob} live={live} />}
+        {selectedJob?.status === 'running' && (
+          <ActiveDetail job={selectedJob} live={live} aborting={aborting} onAbort={() => void abortCurrent()} />
+        )}
         {selectedJob?.status === 'queued' && (() => {
           const index = queued.findIndex(j => j.id === selectedJob.id)
-          const priority = (selectedJob.id ? pendingQueue.priorities[selectedJob.id] : 0) || selectedJob.priority || 0
+          const priority = (selectedJob.id ? pendingQueue.priorities[selectedJob.id] : undefined) ?? selectedJob.priority ?? 0
           const isNext = running && index === 0 && priority > 0
           return (
             <QueuedDetail
@@ -631,7 +684,7 @@ export function App() {
               position={index >= 0 ? index + 1 : 1}
               total={queued.length || 1}
               running={running}
-              prioritized={priority > 0}
+              priority={priority}
               isNext={isNext}
               confirmRemove={confirmRemoveId === selectedJob.id}
               onConfirmRemoveChange={v => setConfirmRemoveId(v ? selectedJob.id : null)}

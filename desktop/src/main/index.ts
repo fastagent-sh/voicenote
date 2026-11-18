@@ -53,6 +53,7 @@ const pendingDeletes = new Set<string>()
 const pendingPriorities = new Map<string, number>()
 let nextPriority = 0
 let drainingBatch = false
+let currentRunAbort: AbortController | null = null
 const batchAttempted = new Set<string>()
 let autoProcess = true
 let lastRecorderSeen = false
@@ -137,6 +138,8 @@ function startRun(request: RunRequest): void {
     batchAttempted.clear()
     drainingBatch = true
   }
+  const controller = new AbortController()
+  currentRunAbort = controller
   broadcast('run:state', { running: true, reason: request.reason })
   running = (async () => {
     try {
@@ -144,6 +147,7 @@ function startRun(request: RunRequest): void {
       const res = await runPipeline(request.file, {
         force: request.force,
         jobId: request.jobId,
+        signal: controller.signal,
         ...(isBatch ? { maxJobs: 1, skipIds: batchAttempted } : {}),
       })
       if (isBatch) {
@@ -154,6 +158,7 @@ function startRun(request: RunRequest): void {
       if (isBatch) drainingBatch = false
       broadcast('run:error', String((error as Error)?.message ?? error))
     } finally {
+      if (currentRunAbort === controller) currentRunAbort = null
       await flushPendingQueueOps()
       const next = queuedRuns.shift()
       broadcast('run:queued', queuedRuns.length)
@@ -435,6 +440,11 @@ function registerIpc(): void {
     return { queued: false }
   })
   ipcMain.handle('pending-queue', () => pendingQueueState())
+  ipcMain.handle('queue:abort-current', () => {
+    if (!currentRunAbort || currentRunAbort.signal.aborted) return { aborted: false }
+    currentRunAbort.abort()
+    return { aborted: true }
+  })
   ipcMain.handle('recorder-files', () => listRecorderFiles())
   // Processing one file by path is the recorder list's escape hatch: it
   // bypasses the age/size filters and the conclusions of earlier runs (no

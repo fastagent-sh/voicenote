@@ -28,6 +28,7 @@ export type AgentRunOptions = {
   appendSystemPrompt?: string
   userPrompt: string
   timeoutMs: number
+  signal?: AbortSignal
   onProgress?: (p: AgentProgress) => void
 }
 
@@ -107,15 +108,31 @@ export async function runAgentPrompt(opts: AgentRunOptions): Promise<string> {
   })
 
   let timedOut = false
+  let aborted = false
+  if (opts.signal?.aborted) {
+    const err = new Error('Aborted')
+    err.name = 'AbortError'
+    unsubscribe()
+    session.dispose()
+    throw err
+  }
+  const onAbort = () => { aborted = true; void session.abort() }
+  opts.signal?.addEventListener('abort', onAbort, { once: true })
   const timer = setTimeout(() => { timedOut = true; void session.abort() }, opts.timeoutMs)
   try {
     await session.prompt(opts.userPrompt)
   } finally {
     clearTimeout(timer)
+    opts.signal?.removeEventListener('abort', onAbort)
     unsubscribe()
     session.dispose()
   }
 
+  if (aborted || opts.signal?.aborted) {
+    const err = new Error('Aborted')
+    err.name = 'AbortError'
+    throw err
+  }
   if (timedOut) throw new Error(`Notes model timed out after ${Math.round(opts.timeoutMs / 1000)}s`)
   if (stopReason !== 'stop') throw new Error(modelError || session.agent.state.errorMessage || `Notes model did not finish normally (${stopReason || 'no response'})`)
   const trimmed = text.trim()

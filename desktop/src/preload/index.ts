@@ -11,6 +11,7 @@ const api = {
   regenerate: (id: string) => ipcRenderer.invoke('regenerate', id) as Promise<{ queued: boolean }>,
   prioritizeJob: (id: string) => ipcRenderer.invoke('queue:prioritize', id) as Promise<{ queued: boolean }>,
   removeQueuedJob: (id: string) => ipcRenderer.invoke('queue:remove', id) as Promise<{ queued: boolean }>,
+  abortCurrentJob: () => ipcRenderer.invoke('queue:abort-current') as Promise<{ aborted: boolean }>,
   recorderFiles: () => ipcRenderer.invoke('recorder-files'),
   runFile: (path: string) => ipcRenderer.invoke('run-file', path) as Promise<{ queued: boolean }>,
   pendingRetries: () => ipcRenderer.invoke('pending-retries') as Promise<string[]>,

@@ -78,7 +78,7 @@ test('queue items can be processed one-by-one, prioritized, and removed', async 
       console.log(JSON.stringify(res));
     `)
     expect(step1.status, step1.stderr).toBe(0)
-    expect(JSON.parse(step1.stdout.trim().split('\n').pop()!)).toEqual({ processedIds: ['q3'], remaining: 1 })
+    expect(JSON.parse(step1.stdout.trim().split('\n').pop()!)).toEqual({ processedIds: ['q3'], abortedIds: [], remaining: 1 })
 
     let saved = JSON.parse(await readFile(statePath, 'utf8')).jobs
     expect(saved.q3.state).toBe('done')
@@ -96,7 +96,7 @@ test('queue items can be processed one-by-one, prioritized, and removed', async 
       console.log(JSON.stringify(res));
     `)
     expect(step2.status, step2.stderr).toBe(0)
-    expect(JSON.parse(step2.stdout.trim().split('\n').pop()!)).toEqual({ processedIds: ['q1'], remaining: 0 })
+    expect(JSON.parse(step2.stdout.trim().split('\n').pop()!)).toEqual({ processedIds: ['q1'], abortedIds: [], remaining: 0 })
 
     // Manual --force still overrides the skipped verdict.
     const forced = await run(`
@@ -177,3 +177,76 @@ test('removeQueuedJob deletes inbox file and job record for fresh imports', asyn
     await rm(home, { recursive: true, force: true })
   }
 }, 20_000)
+
+test('aborting a running job moves it to the tail of the queue and continues with the next job', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'vn-queue-abort-'))
+  const configDir = join(home, process.platform === 'win32' ? 'voicenote' : '.config/voicenote')
+  const workspace = join(home, 'notes')
+  const recorder = join(home, 'recorder')
+  const fake = await startFakeModel(join(configDir, 'pi-agent'))
+  const env = { HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home, PATH: dirname(process.execPath), SystemRoot: process.env.SystemRoot }
+
+  try {
+    await mkdir(join(workspace, '_state'), { recursive: true })
+    await mkdir(recorder, { recursive: true })
+    await writeFile(join(configDir, 'config.json'), JSON.stringify({
+      VOICENOTE_WORKSPACE: workspace,
+      VOICENOTE_RECORD_DIR: recorder,
+      VOICENOTE_PI_MODEL: fake.modelRef,
+      VOICENOTE_PI_SUMMARY_TOOLS: '',
+      VOICENOTE_FFPROBE_BIN: process.execPath,
+    }))
+
+    const statePath = join(workspace, '_state/jobs.json')
+    const jobs: Record<string, any> = {}
+    for (const [index, id] of ['q1', 'q2'].entries()) {
+      const transcript = join(workspace, `${id}-transcript.md`)
+      await writeFile(transcript, `# Transcript\n\n## Raw transcript (no lossy cleanup)\n\n${id} transcript\n`)
+      const sourcePath = join(recorder, `2026070${index + 1}100000.mp3`)
+      await writeFile(sourcePath, `audio-${id}`)
+      jobs[id] = {
+        name: `2026070${index + 1}100000.mp3`,
+        source_path: sourcePath,
+        recorded_at: `2026-07-0${index + 1}T10:00:00`,
+        size_bytes: 1_000_000,
+        duration_seconds: 120,
+        state: 'queued',
+        code: null,
+        detail: null,
+        attempts: 0,
+        updated_at: '2026-07-01T10:00:00Z',
+        title: null,
+        paths: { transcript },
+      }
+    }
+    await writeFile(statePath, JSON.stringify({ version: 2, jobs }))
+
+    const run = (script: string) => runAsync(process.execPath, ['--input-type=module', '-e', script], { env })
+    const res = await run(`
+      const core = await import('./src/core.ts');
+      const { onPipelineEvent } = await import('./src/progress.ts');
+      const controller = new AbortController();
+      onPipelineEvent((event) => {
+        if (event.type === 'job_step' && event.step.startsWith('Generate')) controller.abort();
+      });
+      const r1 = await core.runPipeline(undefined, { maxJobs: 1, signal: controller.signal });
+      const stAfterAbort = JSON.parse(await (await import('node:fs/promises')).readFile(${JSON.stringify(statePath)}, 'utf8')).jobs;
+      const r2 = await core.runPipeline(undefined, { maxJobs: 1 });
+      const r3 = await core.runPipeline(undefined, { maxJobs: 1 });
+      console.log(JSON.stringify({ r1, q1AfterAbort: stAfterAbort.q1, r2, r3 }));
+    `)
+    expect(res.status, res.stderr).toBe(0)
+    const out = JSON.parse(res.stdout.trim().split('\n').pop()!)
+    expect(out.r1).toEqual({ processedIds: [], abortedIds: ['q1'], remaining: 1 })
+    expect(out.q1AfterAbort.state).toBe('queued')
+    expect(out.q1AfterAbort.attempts).toBe(0)
+    expect(out.q1AfterAbort.interruptions).toBe(0)
+    expect(out.q1AfterAbort.priority).toBeLessThan(0)
+    expect(out.q1AfterAbort.paths.transcript).toContain('q1-transcript.md')
+    expect(out.r2).toEqual({ processedIds: ['q2'], abortedIds: [], remaining: 1 })
+    expect(out.r3).toEqual({ processedIds: ['q1'], abortedIds: [], remaining: 0 })
+  } finally {
+    await fake.stop()
+    await rm(home, { recursive: true, force: true })
+  }
+}, 30_000)

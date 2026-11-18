@@ -459,3 +459,18 @@ test('removeFromQueue handles imports, regenerations, and recorder files without
   const done = rec({ name: 'already.mp3', recorded_at: '2026-07-01T10:00:00', state: 'done' })
   expect(removeFromQueue(done, 'T1')).toBe('invalid')
 })
+
+test('aborted jobs refund attempts, demote behind queued jobs, and persist negative priority', () => {
+  const s = state({
+    q1: rec({ name: 'q1.mp3', recorded_at: '2026-07-01T10:00:00', state: 'queued', attempts: 0 }),
+    q2: rec({ name: 'q2.mp3', recorded_at: '2026-07-02T10:00:00', state: 'queued', attempts: 0 }),
+  })
+  startAttempt(s.jobs.q1!, 'T1')
+  applyOutcome(s.jobs.q1!, { kind: 'aborted', priority: -100, paths: { transcript: '/w/q1-t.md' } }, 'T2')
+  expect(s.jobs.q1).toMatchObject({ state: 'queued', attempts: 0, priority: -100, paths: { transcript: '/w/q1-t.md' } })
+  expect(s.jobs.q1!.interruptions ?? 0).toBe(0)
+  expect(view(s).items.map(i => i.name)).toEqual(['q2.mp3', 'q1.mp3'])
+
+  const parsed = parseStateFile(JSON.stringify(s), '/tmp/jobs.json')
+  expect(parsed.jobs.q1!.priority).toBe(-100)
+})
