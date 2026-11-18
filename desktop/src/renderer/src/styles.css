@@ -20,6 +20,7 @@
   --ok: #2e7d4f;
   --warn: #9a6a00;
   --danger: #c8253c;
+  --danger-button-text: #fff;
   --danger-soft: #fdeff1;
   --radius: 10px;
   --shadow: 0 1px 2px rgba(15, 20, 30, .06), 0 8px 24px rgba(15, 20, 30, .06);
@@ -43,6 +44,7 @@
     --ok: #6cc08b;
     --warn: #d9ab52;
     --danger: #ef6b7f;
+    --danger-button-text: #241014;
     --danger-soft: #3a2429;
     --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .28);
   }
@@ -70,6 +72,10 @@ button:hover:not(:disabled) { background: var(--panel-2); border-color: var(--mu
 button:disabled { opacity: .45; cursor: default; }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-button-text); }
 button.primary:hover:not(:disabled) { filter: brightness(1.06); background: var(--accent); }
+button.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+button.danger:hover:not(:disabled) { background: var(--danger-soft); border-color: var(--danger); }
+button.danger-fill { background: var(--danger); border-color: var(--danger); color: var(--danger-button-text); }
+button.danger-fill:hover:not(:disabled) { filter: brightness(1.06); background: var(--danger); }
 button.link { border: none; background: none; color: var(--accent); padding: 4px 2px; }
 button.link:hover { background: none; text-decoration: underline; }
 
@@ -124,6 +130,28 @@ input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color:
 .row-failed .row-sub { color: var(--danger); }
 .row-pending .row-sub { color: var(--warn); }
 .row-active .row-title { color: var(--accent); }
+.row-priority .row-sub { color: var(--accent-text); }
+
+.row-queued { padding: 0; align-items: stretch; }
+.row-hit {
+  display: flex; flex: 1; min-width: 0; text-align: left;
+  padding: 8px 6px 8px 10px; border: none; background: none; color: inherit;
+}
+.row-hit:hover:not(:disabled) { background: none; border-color: transparent; }
+.row-mini-actions {
+  display: flex; align-items: center; gap: 2px; padding-right: 6px;
+  opacity: 0; transition: opacity .12s ease;
+}
+.row-queued:hover .row-mini-actions,
+.row-queued:focus-within .row-mini-actions,
+.row-queued.selected .row-mini-actions { opacity: 1; }
+.mini-btn {
+  width: 22px; height: 22px; padding: 0; border-radius: 6px; font-size: 13px; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-color: transparent; background: transparent; color: var(--muted);
+}
+.mini-btn:hover:not(:disabled) { background: var(--panel-2); border-color: var(--line); color: var(--ink); }
+.mini-btn-danger:hover:not(:disabled) { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 30%, transparent); color: var(--danger); }
 
 .spinner {
   width: 12px; height: 12px; margin-top: 4px; border-radius: 50%; flex: none;
@@ -188,6 +216,9 @@ button.link.inline { padding: 0; font-size: inherit; vertical-align: baseline; }
 .callout-title { margin: 0 0 10px; font-weight: 550; }
 .callout-pending {
   background: var(--panel); border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+}
+.callout-queue {
+  background: var(--panel); border-color: var(--line);
 }
 .callout-top { display: flex; align-items: center; gap: 12px; margin: 8px 36px 0; }
 .callout-update {
