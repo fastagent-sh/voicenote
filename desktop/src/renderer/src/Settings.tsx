@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { vn, type Status } from './api.ts'
+import { vn, type Status, type UpdateState } from './api.ts'
 import { ModelAuthCard } from './ModelAuthCard.tsx'
 
 const FIELDS: { key: string; label: string; hint?: string }[] = [
@@ -11,13 +11,15 @@ const FIELDS: { key: string; label: string; hint?: string }[] = [
   { key: 'LOCAL_PROXY_PORT', label: '代理端口' },
 ]
 
-export function Settings({ status, onClose, onLogin: _onLogin }: { status: Status | null; onClose: () => void; onLogin: () => void }) {
+export function Settings({ status, running = false, onClose, onLogin: _onLogin }: { status: Status | null; running?: boolean; onClose: () => void; onLogin: () => void }) {
   const [env, setEnv] = useState<Record<string, string>>({})
   const [self, setSelf] = useState<{ name: string | null; aliases: string[] }>({ name: null, aliases: [] })
   const [saving, setSaving] = useState(false)
   const [showAsrKey, setShowAsrKey] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
-  const [version, setVersion] = useState('')
+  const [update, setUpdate] = useState<UpdateState | null>(null)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
+  const [updateNote, setUpdateNote] = useState<string | null>(null)
   const [pendingApiKey, setPendingApiKey] = useState<{ providerId: string; key: string } | null>(null)
 
   useEffect(() => {
@@ -25,8 +27,63 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
       setEnv(config.env)
       setSelf(config.self)
     }).catch(error => setMessage(`无法加载设置: ${String(error)}`))
-    void vn.updateState().then(state => setVersion(state.version)).catch(error => setMessage(String(error)))
+    void vn.updateState().then(state => {
+      setUpdate(state)
+      if (state.checking) setCheckingUpdate(true)
+    }).catch(error => setMessage(String(error)))
+    const off = [
+      vn.on('update:available', (ver: string) => {
+        setCheckingUpdate(false)
+        setUpdateNote(null)
+        setUpdate(u => ({ version: u?.version ?? '', ready: u?.ready ?? null, manual: Boolean(u?.manual), ...u, available: ver }))
+      }),
+      vn.on('update:not-available', () => {
+        setCheckingUpdate(false)
+        setUpdateNote('当前已是最新版本')
+        setUpdate(u => (u ? { ...u, available: null, checking: false } : u))
+      }),
+      vn.on('update:ready', (ver: string) => {
+        setCheckingUpdate(false)
+        setUpdateNote(null)
+        setUpdate(u => ({ version: u?.version ?? '', manual: Boolean(u?.manual), ...u, available: ver, ready: ver }))
+      }),
+      vn.on('update:manual', (ver: string) => {
+        setCheckingUpdate(false)
+        setUpdate(u => ({ version: u?.version ?? '', ...u, available: ver, ready: ver, manual: true }))
+      }),
+      vn.on('update:error', (err: string) => {
+        setCheckingUpdate(false)
+        setUpdateNote(`检查更新失败：${err}`)
+      }),
+    ]
+    return () => { off.forEach(fn => fn()) }
   }, [])
+
+  const checkUpdates = async () => {
+    if (checkingUpdate) return
+    setCheckingUpdate(true)
+    setUpdateNote(null)
+    try {
+      const next = await vn.checkForUpdates()
+      setUpdate(next)
+      if (next.packaged === false) setUpdateNote('开发模式不检查安装包更新，可点「查看发布页」查看')
+      else if (next.error) setUpdateNote(`检查更新失败：${next.error}`)
+      else if (!next.ready && !next.available) setUpdateNote('当前已是最新版本')
+    } catch (error) {
+      setUpdateNote(`检查更新失败：${String((error as Error)?.message ?? error)}`)
+    } finally {
+      setCheckingUpdate(false)
+    }
+  }
+
+  const installUpdate = async () => {
+    try {
+      const { installable } = await vn.installUpdate()
+      if (!installable) setUpdateNote('已打开下载页，手动安装一次即可')
+    } catch (error) {
+      setUpdateNote(`更新失败：${String((error as Error)?.message ?? error)}`)
+    }
+  }
 
   const save = async () => {
     setSaving(true)
@@ -114,9 +171,35 @@ export function Settings({ status, onClose, onLogin: _onLogin }: { status: Statu
         <section>
           <h3>关于</h3>
           <div className="sheet-row">
-            <span className="hint">VoiceNote {version || ''}{status?.pi.version ? ` · 纪要引擎 pi ${status.pi.version}` : ''}</span>
-            <button onClick={() => void vn.openReleases()}>查看发布页</button>
+            <span className="hint">VoiceNote {update?.version || ''}{status?.pi.version ? ` · 纪要引擎 pi ${status.pi.version}` : ''}</span>
+            <div className="row-actions">
+              {update?.ready
+                ? (
+                  <button className="primary" disabled={running && !update.manual} onClick={() => void installUpdate()}>
+                    {update.manual ? '打开下载页' : '重启以更新'}
+                  </button>
+                )
+                : (
+                  <button onClick={() => void checkUpdates()} disabled={checkingUpdate || Boolean(update?.available)}>
+                    {checkingUpdate ? '检查中…' : update?.available ? '下载中…' : '检查更新'}
+                  </button>
+                )}
+              <button onClick={() => void vn.openReleases()}>查看发布页</button>
+            </div>
           </div>
+          {update?.ready && (
+            <p className="hint fine">
+              {update.manual
+                ? `发现新版本 ${update.ready}，无法自动安装，需要手动下载一次。`
+                : `新版本 ${update.ready} 已下载${running ? '，当前处理完成后可重启更新' : '，点击「重启以更新」即可完成安装'}。`}
+            </p>
+          )}
+          {!update?.ready && update?.available && (
+            <p className="hint fine">发现新版本 {update.available}，正在后台下载…</p>
+          )}
+          {!update?.ready && !update?.available && updateNote && (
+            <p className="hint fine">{updateNote}</p>
+          )}
         </section>
 
         {message && <p className="hint">{message}</p>}

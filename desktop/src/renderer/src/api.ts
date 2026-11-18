@@ -91,6 +91,16 @@ export type LoginEvent =
   | { event: 'success'; provider: string }
   | { event: 'error'; message: string }
 
+export type UpdateState = {
+  version: string
+  available?: string | null
+  ready: string | null
+  manual: boolean
+  checking?: boolean
+  error?: string | null
+  packaged?: boolean
+}
+
 type Api = {
   status: () => Promise<Status>
   jobs: (limit?: number) => Promise<JobsResponse>
@@ -106,7 +116,8 @@ type Api = {
   runFile: (path: string) => Promise<{ queued: boolean }>
   pendingRetries: () => Promise<string[]>
   pendingQueue: () => Promise<PendingQueue>
-  updateState: () => Promise<{ version: string; ready: string | null; manual: boolean }>
+  updateState: () => Promise<UpdateState>
+  checkForUpdates: () => Promise<UpdateState>
   installUpdate: () => Promise<{ installable: boolean }>
   openReleases: () => Promise<void>
   importRecording: (path: string) => Promise<void>
@@ -126,7 +137,7 @@ type Api = {
   search: (query: string) => Promise<{ path: string; title: string; snippet: string }[]>
   openNoteAsHtml: (title: string, html: string) => Promise<string>
   setAutoProcess: (enabled: boolean) => Promise<boolean>
-  on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'run:queued' | 'recorder:connected' | 'retry:pending' | 'queue:pending' | 'update:available' | 'update:ready' | 'update:manual' | 'update:error', listener: (payload: any) => void) => () => void
+  on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'run:queued' | 'recorder:connected' | 'retry:pending' | 'queue:pending' | 'update:available' | 'update:not-available' | 'update:ready' | 'update:manual' | 'update:error', listener: (payload: any) => void) => () => void
 }
 
 export const vn = (window as unknown as { vn: Api }).vn
