@@ -18,10 +18,13 @@ import { LoginPrompts } from '../../../src/loginInteraction.ts'
 import { searchText } from './searchText.ts'
 
 const dirname = fileURLToPath(new URL('.', import.meta.url))
-// Tray art: template images (black + alpha) so macOS recolours them for the
-// light and dark menu bar.
 const resourcesDir = app.isPackaged ? join(process.resourcesPath, 'resources') : join(dirname, '../../resources')
-const trayIcon = (busy: boolean) => nativeImage.createFromPath(join(resourcesDir, busy ? 'trayBusyTemplate.png' : 'trayTemplate.png'))
+const windowIcon = join(resourcesDir, 'voicenote.png')
+const trayIcon = (busy: boolean) => {
+  const state = busy ? 'trayBusy' : 'tray'
+  const suffix = process.platform === 'darwin' ? 'Template.png' : '.png'
+  return nativeImage.createFromPath(join(resourcesDir, state + suffix))
+}
 
 /**
  * ffprobe reads a recording's length, which decides what gets skipped and
@@ -218,6 +221,7 @@ function showWindow(): void {
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
+    icon: windowIcon,
     width: 1080,
     height: 760,
     minWidth: 720,
@@ -575,6 +579,7 @@ app.whenReady().then(() => {
       new Notification({ title: '处理失败', body: event.message.slice(0, 120) }).show()
     }
   })
+  if (!app.isPackaged) app.dock?.setIcon(windowIcon)
   tray = new Tray(trayIcon(false))
   updateTray()
   watchRecorder()
