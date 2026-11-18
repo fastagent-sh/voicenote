@@ -72,7 +72,7 @@ import { createHash, randomUUID } from 'node:crypto'
 
 const LOCK_PATH = join(STATE_DIR, 'run.lock')
 
-const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.wma', '.aac', '.flac'])
+export const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.wma', '.aac', '.flac'])
 
 type Json = Record<string, any>
 
@@ -1471,7 +1471,8 @@ function completedJobByHash(store: StateFile, digest: string): [string, JobRecor
   return Object.entries(store.jobs).find(([, job]) => job.state === 'done' && job.content_hash === digest)
 }
 
-type ImportResult = {
+export type ImportResult = {
+  alreadyQueued?: boolean
   status: 'queued' | 'running' | 'gave_up' | 'already_done'
   id: string
   name: string
@@ -1479,7 +1480,7 @@ type ImportResult = {
   notes: string | null
 }
 
-export async function importRecording(file: string, opts: { json?: boolean }): Promise<void> {
+export async function importRecording(file: string): Promise<ImportResult> {
   const source = resolve(file)
   const sourceStat = await stat(source).catch(() => null)
   if (!sourceStat?.isFile()) throw new Error(`Not a file: ${source}`)
@@ -1505,7 +1506,8 @@ export async function importRecording(file: string, opts: { json?: boolean }): P
       .find(name => isCandidateFile(name) && statSync(join(digestDir, name), { throwIfNoEntry: false })?.isFile())
     const existingSource = entry?.source_path && existsSync(entry.source_path) ? entry.source_path : null
     const inboxFile = existingSource ?? (queuedName ? join(digestDir, queuedName) : join(digestDir, basename(source)))
-    if (!existsSync(inboxFile)) {
+    const alreadyQueued = existsSync(inboxFile)
+    if (!alreadyQueued) {
       await mkdir(dirname(inboxFile), { recursive: true })
       const tmp = join(dirname(inboxFile), `.${basename(inboxFile)}.tmp-${process.pid}`)
       try {
@@ -1518,13 +1520,11 @@ export async function importRecording(file: string, opts: { json?: boolean }): P
     }
     result = {
       status: entry?.state === 'running' ? 'running' : entry?.state === 'gave_up' ? 'gave_up' : 'queued',
-      id, name: entry?.name ?? basename(source), title: entry?.title ?? null, notes: entry?.paths?.notes ?? null,
+      alreadyQueued, id, name: entry?.name ?? basename(source), title: entry?.title ?? null, notes: entry?.paths?.notes ?? null,
     }
   }
 
-  if (opts.json) console.log(JSON.stringify(result))
-  else if (result.status === 'already_done') console.log(`already processed: ${result.title || result.name}`)
-  else console.log(`${result.status}: ${result.name}`)
+  return result
 }
 
 export async function removeImportedSource(config: Config, path: string): Promise<void> {

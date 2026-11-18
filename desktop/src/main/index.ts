@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import {
-  collectDoctor, configGetData, configSetData, getConfig, getPiAuthProviders, importRecording,
+  AUDIO_EXTENSIONS, collectDoctor, configGetData, configSetData, getConfig, getPiAuthProviders, importRecording,
   jobsListData, listRecorderFiles, loginChatGPT, loginPiProvider, NOTE_HTML_CSS, prioritizeJob, regenerateNotes,
   removePiAuth, removeQueuedJob, resetConfigCache, retryRecording, runPipeline, setPiApiKey, VERSION,
 } from '../../../src/core.ts'
@@ -327,18 +327,29 @@ async function installUpdate(): Promise<{ installable: boolean }> {
   return { installable: true }
 }
 
+function publishUpdateState() {
+  broadcast('update:changed', currentUpdateState())
+}
+
+function reportUpdateError(error: unknown) {
+  updateChecking = false
+  updateError = String((error as Error)?.message ?? error)
+  publishUpdateState()
+}
+
 async function checkForUpdates() {
-  if (!app.isPackaged) return currentUpdateState()
-  if (updateReady) return currentUpdateState()
-  if (updateChecking) return currentUpdateState()
+  if (!app.isPackaged || updateReady || updateChecking || (updateAvailable && !updateError)) return currentUpdateState()
   updateChecking = true
   updateError = null
+  publishUpdateState()
   try {
-    await autoUpdater.checkForUpdates()
+    const result = await autoUpdater.checkForUpdates()
+    void result?.downloadPromise?.catch(reportUpdateError)
   } catch (error) {
     updateError = String((error as Error)?.message ?? error)
   } finally {
     updateChecking = false
+    publishUpdateState()
   }
   return currentUpdateState()
 }
@@ -352,43 +363,37 @@ function setupUpdates(): void {
   if (feed) autoUpdater.setFeedURL({ provider: 'generic', url: feed })
   autoUpdater.autoDownload = true
   autoUpdater.autoInstallOnAppQuit = true
-  autoUpdater.on('checking-for-update', () => { updateChecking = true; updateError = null })
   autoUpdater.on('update-available', (info) => {
     updateChecking = false
     updateAvailable = info.version
     updateError = null
-    broadcast('update:available', info.version)
+    publishUpdateState()
   })
   autoUpdater.on('update-not-available', () => {
     updateChecking = false
     updateAvailable = null
     updateError = null
-    broadcast('update:not-available')
+    publishUpdateState()
   })
   autoUpdater.on('update-downloaded', (info) => {
     updateChecking = false
     updateAvailable = info.version
     updateReady = info.version
     updateError = null
-    broadcast('update:ready', info.version)
+    publishUpdateState()
     updateTray()
     if (process.platform !== 'darwin') return
     setTimeout(() => {
       if (squirrelStaged || manualUpdateOnly) return
       manualUpdateOnly = true
-      broadcast('update:manual', info.version)
+      publishUpdateState()
       updateTray()
     }, SQUIRREL_STAGE_TIMEOUT_MS)
   })
-  autoUpdater.on('error', (error) => {
-    updateChecking = false
-    updateError = String(error?.message ?? error)
-    broadcast('update:error', updateError)
-  })
+  autoUpdater.on('error', reportUpdateError)
   squirrel.on('update-downloaded', () => { squirrelStaged = true })
-  const check = () => { void autoUpdater.checkForUpdates().catch(() => { /* reported through the error event */ }) }
-  check()
-  setInterval(check, 6 * 60 * 60 * 1000)
+  void checkForUpdates()
+  setInterval(checkForUpdates, 6 * 60 * 60 * 1000)
 }
 
 let activeLogin: AbortController | null = null
@@ -502,9 +507,14 @@ function registerIpc(): void {
   // speech, unusable audio, already done), because the user pointed at this
   // recording and disagreed. There is no verdict left that outranks it.
   ipcMain.handle('run-file', (_e, path: string) => requestRun({ reason: 'file', file: path, force: true }))
-  ipcMain.handle('import', async (_e, path: string) => {
-    await importRecording(path, { json: true })
-    return requestRun({ reason: 'manual' })
+  ipcMain.handle('import', async (_e, paths: string[]) => {
+    const results = []
+    for (const path of paths) {
+      try { results.push(await importRecording(path)) }
+      catch (error) { results.push({ status: 'failed', path, error: String((error as Error).message ?? error) }) }
+    }
+    if (results.some(result => result.status === 'queued')) requestRun({ reason: 'manual' })
+    return results
   })
   ipcMain.handle('login', (_e, providerId?: string) => loginProvider(providerId || 'openai-codex'))
   ipcMain.handle('pi:login-answer', (_e, id: number, value: string) => loginPrompts.answer(id, value))
@@ -539,10 +549,10 @@ function registerIpc(): void {
   })
   ipcMain.handle('pick-audio', async () => {
     const picked = await dialog.showOpenDialog({
-      properties: ['openFile'],
-      filters: [{ name: 'Audio', extensions: ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac'] }],
+      properties: ['openFile', 'multiSelections'],
+      filters: [{ name: 'Audio', extensions: [...AUDIO_EXTENSIONS].map(ext => ext.slice(1)) }],
     })
-    return picked.canceled ? null : picked.filePaths[0]
+    return picked.canceled ? [] : picked.filePaths
   })
   ipcMain.handle('auto-process', (_e, enabled: boolean) => { autoProcess = enabled; updateTray(); return autoProcess })
 }

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { marked } from 'marked'
-import { vn, type Job, type JobsResponse, type LoginEvent, type PendingQueue, type PipelineEvent, type Status } from './api.ts'
+import { vn, type DesktopImportResult, type UpdateState, type Job, type JobsResponse, type LoginEvent, type PendingQueue, type PipelineEvent, type Status } from './api.ts'
 import { clock, estimateRemaining, friendlyTime, isFresh, spokenDuration, timeGroup } from './format.ts'
 import { explainFailure, topProblem } from './problems.ts'
 import { NoteDetail } from './NoteDetail.tsx'
@@ -259,6 +259,37 @@ function FailureDetail({ job, pending, onRetry, onSettings, onOpen }: {
   )
 }
 
+function ImportReport({ results, importing, onOpen, onRetry, onDismiss }: {
+  results: DesktopImportResult[]
+  importing: boolean
+  onRetry: (path: string, index: number) => void
+  onOpen: (result: Extract<DesktopImportResult, { id: string }>) => void
+  onDismiss: () => void
+}) {
+  const counts = new Map<string, number>()
+  for (const item of results) {
+    const label = item.status === 'queued' ? (item.alreadyQueued ? '已在队列' : '已加入队列')
+      : item.status === 'already_done' ? (item.notes ? '已有纪要' : '已处理')
+      : item.status === 'running' ? '正在处理' : item.status === 'gave_up' ? '需手动重试' : '导入失败'
+    counts.set(label, (counts.get(label) ?? 0) + 1)
+  }
+  return (
+    <div className="callout callout-top" role="status">
+      <div className="grow">
+        <strong>{[...counts].map(([label, count]) => `${count} 条${label}`).join('，')}</strong>
+        {results.map((item, i) => {
+          if (item.status === 'already_done' && item.notes)
+            return <div key={i}><button className="link" onClick={() => onOpen(item)}>打开纪要：{item.title || item.name}</button></div>
+          if (item.status === 'failed') return <div key={i}>{item.path}：{item.error} <button disabled={importing} onClick={() => onRetry(item.path, i)}>重试导入</button></div>
+          if (item.status === 'gave_up') return <div key={i}>{item.name}：请在「需要处理」中重试。</div>
+          return null
+        })}
+      </div>
+      <button onClick={onDismiss}>关闭</button>
+    </div>
+  )
+}
+
 export function App() {
   const [status, setStatus] = useState<Status | null>(null)
   const [jobs, setJobs] = useState<JobsResponse | null>(null)
@@ -276,13 +307,15 @@ export function App() {
     initialSetupRequired.current = !hasHistory && (!status.volcano.configured || !status.pi.auth)
   }
   const [toast, setToast] = useState<string | null>(null)
+  const [importing, setImporting] = useState(false)
+  const [imports, setImports] = useState<DesktopImportResult[]>([])
   const [dropping, setDropping] = useState(false)
   const [pendingRetries, setPendingRetries] = useState<string[]>([])
   const [pendingQueue, setPendingQueue] = useState<PendingQueue>(EMPTY_PENDING_QUEUE)
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
   const [aborting, setAborting] = useState(false)
   const [queuedRuns, setQueuedRuns] = useState(0)
-  const [update, setUpdate] = useState<{ available: string | null; ready: string | null; manual: boolean }>({ available: null, ready: null, manual: false })
+  const [update, setUpdate] = useState<UpdateState | null>(null)
 
   /** Every user action goes through here: a failure must be visible. */
   const act = useCallback(async (work: () => Promise<unknown>, done?: string, queuedMessage = '已排队,当前这条处理完就开始') => {
@@ -306,7 +339,7 @@ export function App() {
     void refresh()
     void vn.pendingRetries().then(setPendingRetries)
     void vn.pendingQueue?.().then(setPendingQueue)
-    void vn.updateState().then(state => setUpdate(u => ({ ...u, available: state.available ?? u.available, ready: state.ready, manual: state.manual })))
+    void vn.updateState().then(setUpdate).catch(error => setToast(String(error)))
     const poll = setInterval(() => { void vn.jobs(200).then(setJobs) }, 2000)
     const off = [
       vn.on('pipeline:event', (event: PipelineEvent) => {
@@ -345,10 +378,7 @@ export function App() {
       vn.on('retry:pending', (ids: string[]) => setPendingRetries(ids)),
       vn.on('queue:pending', (state: PendingQueue) => setPendingQueue(state)),
       vn.on('run:queued', (count: number) => setQueuedRuns(count)),
-      vn.on('update:available', (version: string) => setUpdate(u => ({ ...u, available: version }))),
-      vn.on('update:ready', (version: string) => setUpdate(u => ({ ...u, ready: version }))),
-      vn.on('update:error', (message: string) => setToast(`更新失败：${message}`)),
-      vn.on('update:manual', (version: string) => setUpdate(u => ({ ...u, ready: version, manual: true }))),
+      vn.on('update:changed', setUpdate),
       vn.on('recorder:connected', () => setToast('检测到录音笔,开始处理')),
       vn.on('login:event', (event: LoginEvent) => {
         if (event.event === 'success') { setToast('授权成功，返回任务后可重试'); void refresh() }
@@ -440,9 +470,8 @@ export function App() {
         onClose={() => {
           setScreen('main')
           void refresh()
-          void vn.updateState().then(state => setUpdate(u => ({ ...u, available: state.available ?? null, ready: state.ready, manual: state.manual })))
         }}
-        onLogin={() => vn.login()}
+        update={update}
       />
     )
   }
@@ -456,13 +485,33 @@ export function App() {
     return <Onboarding status={status} onDone={() => setSkipSetup(true)} onRefresh={refresh} />
   }
 
-  const onDrop = async (event: React.DragEvent) => {
+  const openImportedNote = (result: Extract<DesktopImportResult, { id: string }>) => {
+    if (items.some(job => job.id === result.id && job.status === 'done' && job.notes)) setSelected({ kind: 'job', id: result.id })
+    else if (result.notes) setSelected({ kind: 'path', path: result.notes, title: result.title || result.name })
+  }
+
+  const importAudio = async (paths?: string[], retryIndex?: number) => {
+    if (importing) return
+    setImporting(true)
+    try {
+      const files = paths ?? await vn.pickAudio()
+      if (!files.length) return
+      const results = await vn.importRecordings(files)
+      setImports(previous => retryIndex === undefined ? results : previous.flatMap((item, i) => i === retryIndex ? results : [item]))
+      const only = results.length === 1 ? results[0] : null
+      if (only?.status === 'already_done' && only.notes) openImportedNote(only)
+      await refresh()
+    } catch (error) {
+      setToast(`导入失败：${String((error as Error).message ?? error)}`)
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const onDrop = (event: React.DragEvent) => {
     event.preventDefault()
     setDropping(false)
-    const file = event.dataTransfer.files[0]
-    if (!file) return
-    const path = vn.pathForFile(file)
-    if (path) await act(() => vn.importRecording(path), `已加入队列：${file.name}`)
+    if (!importing) void importAudio(Array.from(event.dataTransfer.files, file => vn.pathForFile(file)))
   }
 
   const prioritizeQueued = async (job: Job) => {
@@ -503,7 +552,7 @@ export function App() {
   return (
     <div
       className={dropping ? 'shell dropping' : 'shell'}
-      onDragOver={e => { e.preventDefault(); setDropping(true) }}
+      onDragOver={e => { e.preventDefault(); setDropping(!importing) }}
       onDragLeave={() => setDropping(false)}
       onDrop={onDrop}
     >
@@ -652,14 +701,15 @@ export function App() {
           <button className="primary" onClick={() => void act(() => vn.run())} disabled={running}>
             {running ? (queuedRuns > 0 ? `处理中 · 还有 ${queuedRuns}` : '处理中…') : '立即处理'}
           </button>
-          <button onClick={() => void act(async () => { const path = await vn.pickAudio(); if (path) await vn.importRecording(path) }, '已加入队列')}>导入</button>
+          <button disabled={importing} onClick={() => void importAudio()}>{importing ? '导入中…' : '导入'}</button>
           <button onClick={() => setScreen('settings')} title="设置">⚙</button>
         </div>
       </aside>
 
       <main className="main">
         <div className="titlebar-drag" />
-        {update.ready && (
+        {imports.length > 0 && <ImportReport results={imports} importing={importing} onOpen={openImportedNote} onRetry={(path, i) => void importAudio([path], i)} onDismiss={() => setImports([])} />}
+        {update?.ready && (
           <div className="callout callout-top callout-update">
             <span>{update.manual
               ? `新版本 ${update.ready} 无法自动安装,需要手动下载一次。`
@@ -670,9 +720,11 @@ export function App() {
             })}>{update.manual ? '打开下载页' : '重启以更新'}</button>
           </div>
         )}
-        {!update.ready && update.available && (
+        {!update?.ready && update?.available && (
           <div className="callout callout-top callout-update">
-            <span>发现新版本 {update.available},正在后台下载…</span>
+            {update.error
+              ? <><span>下载 {update.available} 失败：{update.error}</span><button onClick={() => setScreen('settings')}>更新设置</button></>
+              : <span>发现新版本 {update.available}，{update.checking ? '正在检查更新…' : '正在后台下载…'}</span>}
           </div>
         )}
         {problem && (

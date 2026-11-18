@@ -34,7 +34,7 @@ test('manual imports are durable, ignore scan age limits, and deduplicate by con
     const renamedSource = join(home, 'same-audio-new-name.mp3')
     await writeFile(renamedSource, 'fake mp3')
     const pendingDuplicate = JSON.parse(run(['import', renamedSource, '--json']))
-    expect(pendingDuplicate).toMatchObject({ status: 'queued', id: imported.id })
+    expect(pendingDuplicate).toMatchObject({ status: 'queued', id: imported.id, alreadyQueued: true })
     expect(await readdir(dirname(inboxFile))).toEqual(['20200101010101.mp3'])
 
     // 2020 is far outside the automatic 48-hour window, and the recorder is

@@ -16,7 +16,9 @@ test.skipIf(process.platform !== 'darwin')('settings discard cancelled keys and 
 import { createElement } from ${JSON.stringify(react)}
 import { createRoot } from ${JSON.stringify(reactDom)}
 import { Settings } from ${JSON.stringify(renderer)}
-createRoot(document.getElementById('root')!).render(createElement(Settings, {status: null, onClose() {}, onLogin() {}}))
+const root = createRoot(document.getElementById('root')!)
+window.showUpdate = update => root.render(createElement(Settings, {status: null, update, onClose() {}}))
+window.showUpdate({version:'test'})
 `)
     const build = await Bun.build({ entrypoints: [entry], outdir: dir, target: 'browser', naming: 'renderer.js' })
     expect(build.success, String(build.logs)).toBe(true)
@@ -101,7 +103,13 @@ app.whenReady().then(async () => {
  check(button('检查更新'), 'manual check update button missing in settings');
  button('检查更新').click(); await tick();
  check(window.updateChecks === 1 && document.body.innerText.includes('当前已是最新版本'), 'manual update check did not report latest');
- window.listeners['update:ready']?.('9.9.9'); await tick();
+ window.showUpdate({version:'test', available:'9.9.9'}); await tick();
+ check(button('下载中…')?.disabled, 'download allowed a second click');
+ window.showUpdate({version:'test', available:'9.9.9', error:'network offline'}); await tick();
+ check(document.body.innerText.includes('下载失败：network offline') && !button('下载中…'), 'download error hidden by available version');
+ button('重试下载').click(); await tick();
+ check(window.updateChecks === 2, 'retry did not restart the check and download');
+ window.showUpdate({version:'test', ready:'9.9.9'}); await tick();
  check(button('重启以更新'), 'ready update did not show restart button');
  button('重启以更新').click(); await tick();
  check(window.installs === 1, 'clicking restart button did not call installUpdate');
