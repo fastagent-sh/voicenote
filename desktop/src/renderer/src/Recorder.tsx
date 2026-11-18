@@ -11,6 +11,7 @@ const VERDICTS: Record<string, { label: string; tone: 'ready' | 'done' | 'skip' 
   too_short: { label: '时长太短', tone: 'skip' },
   no_speech: { label: '没有人声', tone: 'skip' },
   bad_audio: { label: '音频无法识别', tone: 'skip' },
+  skipped: { label: '已移出队列', tone: 'skip' },
   gave_up: { label: '多次失败后停止', tone: 'bad' },
 }
 
@@ -20,7 +21,7 @@ const VERDICTS: Record<string, { label: string; tone: 'ready' | 'done' | 'skip' 
  * count stays a list of work rather than a list of files — each one still opens
  * with a button that overrules the verdict.
  */
-const SCRAP = new Set(['too_small', 'too_short', 'no_speech', 'bad_audio'])
+const SCRAP = new Set(['too_small', 'too_short', 'no_speech', 'bad_audio', 'skipped'])
 
 function sizeLabel(bytes: number): string {
   return bytes >= 1e6 ? `${(bytes / 1e6).toFixed(0)} MB` : `${Math.max(1, Math.round(bytes / 1000))} KB`

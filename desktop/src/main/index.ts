@@ -10,8 +10,8 @@ import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import {
   collectDoctor, configGetData, configSetData, getConfig, getPiAuthProviders, importRecording,
-  jobsListData, listRecorderFiles, loginChatGPT, loginPiProvider, NOTE_HTML_CSS, regenerateNotes,
-  removePiAuth, resetConfigCache, retryRecording, runPipeline, setPiApiKey, VERSION,
+  jobsListData, listRecorderFiles, loginChatGPT, loginPiProvider, NOTE_HTML_CSS, prioritizeJob, regenerateNotes,
+  removePiAuth, removeQueuedJob, resetConfigCache, retryRecording, runPipeline, setPiApiKey, VERSION,
 } from '../../../src/core.ts'
 import { onPipelineEvent } from '../../../src/progress.ts'
 import { LoginPrompts } from '../../../src/loginInteraction.ts'
@@ -49,6 +49,11 @@ let running: Promise<void> | null = null
  * that did nothing.
  */
 const pendingRetries = new Set<string>()
+const pendingDeletes = new Set<string>()
+const pendingPriorities = new Map<string, number>()
+let nextPriority = 0
+let drainingBatch = false
+const batchAttempted = new Set<string>()
 let autoProcess = true
 let lastRecorderSeen = false
 
@@ -56,39 +61,113 @@ function broadcast(channel: string, payload?: unknown): void {
   mainWindow?.webContents.send(channel, payload)
 }
 
+function nextPriorityValue(): number {
+  nextPriority = Math.max(Date.now(), nextPriority + 1)
+  return nextPriority
+}
+
+function pendingQueueState(): { deletes: string[]; priorities: Record<string, number> } {
+  return {
+    deletes: [...pendingDeletes],
+    priorities: Object.fromEntries(pendingPriorities),
+  }
+}
+
+function broadcastPendingQueue(): void {
+  broadcast('queue:pending', pendingQueueState())
+}
+
+async function flushPendingQueueOps(): Promise<void> {
+  while (pendingDeletes.size > 0 || pendingPriorities.size > 0) {
+    const deletes = [...pendingDeletes]
+    pendingDeletes.clear()
+    const priorities = [...pendingPriorities.entries()]
+    pendingPriorities.clear()
+    broadcastPendingQueue()
+    for (const id of deletes) {
+      try { await removeQueuedJob(id) } catch (error) { broadcast('run:error', String((error as Error)?.message ?? error)) }
+    }
+    for (const [id, priority] of priorities) {
+      try { await prioritizeJob(id, priority) } catch (error) { broadcast('run:error', String((error as Error)?.message ?? error)) }
+    }
+  }
+}
+
 /**
  * Work asked for while a run holds the lock. A request must never be dropped
  * silently: picking a file and seeing nothing happen is worse than waiting.
  * An entry with no `file` means "scan the recorder".
  */
-type RunRequest = { reason: 'manual' | 'recorder' | 'retry' | 'file'; file?: string; force?: boolean; jobId?: string }
+type RunRequest = {
+  reason: 'manual' | 'recorder' | 'retry' | 'file' | 'prioritize' | 'continue'
+  file?: string
+  force?: boolean
+  jobId?: string
+  prepare?: () => Promise<void>
+}
 const queuedRuns: RunRequest[] = []
 
 /** Starts a run, or queues it behind the one in flight. Never blocks a caller. */
 function requestRun(request: RunRequest): { queued: boolean } {
+  const isBatchStart = request.reason === 'manual' || request.reason === 'recorder'
   if (running) {
+    if (isBatchStart && (drainingBatch || queuedRuns.some(r => r.reason === 'manual' || r.reason === 'recorder'))) {
+      batchAttempted.clear()
+      return { queued: true }
+    }
+    if (request.reason === 'prioritize') {
+      if (!queuedRuns.some(r => r.jobId === request.jobId)) {
+        queuedRuns.unshift(request)
+        broadcast('run:queued', queuedRuns.length)
+      }
+      return { queued: true }
+    }
     queuedRuns.push(request)
     broadcast('run:queued', queuedRuns.length)
     return { queued: true }
   }
+  if (isBatchStart) batchAttempted.clear()
   startRun(request)
   return { queued: false }
 }
 
 function startRun(request: RunRequest): void {
+  const isBatch = request.reason === 'manual' || request.reason === 'recorder' || request.reason === 'continue'
+  if (request.reason === 'manual' || request.reason === 'recorder') {
+    batchAttempted.clear()
+    drainingBatch = true
+  }
   broadcast('run:state', { running: true, reason: request.reason })
-  running = runPipeline(request.file, { force: request.force, jobId: request.jobId })
-    .catch((error: unknown) => { broadcast('run:error', String((error as Error)?.message ?? error)) })
-    .finally(() => {
-      running = null
-      updateTray()
+  running = (async () => {
+    try {
+      await request.prepare?.()
+      const res = await runPipeline(request.file, {
+        force: request.force,
+        jobId: request.jobId,
+        ...(isBatch ? { maxJobs: 1, skipIds: batchAttempted } : {}),
+      })
+      if (isBatch) {
+        for (const id of res.processedIds) batchAttempted.add(id)
+        if (res.remaining === 0) drainingBatch = false
+      }
+    } catch (error: unknown) {
+      if (isBatch) drainingBatch = false
+      broadcast('run:error', String((error as Error)?.message ?? error))
+    } finally {
+      await flushPendingQueueOps()
       const next = queuedRuns.shift()
       broadcast('run:queued', queuedRuns.length)
       // Hand straight over to a queued request; the window stays in "running"
       // state instead of flickering back to idle between the two.
       if (next) startRun(next)
-      else broadcast('run:state', { running: false })
-    })
+      else if (drainingBatch) startRun({ reason: 'continue' })
+      else {
+        running = null
+        updateTray()
+        broadcast('run:state', { running: false })
+      }
+    }
+  })()
   updateTray()
 }
 
@@ -302,22 +381,19 @@ function registerIpc(): void {
   // for this recording to be redone, so queue the intent and run it when the
   // current job finishes.
   const requeue = async (id: string, apply: (id: string) => Promise<void>) => {
-    const active = running
-    if (active) {
+    if (running) {
       pendingRetries.add(id)
       broadcast('retry:pending', [...pendingRetries])
-      void active.then(async () => {
-        try {
-          await apply(id)
-          requestRun({ reason: 'retry', jobId: id })
-        } catch (error) {
-          broadcast('run:error', String((error as Error)?.message ?? error))
-        } finally {
-          pendingRetries.delete(id)
-          broadcast('retry:pending', [...pendingRetries])
-        }
+      return requestRun({
+        reason: 'retry',
+        jobId: id,
+        prepare: async () => {
+          try { await apply(id) } finally {
+            pendingRetries.delete(id)
+            broadcast('retry:pending', [...pendingRetries])
+          }
+        },
       })
-      return { queued: true }
     }
     await apply(id)
     requestRun({ reason: 'retry', jobId: id })
@@ -325,6 +401,40 @@ function registerIpc(): void {
   }
   ipcMain.handle('retry', (_e, id: string) => requeue(id, retryRecording))
   ipcMain.handle('regenerate', (_e, id: string) => requeue(id, regenerateNotes))
+  ipcMain.handle('queue:prioritize', async (_e, id: string) => {
+    const priority = nextPriorityValue()
+    if (running) {
+      pendingDeletes.delete(id)
+      pendingPriorities.set(id, priority)
+      broadcastPendingQueue()
+      if (!drainingBatch) return requestRun({ reason: 'prioritize', jobId: id })
+      return { queued: true }
+    }
+    await prioritizeJob(id, priority)
+    requestRun({ reason: 'prioritize', jobId: id })
+    return { queued: false }
+  })
+  ipcMain.handle('queue:remove', async (_e, id: string) => {
+    let removedRuns = false
+    for (let i = queuedRuns.length - 1; i >= 0; i--) {
+      if (queuedRuns[i]?.jobId === id) {
+        queuedRuns.splice(i, 1)
+        removedRuns = true
+      }
+    }
+    if (removedRuns) broadcast('run:queued', queuedRuns.length)
+    if (pendingRetries.delete(id)) broadcast('retry:pending', [...pendingRetries])
+    pendingPriorities.delete(id)
+    if (running) {
+      pendingDeletes.add(id)
+      broadcastPendingQueue()
+      return { queued: true }
+    }
+    await removeQueuedJob(id)
+    broadcastPendingQueue()
+    return { queued: false }
+  })
+  ipcMain.handle('pending-queue', () => pendingQueueState())
   ipcMain.handle('recorder-files', () => listRecorderFiles())
   // Processing one file by path is the recorder list's escape hatch: it
   // bypasses the age/size filters and the conclusions of earlier runs (no

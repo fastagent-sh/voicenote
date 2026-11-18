@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { applyOutcome, buildJobsView, classify, emptyState, MAX_ATTEMPTS, MAX_INTERRUPTIONS, parseJobsLimit, parseStateFile, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, startAttempt, type JobRecord, type StateFile } from './jobs.ts'
+import { applyOutcome, buildJobsView, classify, compareQueuedJobs, emptyState, MAX_ATTEMPTS, MAX_INTERRUPTIONS, parseJobsLimit, parseStateFile, patchJob, prioritizeQueued, pruneUnseen, reconcileInterrupted, removeFromQueue, requeueFailed, startAttempt, type JobRecord, type StateFile } from './jobs.ts'
 
 const rec = (over: Partial<JobRecord> & { name: string; recorded_at: string; state: JobRecord['state'] }): JobRecord => ({
   source_path: `/Volumes/VTR6500/RECORD/A/${over.name}`,
@@ -417,4 +417,45 @@ test('a scrap recording is scrap first, old second', () => {
   // offer to process it.
   const realMeeting = classify({ recordedAt: old, sizeBytes: 5_000_000, durationSeconds: 3600 }, undefined, limits, opts())
   expect(realMeeting).toMatchObject({ run: false, code: 'too_old' })
+})
+
+test('prioritizeQueued moves a recording to the front and clears on completion', () => {
+  const s = state({
+    q1: rec({ name: 'q1.mp3', recorded_at: '2026-07-01T10:00:00', state: 'queued' }),
+    q2: rec({ name: 'q2.mp3', recorded_at: '2026-07-02T10:00:00', state: 'queued' }),
+    imp: rec({ name: 'imp.mp3', recorded_at: '2026-07-03T10:00:00', state: 'queued', origin: 'import' }),
+  })
+  expect(view(s).items.map(i => i.name)).toEqual(['imp.mp3', 'q1.mp3', 'q2.mp3'])
+
+  expect(prioritizeQueued(s.jobs.q2!, 100, 'T1')).toBe(true)
+  expect(view(s).items.map(i => i.name)).toEqual(['q2.mp3', 'imp.mp3', 'q1.mp3'])
+  expect(compareQueuedJobs(
+    { priority: s.jobs.q2!.priority, imported: false, recordedAt: s.jobs.q2!.recorded_at },
+    { priority: s.jobs.imp!.priority, imported: true, recordedAt: s.jobs.imp!.recorded_at },
+  )).toBeLessThan(0)
+
+  startAttempt(s.jobs.q2!, 'T2')
+  applyOutcome(s.jobs.q2!, { kind: 'done', title: 'Done', paths: { notes: '/w/q2.md' } }, 'T3')
+  expect(s.jobs.q2!.priority).toBeUndefined()
+})
+
+test('removeFromQueue handles imports, regenerations, and recorder files without dead ends', () => {
+  const freshImport = rec({ name: 'imp.mp3', recorded_at: '2026-07-01T10:00:00', state: 'queued', origin: 'import' })
+  expect(removeFromQueue(freshImport, 'T1')).toBe('delete')
+
+  const regen = rec({
+    name: 'done.mp3', recorded_at: '2026-07-01T10:00:00', state: 'queued',
+    paths: { notes: '/w/done.md', transcript: '/w/done-t.md' },
+  })
+  expect(removeFromQueue(regen, 'T1')).toBe('restore_done')
+  expect(regen).toMatchObject({ state: 'done', code: null })
+
+  const fromRecorder = rec({ name: 'rec.mp3', recorded_at: '2026-07-01T10:00:00', state: 'queued' })
+  expect(removeFromQueue(fromRecorder, 'T1')).toBe('filter_skipped')
+  expect(fromRecorder).toMatchObject({ state: 'filtered', code: 'skipped' })
+  expect(classify(FACTS, fromRecorder, LIMITS, opts())).toMatchObject({ run: false, code: 'skipped' })
+  expect(classify(FACTS, fromRecorder, LIMITS, opts({ force: true }))).toEqual({ run: true })
+
+  const done = rec({ name: 'already.mp3', recorded_at: '2026-07-01T10:00:00', state: 'done' })
+  expect(removeFromQueue(done, 'T1')).toBe('invalid')
 })

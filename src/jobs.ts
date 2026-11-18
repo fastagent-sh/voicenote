@@ -28,8 +28,8 @@ type JobState = 'queued' | 'running' | 'done' | 'filtered' | 'error' | 'gave_up'
 type JobCode =
   | 'transcribe_failed' | 'summary_failed' | 'interrupted'
   // Reasons a recording is set aside rather than failed: the file is fine, it
-  // just holds nothing worth transcribing.
-  | 'too_small' | 'too_short' | 'too_old' | 'no_speech' | 'bad_audio'
+  // just holds nothing worth transcribing, or the user removed it from the queue.
+  | 'too_small' | 'too_short' | 'too_old' | 'no_speech' | 'bad_audio' | 'skipped'
   | null
 
 export type JobRecord = {
@@ -46,6 +46,8 @@ export type JobRecord = {
   attempts: number
   /** Runs that died before reporting back (app quit, sleep, power loss). */
   interruptions?: number
+  /** Higher value moves a queued recording ahead of the default chronological order. */
+  priority?: number
   updated_at: string
   title: string | null
   paths: Record<string, string | null> | null
@@ -79,7 +81,7 @@ type FilterCode = Extract<JobCode, 'too_small' | 'too_short' | 'too_old'>
 type Verdict =
   | { run: true }
   | { run: false; persist: true; code: FilterCode; detail: string | null }
-  | { run: false; persist: false; code: 'already_done' | 'gave_up' | 'no_speech' | 'bad_audio'; detail: string | null }
+  | { run: false; persist: false; code: 'already_done' | 'gave_up' | 'no_speech' | 'bad_audio' | 'skipped'; detail: string | null }
 
 type ScanFacts = { recordedAt: Date; sizeBytes: number; durationSeconds: number | null }
 type Limits = { maxAgeHours: number; minBytes: number; minDurationSeconds: number }
@@ -99,6 +101,9 @@ export function classify(
   // Answers that will not change on a retry, so they are never re-paid for.
   if (entry?.code === 'no_speech' || entry?.code === 'bad_audio') {
     return { run: false, persist: false, code: entry.code, detail: entry.detail }
+  }
+  if (entry?.state === 'filtered' && entry?.code === 'skipped') {
+    return { run: false, persist: false, code: 'skipped', detail: entry.detail }
   }
   if (entry?.state === 'done') return { run: false, persist: false, code: 'already_done', detail: null }
   // Only the summary is outstanding, and this run doesn't make summaries. The
@@ -161,7 +166,7 @@ export function applyOutcome(entry: JobRecord, outcome: Outcome, now: string): v
   switch (outcome.kind) {
     case 'done':
       // Only a clean finish refunds the budget.
-      patchJob(entry, { state: 'done', code: null, detail: null, title: outcome.title, paths: outcome.paths, attempts: 0, interruptions: 0 }, now)
+      patchJob(entry, { state: 'done', code: null, detail: null, title: outcome.title, paths: outcome.paths, attempts: 0, interruptions: 0, priority: undefined }, now)
       return
     case 'summary_failed':
       // The expensive transcript is on disk; keep its paths so a retry resumes
@@ -235,6 +240,47 @@ export function requeueForRegenerate(entry: JobRecord, now: string): boolean {
   return true
 }
 
+/** Move a queued recording ahead of normal FIFO order. */
+export function prioritizeQueued(entry: JobRecord, priority: number, now: string): boolean {
+  if (entry.state !== 'queued') return false
+  patchJob(entry, { priority }, now)
+  return true
+}
+
+/**
+ * Remove a queued recording from the active queue without deleting recorder
+ * files or finished notes.
+ */
+export function removeFromQueue(entry: JobRecord, now: string): 'delete' | 'restore_done' | 'filter_skipped' | 'invalid' {
+  if (entry.state !== 'queued') return 'invalid'
+  if (entry.origin === 'import' && !ownsOutput(entry)) return 'delete'
+  if (ownsOutput(entry) && entry.paths?.notes && entry.code === null) {
+    patchJob(entry, { state: 'done', code: null, detail: null, attempts: 0, priority: undefined }, now)
+    return 'restore_done'
+  }
+  patchJob(entry, { state: 'filtered', code: 'skipped', detail: null, attempts: 0, priority: undefined }, now)
+  return 'filter_skipped'
+}
+
+/**
+ * Single queue order shared between `buildJobsView` and `runPipelineLocked`:
+ * higher priority first, then manual imports, then oldest recording first.
+ */
+export function compareQueuedJobs(
+  a: { priority?: number | null; imported?: boolean; recordedAt: string | number },
+  b: { priority?: number | null; imported?: boolean; recordedAt: string | number },
+): number {
+  const pa = a.priority ?? 0
+  const pb = b.priority ?? 0
+  if (pa !== pb) return pb - pa
+  const ia = Number(Boolean(a.imported))
+  const ib = Number(Boolean(b.imported))
+  if (ia !== ib) return ib - ia
+  return typeof a.recordedAt === 'number' && typeof b.recordedAt === 'number'
+    ? a.recordedAt - b.recordedAt
+    : String(a.recordedAt).localeCompare(String(b.recordedAt))
+}
+
 /**
  * Reclaim records left `running` by a dead run. Safe to do wholesale because the
  * caller holds the run lock: no other run can own a `running` record right now.
@@ -289,6 +335,7 @@ type JobView = {
   /** Only on the folded "filtered out" row: how many, and why. */
   filtered?: { total: number; byCode: Record<string, number> }
   imported: boolean
+  priority: number
 }
 
 export const SUMMARY_FAILED_STATUS = 'summary_failed_transcript_saved'
@@ -361,6 +408,7 @@ export function parseStateFile(text: string, path: string): StateFile {
       recorded_at: typeof j.recorded_at === 'string' ? j.recorded_at : '',
       attempts: Number.isInteger(j.attempts) && j.attempts >= 0 ? j.attempts : 0,
       interruptions: Number.isInteger(j.interruptions) && j.interruptions >= 0 ? j.interruptions : 0,
+      ...(typeof j.priority === 'number' && Number.isFinite(j.priority) && j.priority > 0 ? { priority: j.priority } : {}),
       paths: j.paths && typeof j.paths === 'object' ? j.paths : null,
     }
     // Records written before "no speech" and "unusable audio" were recognised
@@ -414,6 +462,7 @@ const FILTER_LABELS: Record<string, string> = {
   too_old: 'too old',
   no_speech: 'no speech',
   bad_audio: 'unusable audio',
+  skipped: 'removed from queue',
 }
 
 /**
@@ -452,7 +501,7 @@ function foldFiltered(records: JobRecord[]): JobView | null {
     status: 'filtered',
     name: `${records.length} recording${records.length > 1 ? 's' : ''} filtered out`,
     title: null, time: null, finishedAt: null, step: null, detail, code: null, notes: null, audio: null, transcript: null, durationSeconds: null,
-    history_filtered: records.some(r => r.code === 'too_old'), imported: false,
+    history_filtered: records.some(r => r.code === 'too_old'), imported: false, priority: 0,
     filtered: { total: records.length, byCode },
   }
 }
@@ -493,6 +542,7 @@ export function buildJobsView(
       durationSeconds: j.duration_seconds ?? null,
       history_filtered: false,
       imported: j.origin === 'import',
+      priority: j.priority ?? 0,
       _t: j.recorded_at ?? '',
     }
     if (live && live.source_id === id) { running.push({ ...base, status: 'running', step: live.step }); continue }
@@ -518,7 +568,10 @@ export function buildJobsView(
   // sorted by processing time, rows labelled with recording time — which is why
   // the list looked shuffled.
   const asc = (a: any, b: any) => String(a._t).localeCompare(String(b._t))
-  queued.sort(asc)
+  queued.sort((a: any, b: any) => compareQueuedJobs(
+    { priority: a.priority, imported: a.imported, recordedAt: a._t },
+    { priority: b.priority, imported: b.imported, recordedAt: b._t },
+  ))
   attention.sort((a, b) => -asc(a, b))
   done.sort((a, b) => -asc(a, b))
 

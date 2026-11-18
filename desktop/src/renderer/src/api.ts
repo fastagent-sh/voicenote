@@ -29,6 +29,12 @@ export type Job = {
   history_filtered: boolean
   filtered?: { total: number; byCode: Record<string, number> }
   imported: boolean
+  priority?: number
+}
+
+export type PendingQueue = {
+  deletes: string[]
+  priorities: Record<string, number>
 }
 
 export type JobsResponse = {
@@ -92,9 +98,12 @@ type Api = {
   run: () => Promise<{ queued: boolean }>
   retry: (id: string) => Promise<{ queued: boolean }>
   regenerate: (id: string) => Promise<{ queued: boolean }>
+  prioritizeJob: (id: string) => Promise<{ queued: boolean }>
+  removeQueuedJob: (id: string) => Promise<{ queued: boolean }>
   recorderFiles: () => Promise<RecorderFiles>
   runFile: (path: string) => Promise<{ queued: boolean }>
   pendingRetries: () => Promise<string[]>
+  pendingQueue: () => Promise<PendingQueue>
   updateState: () => Promise<{ version: string; ready: string | null; manual: boolean }>
   installUpdate: () => Promise<{ installable: boolean }>
   openReleases: () => Promise<void>
@@ -115,7 +124,7 @@ type Api = {
   search: (query: string) => Promise<{ path: string; title: string; snippet: string }[]>
   openNoteAsHtml: (title: string, html: string) => Promise<string>
   setAutoProcess: (enabled: boolean) => Promise<boolean>
-  on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'run:queued' | 'recorder:connected' | 'retry:pending' | 'update:available' | 'update:ready' | 'update:manual' | 'update:error', listener: (payload: any) => void) => () => void
+  on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'run:queued' | 'recorder:connected' | 'retry:pending' | 'queue:pending' | 'update:available' | 'update:ready' | 'update:manual' | 'update:error', listener: (payload: any) => void) => () => void
 }
 
 export const vn = (window as unknown as { vn: Api }).vn

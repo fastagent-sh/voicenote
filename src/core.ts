@@ -5,7 +5,7 @@ import { volcanoTranscribeAudio } from './asr/volcano.ts'
 import { parseLockOwner } from './runLock.ts'
 import { installProxyFromEnv, runAgentPrompt } from './piAgent.ts'
 import { emitPipelineEvent } from './progress.ts'
-import { applyOutcome, buildJobsView, classify, emptyState, localIso, MAX_ATTEMPTS, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, pruneUnseen, reconcileInterrupted, requeueFailed, requeueForRegenerate, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs.ts'
+import { applyOutcome, buildJobsView, classify, compareQueuedJobs, emptyState, localIso, MAX_ATTEMPTS, ownsOutput, parseJobsLimit, parseStateFile, parseStrictJson, patchJob, prioritizeQueued, pruneUnseen, reconcileInterrupted, removeFromQueue, requeueFailed, requeueForRegenerate, startAttempt, SUMMARY_FAILED_STATUS, type CurrentJob, type JobRecord, type StateFile } from './jobs.ts'
 import {
   CONFIG_DIR, STATE_DIR, LOG_DIR, IS_WINDOWS, dailyLogPath,
   getConfig, resetConfigCache, configGetData, configSetData, configGet, configSet,
@@ -1103,20 +1103,20 @@ function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true } catch (e: any) { return e?.code === 'EPERM' }
 }
 
-export async function runPipeline(file: string | undefined, opts: any): Promise<void> {
+export async function runPipeline(file: string | undefined, opts: any): Promise<{ processedIds: string[]; remaining: number }> {
   wireDailyLog()
   const config = getConfig()
   opts = { ...opts, file }
   const lock = await acquireRunLock()
   if (!lock) throw new Error('Another VoiceNote process is running. Retry after it finishes.')
   try {
-    await runPipelineLocked(config, opts)
+    return await runPipelineLocked(config, opts)
   } finally {
     await lock.release()
   }
 }
 
-async function runPipelineLocked(config: Config, opts: any): Promise<void> {
+async function runPipelineLocked(config: Config, opts: any): Promise<{ processedIds: string[]; remaining: number }> {
   await ensureDirs(config)
   const store = await loadState(config)
   // We hold the run lock, so nothing else can own a `running` record: any that
@@ -1174,7 +1174,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
     if (shouldLogIdleStatus(`missing:${config.recordDir}`)) {
       console.log(`Idle: recorder not mounted and no manual imports are queued: ${config.recordDir} (repeated idle logs suppressed for 30m)`)
     }
-    return
+    return { processedIds: [], remaining: 0 }
   }
   const mode = normalizeRunMode(opts)
   const force = Boolean(opts.force)
@@ -1221,8 +1221,14 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   const samplesLine = !verboseSkips && Object.keys(skipSamples).length
     ? `Skipped samples: ${Object.entries(skipSamples).map(([reason, names]) => `${reason}: ${names.slice(0, 3).join(', ')}${names.length > 3 ? `…(+${names.length - 3})` : ''}`).join(' | ')}`
     : ''
+  eligible.sort((a, b) => compareQueuedJobs(
+    { priority: store.jobs[a.sourceId]?.priority, imported: a.imported, recordedAt: a.recordedAt.getTime() },
+    { priority: store.jobs[b.sourceId]?.priority, imported: b.imported, recordedAt: b.recordedAt.getTime() },
+  ))
+  const skipIds = opts.skipIds instanceof Set ? opts.skipIds as Set<string> : null
+  const runnable = skipIds ? eligible.filter(rec => !skipIds.has(rec.sourceId)) : eligible
   const latestOnly = Boolean(opts.latest)
-  let targets = eligible
+  let targets = runnable
   // Preflight: if there is work but the run cannot complete, skip BEFORE spending
   // ASR money, rather than failing per-recording on every 60s StartInterval tick.
   // Idle-suppressed so a misconfigured daemon doesn't spam logs. Skipped for
@@ -1239,6 +1245,9 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
     }
   }
   if (latestOnly && targets.length) targets = [targets.reduce((latest, rec) => rec.recordedAt > latest.recordedAt ? rec : latest)]
+  const maxJobs = typeof opts.maxJobs === 'number' && Number.isInteger(opts.maxJobs) && opts.maxJobs > 0 ? opts.maxJobs : Infinity
+  const remaining = Math.max(0, targets.length - maxJobs)
+  if (Number.isFinite(maxJobs)) targets = targets.slice(0, maxJobs)
   if (!targets.length) {
     if (verboseSkips || shouldLogIdleStatus(`idle:${config.recordDir}:${recordings.length}:${skipSummary}:${samplesLine}`)) {
       console.log(scanLine)
@@ -1248,7 +1257,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
   } else {
     console.log(scanLine)
     if (samplesLine) console.log(samplesLine)
-    console.log(`Queue: processing ${targets.length} recording(s)${latestOnly ? ' (--latest)' : ''}. Remaining after this run: ${Math.max(0, eligible.length - targets.length)}`)
+    console.log(`Queue: processing ${targets.length} recording(s)${latestOnly ? ' (--latest)' : ''}. Remaining after this run: ${Math.max(0, runnable.length - targets.length)}`)
   }
   if (opts.dryRun) {
     // Print the plan and touch nothing: no attempt counted, no state written.
@@ -1256,11 +1265,14 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
       const plan = await processRecording(config, rec, { ...opts, resumeFromTranscriptFiles: resumableTranscriptFiles(config, rec, store, mode, force) })
       console.log(JSON.stringify(plan, null, 2))
     }
-    return
+    return { processedIds: [], remaining: 0 }
   }
   await saveState(config, store)
 
+  const processedIds: string[] = []
+  let recorderStopped = false
   for (const [targetIndex, rec] of targets.entries()) {
+    processedIds.push(rec.sourceId)
     const entry = store.jobs[rec.sourceId]!
     let importedDone = false
     // --force means "start over", so it refunds the retry budget too. Without
@@ -1313,9 +1325,11 @@ async function runPipelineLocked(config: Config, opts: any): Promise<void> {
     // same way. Local imports do not depend on the recorder and keep running.
     if (!single && !existsSync(config.recordDir) && targets.slice(targetIndex + 1).some(target => !target.imported && !target.resuming)) {
       console.error(`Recorder disappeared mid-run (${config.recordDir}); stopping. Remaining recordings stay queued.`)
+      recorderStopped = true
       break
     }
   }
+  return { processedIds, remaining: recorderStopped ? 0 : remaining }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1524,6 +1538,43 @@ export async function regenerateNotes(id: string): Promise<void> {
     if (!requeueForRegenerate(entry, nowIso())) throw new Error(`Cannot regenerate notes for a recording in state '${entry.state}'.`)
     await saveState(config, store)
     console.log(`queued ${entry.name} for a fresh summary`)
+  } finally { await lock.release() }
+}
+
+/** Promote a queued recording so it runs ahead of earlier queued items. */
+export async function prioritizeJob(id: string, priority = Date.now()): Promise<void> {
+  const config = getConfig()
+  const lock = await acquireRunLock()
+  if (!lock) throw new Error('A voicenote run is in progress. Try again once it finishes.')
+  try {
+    const store = await loadState(config)
+    const entry = store.jobs[id]
+    if (!entry) throw new Error('Recording no longer exists in the processing list.')
+    if (!prioritizeQueued(entry, priority, nowIso())) throw new Error(`Cannot prioritize a recording in state '${entry.state}'.`)
+    await saveState(config, store)
+    console.log(`prioritized ${entry.name}`)
+  } finally { await lock.release() }
+}
+
+/** Remove a queued recording from the queue without touching physical recorder files. */
+export async function removeQueuedJob(id: string): Promise<void> {
+  const config = getConfig()
+  const lock = await acquireRunLock()
+  if (!lock) throw new Error('A voicenote run is in progress. Try again once it finishes.')
+  try {
+    const store = await loadState(config)
+    const entry = store.jobs[id]
+    if (!entry) return
+    const action = removeFromQueue(entry, nowIso())
+    if (action === 'invalid') throw new Error(`Cannot remove a recording in state '${entry.state}'.`)
+    if (action === 'delete') {
+      await removeImportedSource(config, entry.source_path)
+      delete store.jobs[id]
+    } else if (action === 'filter_skipped' && entry.origin === 'import') {
+      await removeImportedSource(config, entry.source_path)
+    }
+    await saveState(config, store)
+    console.log(`removed ${entry.name} from queue`)
   } finally { await lock.release() }
 }
 

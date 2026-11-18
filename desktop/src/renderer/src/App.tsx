@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { marked } from 'marked'
-import { vn, type Job, type JobsResponse, type LoginEvent, type PipelineEvent, type Status } from './api.ts'
+import { vn, type Job, type JobsResponse, type LoginEvent, type PendingQueue, type PipelineEvent, type Status } from './api.ts'
 import { clock, estimateRemaining, friendlyTime, isFresh, spokenDuration, timeGroup } from './format.ts'
 import { explainFailure, topProblem } from './problems.ts'
 import { NoteDetail } from './NoteDetail.tsx'
@@ -41,6 +41,7 @@ type Live = {
   startedAt: number
 }
 
+const EMPTY_PENDING_QUEUE: PendingQueue = { deletes: [], priorities: {} }
 const EMPTY_LIVE: Live = { id: null, step: null, durationSeconds: null, note: '', tool: null, startedAt: Date.now() }
 
 function Elapsed({ since }: { since: number }) {
@@ -123,6 +124,96 @@ function ActiveDetail({ job, live }: { job: Job; live: Live }) {
   )
 }
 
+function QueuedDetail({
+  job,
+  position,
+  total,
+  running,
+  prioritized,
+  isNext,
+  confirmRemove,
+  onConfirmRemoveChange,
+  onPrioritize,
+  onRemove,
+  onOpen,
+}: {
+  job: Job
+  position: number
+  total: number
+  running: boolean
+  prioritized: boolean
+  isNext: boolean
+  confirmRemove: boolean
+  onConfirmRemoveChange: (v: boolean) => void
+  onPrioritize: () => void
+  onRemove: () => void
+  onOpen: (path: string) => void
+}) {
+  const isRegenerate = Boolean(job.notes && !job.code)
+  const removeLabel = isRegenerate ? '取消重新生成' : job.imported ? '删除' : '移出队列'
+  const confirmMessage = isRegenerate
+    ? '取消后将保留原有纪要和转写稿，不再重新生成。'
+    : job.imported
+      ? '删除后将从待处理队列移除并删除临时导入文件，不会自动处理。'
+      : '移出后不会再自动处理这条录音；录音笔上的原文件会保留，之后仍可在「录音笔文件」中手动处理。'
+  const confirmButton = isRegenerate ? '确认取消' : job.imported ? '确认删除' : '确认移出'
+
+  return (
+    <div className="detail">
+      <header className="detail-head">
+        <div>
+          <h1 className="detail-title">{job.title || job.name}</h1>
+          <div className="detail-meta">
+            {friendlyTime(job.time)}
+            {job.durationSeconds ? ` · 录音 ${spokenDuration(job.durationSeconds)}` : ''}
+            {job.imported ? ' · 手动导入' : ' · 录音笔'}
+          </div>
+        </div>
+        <div className="row-actions">
+          {isNext
+            ? <button className="primary" disabled>已排在下一个</button>
+            : (
+              <button className="primary" onClick={onPrioritize}>
+                {running ? '提前处理' : '立即处理'}
+              </button>
+            )}
+          <button className="danger" onClick={() => onConfirmRemoveChange(true)}>{removeLabel}</button>
+          {job.transcript && <button onClick={() => onOpen(job.transcript!)}>打开转写稿</button>}
+        </div>
+      </header>
+
+      <div className={`callout ${isNext || prioritized ? 'callout-pending' : 'callout-queue'}`}>
+        <p className="callout-title">
+          {isNext
+            ? '已排在下一个，当前任务完成后立即开始处理。'
+            : prioritized
+              ? `已提高优先级，当前排在队列第 ${position} 位（共 ${total} 条等待中）。`
+              : running
+                ? `等待处理中，当前排在队列第 ${position} 位（共 ${total} 条等待中）。`
+                : `待处理队列第 ${position} 位（共 ${total} 条）。`}
+        </p>
+        <p className="hint">
+          {running
+            ? '点击「提前处理」可将其调到队列最前，在当前任务完成后立即执行；也可以从队列中移出。'
+            : '点击「立即处理」会立刻处理这条录音，不必等前面排队的内容。'}
+        </p>
+      </div>
+
+      {confirmRemove && (
+        <div className="callout" role="alert">
+          <p className="callout-title">{confirmMessage}</p>
+          <div className="row-actions">
+            <button className="danger-fill" onClick={onRemove}>{confirmButton}</button>
+            <button onClick={() => onConfirmRemoveChange(false)}>取消</button>
+          </div>
+        </div>
+      )}
+
+      {job.transcript && <p className="hint">转写稿已经保存，处理时只会重新生成纪要，不会重复花费转写费用。</p>}
+    </div>
+  )
+}
+
 function FailureDetail({ job, pending, onRetry, onSettings, onOpen }: {
   job: Job
   pending: boolean
@@ -176,15 +267,17 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null)
   const [dropping, setDropping] = useState(false)
   const [pendingRetries, setPendingRetries] = useState<string[]>([])
+  const [pendingQueue, setPendingQueue] = useState<PendingQueue>(EMPTY_PENDING_QUEUE)
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
   const [queuedRuns, setQueuedRuns] = useState(0)
   const [update, setUpdate] = useState<{ available: string | null; ready: string | null; manual: boolean }>({ available: null, ready: null, manual: false })
 
   /** Every user action goes through here: a failure must be visible. */
-  const act = useCallback(async (work: () => Promise<unknown>, done?: string) => {
+  const act = useCallback(async (work: () => Promise<unknown>, done?: string, queuedMessage = '已排队,当前这条处理完就开始') => {
     try {
       const result = await work()
       if (result && typeof result === 'object' && 'queued' in result && (result as { queued: boolean }).queued) {
-        setToast('已排队,当前这条处理完就开始')
+        setToast(queuedMessage)
       } else if (done) setToast(done)
     } catch (error) {
       setToast(String((error as Error)?.message ?? error))
@@ -200,6 +293,7 @@ export function App() {
   useEffect(() => {
     void refresh()
     void vn.pendingRetries().then(setPendingRetries)
+    void vn.pendingQueue?.().then(setPendingQueue)
     void vn.updateState().then(state => setUpdate(u => ({ ...u, ready: state.ready, manual: state.manual })))
     const poll = setInterval(() => { void vn.jobs(200).then(setJobs) }, 2000)
     const off = [
@@ -226,6 +320,7 @@ export function App() {
       }),
       vn.on('run:error', (message: string) => setToast(message)),
       vn.on('retry:pending', (ids: string[]) => setPendingRetries(ids)),
+      vn.on('queue:pending', (state: PendingQueue) => setPendingQueue(state)),
       vn.on('run:queued', (count: number) => setQueuedRuns(count)),
       vn.on('update:available', (version: string) => setUpdate(u => ({ ...u, available: version }))),
       vn.on('update:ready', (version: string) => setUpdate(u => ({ ...u, ready: version }))),
@@ -270,7 +365,16 @@ export function App() {
   const active = items.find(job => job.status === 'running') ?? null
   const filteredRow = items.find(job => job.status === 'filtered') ?? null
   const attention = items.filter(job => ['error', 'notes_failed', 'gave_up'].includes(job.status))
-  const queued = items.filter(job => job.status === 'queued')
+  const queued = useMemo(() => {
+    const deleted = new Set(pendingQueue.deletes)
+    const list = items.filter(job => job.status === 'queued' && (!job.id || !deleted.has(job.id)))
+    return [...list].sort((a, b) => {
+      const pa = (a.id ? pendingQueue.priorities[a.id] : 0) || a.priority || 0
+      const pb = (b.id ? pendingQueue.priorities[b.id] : 0) || b.priority || 0
+      if (pa !== pb) return pb - pa
+      return 0
+    })
+  }, [items, pendingQueue])
 
   const notes = useMemo(() => {
     const done = items.filter(job => job.status === 'done')
@@ -289,14 +393,16 @@ export function App() {
   }, [notes])
 
   // Keep a selection alive across refreshes, and follow the running job.
-  const selectedJob = selected?.kind === 'job' ? items.find(job => job.id === selected.id) ?? null : null
+  const selectedJob = selected?.kind === 'job'
+    ? items.find(job => job.id === selected.id && !(job.status === 'queued' && job.id && pendingQueue.deletes.includes(job.id))) ?? null
+    : null
   useEffect(() => {
     if (!selected && active) setSelected({ kind: 'job', id: active.id! })
   }, [active, selected])
 
   // Only the recordings a person might actually want processed are counted:
   // a two-second accidental press is not a to-do item.
-  const SCRAP_CODES = ['too_small', 'too_short', 'no_speech', 'bad_audio']
+  const SCRAP_CODES = ['too_small', 'too_short', 'no_speech', 'bad_audio', 'skipped']
   const byCode = filteredRow?.filtered?.byCode ?? {}
   const skipped = Object.entries(byCode)
     .filter(([code]) => !SCRAP_CODES.includes(code))
@@ -323,6 +429,29 @@ export function App() {
     if (!file) return
     const path = vn.pathForFile(file)
     if (path) await act(() => vn.importRecording(path), `已加入队列：${file.name}`)
+  }
+
+  const prioritizeQueued = async (job: Job) => {
+    if (!job.id) return
+    await act(
+      () => vn.prioritizeJob(job.id!),
+      `开始处理：${job.title || job.name}`,
+      '已排到下一个，当前任务完成后立即开始',
+    )
+    void refresh()
+  }
+
+  const removeQueued = async (job: Job) => {
+    if (!job.id) return
+    const isRegenerate = Boolean(job.notes && !job.code)
+    setConfirmRemoveId(null)
+    setSelected(null)
+    await act(
+      () => vn.removeQueuedJob(job.id!),
+      isRegenerate ? '已取消重新生成' : '已从队列移出',
+      isRegenerate ? '已取消重新生成' : '已从队列移出',
+    )
+    void refresh()
   }
 
   return (
@@ -365,14 +494,57 @@ export function App() {
             </button>
           )}
 
-          {queued.map(job => (
-            <button key={job.id} className="row" onClick={() => setSelected({ kind: 'job', id: job.id! })}>
-              <span className="row-main">
-                <span className="row-title">{job.title || job.name}</span>
-                <span className="row-sub">排队中</span>
-              </span>
-            </button>
-          ))}
+          {queued.length > 0 && <div className="group-head">待处理队列 ({queued.length})</div>}
+          {queued.map((job, index) => {
+            const priority = (job.id ? pendingQueue.priorities[job.id] : 0) || job.priority || 0
+            const isNext = running && index === 0 && priority > 0
+            const isSelected = selected?.kind === 'job' && selected.id === job.id
+            const sub = isNext
+              ? '排在下一个 · 当前完成后开始'
+              : priority > 0
+                ? '已优先排队'
+                : friendlyTime(job.time) || '排队中'
+            return (
+              <div key={job.id} className={`row row-queued${isNext ? ' row-priority' : ''}${isSelected ? ' selected' : ''}`}>
+                <button className="row-hit" onClick={() => { setConfirmRemoveId(null); setSelected({ kind: 'job', id: job.id! }) }}>
+                  <span className="row-main">
+                    <span className="row-title">
+                      {priority > 0 && <span className="fresh">优先</span>}
+                      {job.title || job.name}
+                    </span>
+                    <span className="row-sub">{sub}</span>
+                  </span>
+                </button>
+                {job.id && (
+                  <div className="row-mini-actions">
+                    {!isNext && (
+                      <button
+                        type="button"
+                        className="mini-btn"
+                        title={running ? '提前到下一个处理' : '立即处理'}
+                        aria-label={running ? '提前处理' : '立即处理'}
+                        onClick={() => void prioritizeQueued(job)}
+                      >
+                        ↑
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="mini-btn mini-btn-danger"
+                      title="移出队列"
+                      aria-label="移出队列"
+                      onClick={() => {
+                        setSelected({ kind: 'job', id: job.id! })
+                        setConfirmRemoveId(job.id!)
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                )}
+              </div>
+            )
+          })}
 
           {attention.length > 0 && <div className="group-head">需要处理</div>}
           {attention.map(job => (
@@ -449,6 +621,26 @@ export function App() {
         )}
 
         {selectedJob?.status === 'running' && <ActiveDetail job={selectedJob} live={live} />}
+        {selectedJob?.status === 'queued' && (() => {
+          const index = queued.findIndex(j => j.id === selectedJob.id)
+          const priority = (selectedJob.id ? pendingQueue.priorities[selectedJob.id] : 0) || selectedJob.priority || 0
+          const isNext = running && index === 0 && priority > 0
+          return (
+            <QueuedDetail
+              job={selectedJob}
+              position={index >= 0 ? index + 1 : 1}
+              total={queued.length || 1}
+              running={running}
+              prioritized={priority > 0}
+              isNext={isNext}
+              confirmRemove={confirmRemoveId === selectedJob.id}
+              onConfirmRemoveChange={v => setConfirmRemoveId(v ? selectedJob.id : null)}
+              onPrioritize={() => void prioritizeQueued(selectedJob)}
+              onRemove={() => void removeQueued(selectedJob)}
+              onOpen={(path) => void act(() => vn.openPath(path))}
+            />
+          )
+        })()}
         {selectedJob && ['error', 'notes_failed', 'gave_up'].includes(selectedJob.status) && (
           <FailureDetail
             job={selectedJob}
