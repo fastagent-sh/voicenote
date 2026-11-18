@@ -8,6 +8,7 @@ export type PipelineEvent =
   | { type: 'job_step'; step: string }
   | { type: 'job_done'; id: string; title: string | null; notes: string | null; stub: boolean }
   | { type: 'job_failed'; id: string; message: string }
+  | { type: 'job_aborted'; id: string }
   | { type: 'note_delta'; delta: string }
   | { type: 'note_tool'; name: string }
 

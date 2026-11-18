@@ -145,6 +145,7 @@ type Outcome =
   | { kind: 'summary_failed'; title: string | null; paths: Record<string, string | null> | null; message: string }
   | { kind: 'failed'; message: string }
   | { kind: 'interrupted' }
+  | { kind: 'aborted'; priority: number; paths?: Record<string, string | null> | null }
 
 /**
  * The single place a started attempt is turned back into a record. It lives
@@ -206,6 +207,19 @@ export function applyOutcome(entry: JobRecord, outcome: Outcome, now: string): v
         detail: null,
         interruptions,
         attempts: Math.max(0, entry.attempts - 1),
+      }, now)
+      return
+    }
+    case 'aborted': {
+      // User-requested abort: refund the attempt without counting against the
+      // crash-interruption cap, and move the job to the tail (`priority < 0`).
+      patchJob(entry, {
+        state: 'queued',
+        code: null,
+        detail: null,
+        priority: outcome.priority,
+        attempts: Math.max(0, entry.attempts - 1),
+        ...(outcome.paths !== undefined ? { paths: outcome.paths } : {}),
       }, now)
       return
     }
@@ -408,7 +422,7 @@ export function parseStateFile(text: string, path: string): StateFile {
       recorded_at: typeof j.recorded_at === 'string' ? j.recorded_at : '',
       attempts: Number.isInteger(j.attempts) && j.attempts >= 0 ? j.attempts : 0,
       interruptions: Number.isInteger(j.interruptions) && j.interruptions >= 0 ? j.interruptions : 0,
-      ...(typeof j.priority === 'number' && Number.isFinite(j.priority) && j.priority > 0 ? { priority: j.priority } : {}),
+      ...(typeof j.priority === 'number' && Number.isFinite(j.priority) && j.priority !== 0 ? { priority: j.priority } : {}),
       paths: j.paths && typeof j.paths === 'object' ? j.paths : null,
     }
     // Records written before "no speech" and "unusable audio" were recognised

@@ -20,6 +20,7 @@ createRoot(document.getElementById('root')!).render(createElement(App))
 window.listeners = {};
 window.prioritized = [];
 window.removed = [];
+window.aborted = 0;
 window.pending = { deletes: [], priorities: {} };
 window.items = [
   { id: 'r1', status: 'running', name: 'r1.mp3', title: 'Running Meeting', time: '2026-07-01 09:00', step: 'transcribe', durationSeconds: 300, imported: false, priority: 0 },
@@ -45,6 +46,10 @@ window.vn = {
     window.listeners['queue:pending']?.(window.pending);
     return { queued: true };
   },
+  abortCurrentJob: async () => {
+    window.aborted++;
+    return { aborted: true };
+  },
   on: (key, fn) => { window.listeners[key] = fn; return () => {} },
 };
 </script><script src="renderer.js"></script>`)
@@ -67,6 +72,20 @@ app.whenReady().then(async () => {
     await tick();
 
     check(queuedTitles()[0].includes('First Queued'), 'expected First Queued first, got: ' + queuedTitles().join(', '));
+    // Verify active job shows abort-and-move-to-tail action
+    check(button('中止并移到队尾'), 'ActiveDetail did not render abort button');
+    button('中止并移到队尾').click();
+    await tick();
+    check(window.aborted === 1 && button('正在中止…')?.disabled, 'abortCurrentJob did not trigger loading state');
+    window.items = [
+      { id: 'q1', status: 'running', name: 'q1.mp3', title: 'First Queued', time: '2026-07-01 10:00', step: 'transcribe', durationSeconds: 180, imported: false, priority: 0 },
+      { id: 'q2', status: 'queued', name: 'q2.mp3', title: 'Second Queued', time: '2026-07-01 11:00', durationSeconds: 240, imported: true, priority: 0 },
+      { id: 'r1', status: 'queued', name: 'r1.mp3', title: 'Running Meeting', time: '2026-07-01 09:00', durationSeconds: 300, imported: false, priority: -100 },
+    ];
+    window.listeners['pipeline:event']?.({ type: 'job_aborted', id: 'r1' });
+    await tick();
+    check(queuedTitles()[queuedTitles().length - 1].includes('Running Meeting'), 'aborted job did not move to tail: ' + queuedTitles().join(', '));
+
     // Click Second Queued to open QueuedDetail
     [...document.querySelectorAll('.row-queued .row-hit')].find(b => b.textContent.includes('Second Queued')).click();
     await tick();
@@ -79,8 +98,8 @@ app.whenReady().then(async () => {
     check(queuedTitles()[0].includes('Second Queued'), 'q2 did not move to top of queue: ' + queuedTitles().join(', '));
     check(button('已排在下一个')?.disabled, 'prioritized next item should show disabled state');
 
-    // Select First Queued and test delete confirmation + cancellation + confirmation
-    [...document.querySelectorAll('.row-queued .row-hit')].find(b => b.textContent.includes('First Queued')).click();
+    // Select Running Meeting (demoted) and test delete confirmation + cancellation + confirmation
+    [...document.querySelectorAll('.row-queued .row-hit')].find(b => b.textContent.includes('Running Meeting')).click();
     await tick();
     button('移出队列').click();
     await tick();
@@ -93,8 +112,8 @@ app.whenReady().then(async () => {
     await tick();
     button('确认移出').click();
     await tick();
-    check(window.removed.length === 1 && window.removed[0] === 'q1', 'removeQueuedJob not called for q1');
-    check(queuedTitles().length === 1 && !queuedTitles()[0].includes('First Queued'), 'q1 was not removed from sidebar');
+    check(window.removed.length === 1 && window.removed[0] === 'r1', 'removeQueuedJob not called for r1');
+    check(queuedTitles().length === 1 && !queuedTitles()[0].includes('Running Meeting'), 'r1 was not removed from sidebar');
   })()\`);
   console.log('queue control verified');
   app.exit(0);

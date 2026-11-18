@@ -584,9 +584,25 @@ async function promoteOutputs(from: LocalFiles, to: LocalFiles): Promise<void> {
   }
 }
 
-async function transcribeAudio(config: Config, audioPath: string, rec: Recording): Promise<string> {
+function isAbortError(e: unknown): boolean {
+  return (e as { name?: string } | null)?.name === 'AbortError'
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return
+  const err = new Error('Aborted')
+  err.name = 'AbortError'
+  throw err
+}
+
+function nextDemotedPriority(jobs: Record<string, JobRecord>): number {
+  const lowest = Math.min(0, ...Object.values(jobs).map(j => j.priority ?? 0))
+  return Math.min(-Date.now(), lowest - 1)
+}
+
+async function transcribeAudio(config: Config, audioPath: string, rec: Recording, signal?: AbortSignal): Promise<string> {
   if (!config.volcano) throw new Error('Volcano ASR not configured. Set VOLCANO_ASR_KEY in config.json.')
-  return volcanoTranscribeAudio(config.volcano, audioPath, { durationSeconds: rec.durationSeconds })
+  return volcanoTranscribeAudio(config.volcano, audioPath, { durationSeconds: rec.durationSeconds, signal })
 }
 
 
@@ -692,6 +708,7 @@ type PiRunOptions = {
   appendSystemPrompt?: string
   /** Agent working dir: the knowledge base, so read/grep default there. */
   cwd: string
+  signal?: AbortSignal
 }
 
 async function runPi(config: Config, opts: PiRunOptions): Promise<string> {
@@ -708,6 +725,7 @@ async function runPi(config: Config, opts: PiRunOptions): Promise<string> {
     ...(opts.appendSystemPrompt ? { appendSystemPrompt: opts.appendSystemPrompt } : {}),
     userPrompt: opts.userPrompt,
     timeoutMs: opts.timeoutMs,
+    signal: opts.signal,
     // The CLI prints nothing here (the note is written to disk anyway); the
     // desktop app renders the text as it arrives.
     onProgress: (p) => emitPipelineEvent(p.type === 'text' ? { type: 'note_delta', delta: p.delta } : { type: 'note_tool', name: p.name }),
@@ -726,13 +744,26 @@ function isTransientPiError(e: any): boolean {
 async function chatCompleteViaPi(config: Config, opts: PiRunOptions): Promise<string> {
   const maxAttempts = config.pi.retries
   for (let attempt = 1; ; attempt++) {
+    throwIfAborted(opts.signal)
     try {
       return await runPi(config, opts)
     } catch (e: any) {
+      if (isAbortError(e) || opts.signal?.aborted) throw e
       if (attempt >= maxAttempts || !isTransientPiError(e)) throw e
       const backoffMs = Math.min(30000, 2000 * 2 ** (attempt - 1))
       console.error(`pi transient error (attempt ${attempt}/${maxAttempts}); retrying in ${backoffMs}ms: ${e?.message || e}`)
-      await new Promise(res => setTimeout(res, backoffMs))
+      await new Promise<void>((res, rej) => {
+        if (opts.signal?.aborted) { rej(e); return }
+        const timer = setTimeout(() => {
+          opts.signal?.removeEventListener('abort', onAbort)
+          res()
+        }, backoffMs)
+        const onAbort = () => {
+          clearTimeout(timer)
+          try { throwIfAborted(opts.signal) } catch (err) { rej(err) }
+        }
+        opts.signal?.addEventListener('abort', onAbort, { once: true })
+      })
     }
   }
 }
@@ -745,7 +776,7 @@ function piSummaryToolsHint(contextDir: string): string {
 // read/grep operate there directly. If a configured context dir is missing, say
 // so loudly and run without tools rather than searching the wrong tree (tools,
 // the cwd hint, and the working dir move together).
-async function chatComplete(opts: { systemPrompt: string; userPrompt: string; config: Config }): Promise<string> {
+async function chatComplete(opts: { systemPrompt: string; userPrompt: string; config: Config; signal?: AbortSignal }): Promise<string> {
   const { pi } = opts.config
   const wanted = pi.tools ? pi.tools.split(',').map(t => t.trim()).filter(Boolean) : []
   const ctxExists = wanted.length ? existsSync(pi.contextDir) : false
@@ -761,14 +792,15 @@ async function chatComplete(opts: { systemPrompt: string; userPrompt: string; co
     // Without tools the agent never touches the filesystem, but the session
     // still needs a directory that exists.
     cwd: toolsActive ? pi.contextDir : opts.config.workspace,
+    signal: opts.signal,
   })
 }
 
-async function summarizeTranscript(config: Config, transcript: string, rec: Recording, localAudioPath: string): Promise<Json> {
+async function summarizeTranscript(config: Config, transcript: string, rec: Recording, localAudioPath: string, signal?: AbortSignal): Promise<Json> {
   const messages = summaryMessages(config, transcript, rec, localAudioPath)
   const systemPrompt = String(messages[0]!.content)
   const userPrompt = String(messages[1]!.content)
-  const markdown = await chatComplete({ systemPrompt, userPrompt, config })
+  const markdown = await chatComplete({ systemPrompt, userPrompt, config, signal })
   const title = /^#\s+(.+?)\s*#*\s*(?:\r?\n|$)/.exec(markdown)?.[1]?.trim()
   if (!title) throw new Error('Summary must start with a non-empty Markdown H1 title')
   return { title, markdown }
@@ -895,8 +927,9 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
     if (resolve(inputAudio) !== resolve(files.audio)) await copyFile(inputAudio, files.audio)
     console.log(`✓ Local audio ready: ${files.audio}`)
 
+    throwIfAborted(opts.signal)
     progressStep(nextStep(), totalSteps, 'Transcribe audio', transcribeBackendLabel)
-    transcript = await withHeartbeat('transcribe audio', () => transcribeAudio(config, files.audio, rec), 90)
+    transcript = await withHeartbeat('transcribe audio', () => transcribeAudio(config, files.audio, rec, opts.signal), 90)
 
     // Persist transcript IMMEDIATELY so an expensive ASR result is never lost
     // if a later step (summary) blows up. We use the initial (untitled) path;
@@ -912,10 +945,12 @@ async function processRecording(config: Config, rec: Recording, opts: any): Prom
 
   let summaryError: any = null
   if (needsNotes) {
+    throwIfAborted(opts.signal)
     progressStep(nextStep(), totalSteps, 'Generate integrated semantic notes', `via pi, model=${config.pi.model || "pi's own default"}`)
     try {
-      meta = await withHeartbeat('generate integrated semantic notes', () => summarizeTranscript(config, transcript, rec, files.audio), 60)
+      meta = await withHeartbeat('generate integrated semantic notes', () => summarizeTranscript(config, transcript, rec, files.audio, opts.signal), 60)
     } catch (e: any) {
+      if (isAbortError(e) || opts.signal?.aborted) throw e
       summaryError = e
       console.error(`Summary step failed; transcript is preserved. Error: ${e?.message || e}`)
       console.error(`Hint: check the error above, then re-run with: vn run --latest`)
@@ -1103,7 +1138,7 @@ function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true } catch (e: any) { return e?.code === 'EPERM' }
 }
 
-export async function runPipeline(file: string | undefined, opts: any): Promise<{ processedIds: string[]; remaining: number }> {
+export async function runPipeline(file: string | undefined, opts: any): Promise<{ processedIds: string[]; abortedIds: string[]; remaining: number }> {
   wireDailyLog()
   const config = getConfig()
   opts = { ...opts, file }
@@ -1116,7 +1151,7 @@ export async function runPipeline(file: string | undefined, opts: any): Promise<
   }
 }
 
-async function runPipelineLocked(config: Config, opts: any): Promise<{ processedIds: string[]; remaining: number }> {
+async function runPipelineLocked(config: Config, opts: any): Promise<{ processedIds: string[]; abortedIds: string[]; remaining: number }> {
   await ensureDirs(config)
   const store = await loadState(config)
   // We hold the run lock, so nothing else can own a `running` record: any that
@@ -1174,7 +1209,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<{ processed
     if (shouldLogIdleStatus(`missing:${config.recordDir}`)) {
       console.log(`Idle: recorder not mounted and no manual imports are queued: ${config.recordDir} (repeated idle logs suppressed for 30m)`)
     }
-    return { processedIds: [], remaining: 0 }
+    return { processedIds: [], abortedIds: [], remaining: 0 }
   }
   const mode = normalizeRunMode(opts)
   const force = Boolean(opts.force)
@@ -1265,14 +1300,14 @@ async function runPipelineLocked(config: Config, opts: any): Promise<{ processed
       const plan = await processRecording(config, rec, { ...opts, resumeFromTranscriptFiles: resumableTranscriptFiles(config, rec, store, mode, force) })
       console.log(JSON.stringify(plan, null, 2))
     }
-    return { processedIds: [], remaining: 0 }
+    return { processedIds: [], abortedIds: [], remaining: 0 }
   }
   await saveState(config, store)
 
   const processedIds: string[] = []
+  const abortedIds: string[] = []
   let recorderStopped = false
   for (const [targetIndex, rec] of targets.entries()) {
-    processedIds.push(rec.sourceId)
     const entry = store.jobs[rec.sourceId]!
     let importedDone = false
     // --force means "start over", so it refunds the retry budget too. Without
@@ -1299,8 +1334,29 @@ async function runPipelineLocked(config: Config, opts: any): Promise<{ processed
         notes: ((result.final_paths as Record<string, string> | null)?.notes) ?? null,
         stub,
       })
+      processedIds.push(rec.sourceId)
       importedDone = rec.imported && result.status !== SUMMARY_FAILED_STATUS
     } catch (e: any) {
+      if (isAbortError(e) || opts.signal?.aborted) {
+        console.log(`Aborted ${entry.name}; moved to tail of queue`)
+        const files = recordingFiles(config, rec, store)
+        const savedPaths = existsSync(files.transcript)
+          ? {
+              ...entry.paths,
+              ...(existsSync(files.audio) ? { audio: files.audio } : {}),
+              transcript: files.transcript,
+            }
+          : undefined
+        applyOutcome(entry, {
+          kind: 'aborted',
+          priority: nextDemotedPriority(store.jobs),
+          ...(savedPaths ? { paths: savedPaths } : {}),
+        }, nowIso())
+        abortedIds.push(rec.sourceId)
+        emitPipelineEvent({ type: 'job_aborted', id: rec.sourceId })
+        break
+      }
+      processedIds.push(rec.sourceId)
       const message = String(e?.message || e)
       console.error(`ERROR processing ${rec.sourcePath}: ${message}`)
       emitPipelineEvent({ type: 'job_failed', id: rec.sourceId, message })
@@ -1329,7 +1385,7 @@ async function runPipelineLocked(config: Config, opts: any): Promise<{ processed
       break
     }
   }
-  return { processedIds, remaining: recorderStopped ? 0 : remaining }
+  return { processedIds, abortedIds, remaining: recorderStopped ? 0 : remaining }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
