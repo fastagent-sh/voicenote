@@ -306,7 +306,7 @@ export function App() {
     void refresh()
     void vn.pendingRetries().then(setPendingRetries)
     void vn.pendingQueue?.().then(setPendingQueue)
-    void vn.updateState().then(state => setUpdate(u => ({ ...u, ready: state.ready, manual: state.manual })))
+    void vn.updateState().then(state => setUpdate(u => ({ ...u, available: state.available ?? u.available, ready: state.ready, manual: state.manual })))
     const poll = setInterval(() => { void vn.jobs(200).then(setJobs) }, 2000)
     const off = [
       vn.on('pipeline:event', (event: PipelineEvent) => {
@@ -433,7 +433,18 @@ export function App() {
   const problem = topProblem(status)
 
   if (screen === 'settings') {
-    return <Settings status={status} onClose={() => { setScreen('main'); void refresh() }} onLogin={() => vn.login()} />
+    return (
+      <Settings
+        status={status}
+        running={running}
+        onClose={() => {
+          setScreen('main')
+          void refresh()
+          void vn.updateState().then(state => setUpdate(u => ({ ...u, available: state.available ?? null, ready: state.ready, manual: state.manual })))
+        }}
+        onLogin={() => vn.login()}
+      />
+    )
   }
   if (screen === 'recorder') {
     return <Recorder running={running} onClose={() => { setScreen('main'); void refresh() }} onToast={setToast} />

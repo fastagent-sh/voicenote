@@ -21,17 +21,19 @@ createRoot(document.getElementById('root')!).render(createElement(Settings, {sta
     const build = await Bun.build({ entrypoints: [entry], outdir: dir, target: 'browser', naming: 'renderer.js' })
     expect(build.success, String(build.logs)).toBe(true)
     await writeFile(join(dir, 'index.html'), `<!doctype html><meta charset="utf-8"><div id="root"></div><script>
-window.savedKeys = []; window.savedConfigs = [];
+window.savedKeys = []; window.savedConfigs = []; window.updateChecks = 0; window.installs = 0; window.listeners = {};
 window.vn = {
  configGet: async () => ({env: {VOICENOTE_PI_MODEL:'deepseek/deepseek-flash'}, self:{name:null,aliases:[]}}),
- updateState: async () => ({version:'test'}),
+ updateState: async () => ({version:'test', ready: null, manual: false, packaged: true}),
+ checkForUpdates: async () => { window.updateChecks++; return { version: 'test', available: null, ready: null, manual: false, packaged: true }; },
+ installUpdate: async () => { window.installs++; return { installable: true }; },
  piProviders: async () => [
  {id:'deepseek',name:'DeepSeek',configured:true,authType:'api_key',source:'stored',hasApiKey:true,hasOAuth:false,envKeys:['DEEPSEEK_API_KEY','DEEPSEEK_KEY'],defaultModelId:'deepseek-flash',apiKey:'original-key',models:[{id:'deepseek-flash',name:'Flash'}]},
  {id:'kimi-coding',name:'Kimi',configured:false,hasApiKey:true,hasOAuth:false,envKeys:['KIMI_API_KEY'],defaultModelId:'kimi-for-coding',models:[{id:'kimi-for-coding',name:'Kimi model'}]},
  {id:'minimax',name:'MiniMax',configured:false,hasApiKey:true,hasOAuth:false,envKeys:['MINIMAX_API_KEY'],defaultModelId:'MiniMax-M2.7',models:[{id:'MiniMax-M2.7',name:'MiniMax M2.7'}]}
  ],
  piRemoveAuth: async () => {},
- on: () => () => {},
+ on: (key, fn) => { window.listeners[key] = fn; return () => {} },
  piSetApiKey: async (...args) => window.savedKeys.push(args),
  configSet: async config => window.savedConfigs.push(config)
 };
@@ -96,6 +98,13 @@ app.whenReady().then(async () => {
  }
  document.querySelector('header button.primary').click(); await tick();
  check(window.savedConfigs.at(-1).env.VOICENOTE_PI_MODEL === 'openai/my-model', 'custom model not saved');
+ check(button('检查更新'), 'manual check update button missing in settings');
+ button('检查更新').click(); await tick();
+ check(window.updateChecks === 1 && document.body.innerText.includes('当前已是最新版本'), 'manual update check did not report latest');
+ window.listeners['update:ready']?.('9.9.9'); await tick();
+ check(button('重启以更新'), 'ready update did not show restart button');
+ button('重启以更新').click(); await tick();
+ check(window.installs === 1, 'clicking restart button did not call installUpdate');
 })()\`);
  console.log('settings verified'); app.exit(0);
 }).catch(error => {console.error(error); app.exit(1)});

@@ -16,7 +16,8 @@ const api = {
   runFile: (path: string) => ipcRenderer.invoke('run-file', path) as Promise<{ queued: boolean }>,
   pendingRetries: () => ipcRenderer.invoke('pending-retries') as Promise<string[]>,
   pendingQueue: () => ipcRenderer.invoke('pending-queue') as Promise<{ deletes: string[]; priorities: Record<string, number> }>,
-  updateState: () => ipcRenderer.invoke('update:state') as Promise<{ version: string; ready: string | null; manual: boolean }>,
+  updateState: () => ipcRenderer.invoke('update:state') as Promise<{ version: string; available: string | null; ready: string | null; manual: boolean; checking: boolean; error: string | null; packaged: boolean }>,
+  checkForUpdates: () => ipcRenderer.invoke('update:check') as Promise<{ version: string; available: string | null; ready: string | null; manual: boolean; checking: boolean; error: string | null; packaged: boolean }>,
   installUpdate: () => ipcRenderer.invoke('update:install') as Promise<{ installable: boolean }>,
   openReleases: () => ipcRenderer.invoke('update:open-releases'),
   importRecording: (path: string) => ipcRenderer.invoke('import', path),
@@ -38,7 +39,7 @@ const api = {
   search: (query: string) => ipcRenderer.invoke('search', query),
   openNoteAsHtml: (title: string, html: string) => ipcRenderer.invoke('note:open-html', { title, html }),
   setAutoProcess: (enabled: boolean) => ipcRenderer.invoke('auto-process', enabled),
-  on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'run:queued' | 'recorder:connected' | 'retry:pending' | 'queue:pending' | 'update:available' | 'update:ready' | 'update:manual' | 'update:error', listener: (payload: any) => void) => {
+  on: (channel: 'pipeline:event' | 'login:event' | 'run:state' | 'run:error' | 'run:queued' | 'recorder:connected' | 'retry:pending' | 'queue:pending' | 'update:available' | 'update:not-available' | 'update:ready' | 'update:manual' | 'update:error', listener: (payload: any) => void) => {
     const wrapped = (_event: unknown, payload: unknown) => listener(payload)
     ipcRenderer.on(channel, wrapped)
     return () => { ipcRenderer.removeListener(channel, wrapped) }

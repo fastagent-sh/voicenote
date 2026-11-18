@@ -282,7 +282,10 @@ async function searchNotes(query: string): Promise<{ path: string; title: string
  */
 const { autoUpdater } = electronUpdater
 const RELEASES_URL = 'https://github.com/fastagent-sh/voicenote/releases/latest'
+let updateAvailable: string | null = null
 let updateReady: string | null = null
+let updateChecking = false
+let updateError: string | null = null
 /**
  * macOS installs through Squirrel.Mac, which refuses — silently, with no error
  * event — any update whose code signature does not satisfy the running app's
@@ -302,6 +305,18 @@ let manualUpdateOnly = false
  */
 const SQUIRREL_STAGE_TIMEOUT_MS = 60_000
 
+function currentUpdateState() {
+  return {
+    version: app.getVersion(),
+    available: updateAvailable,
+    ready: updateReady,
+    manual: manualUpdateOnly,
+    checking: updateChecking,
+    error: updateError,
+    packaged: app.isPackaged,
+  }
+}
+
 /** Restarts into the update, or opens the download page when Squirrel refused it. */
 async function installUpdate(): Promise<{ installable: boolean }> {
   if (process.platform === 'darwin' && !squirrelStaged) {
@@ -310,6 +325,22 @@ async function installUpdate(): Promise<{ installable: boolean }> {
   }
   autoUpdater.quitAndInstall()
   return { installable: true }
+}
+
+async function checkForUpdates() {
+  if (!app.isPackaged) return currentUpdateState()
+  if (updateReady) return currentUpdateState()
+  if (updateChecking) return currentUpdateState()
+  updateChecking = true
+  updateError = null
+  try {
+    await autoUpdater.checkForUpdates()
+  } catch (error) {
+    updateError = String((error as Error)?.message ?? error)
+  } finally {
+    updateChecking = false
+  }
+  return currentUpdateState()
 }
 
 function setupUpdates(): void {
@@ -321,9 +352,24 @@ function setupUpdates(): void {
   if (feed) autoUpdater.setFeedURL({ provider: 'generic', url: feed })
   autoUpdater.autoDownload = true
   autoUpdater.autoInstallOnAppQuit = true
-  autoUpdater.on('update-available', (info) => broadcast('update:available', info.version))
+  autoUpdater.on('checking-for-update', () => { updateChecking = true; updateError = null })
+  autoUpdater.on('update-available', (info) => {
+    updateChecking = false
+    updateAvailable = info.version
+    updateError = null
+    broadcast('update:available', info.version)
+  })
+  autoUpdater.on('update-not-available', () => {
+    updateChecking = false
+    updateAvailable = null
+    updateError = null
+    broadcast('update:not-available')
+  })
   autoUpdater.on('update-downloaded', (info) => {
+    updateChecking = false
+    updateAvailable = info.version
     updateReady = info.version
+    updateError = null
     broadcast('update:ready', info.version)
     updateTray()
     if (process.platform !== 'darwin') return
@@ -334,7 +380,11 @@ function setupUpdates(): void {
       updateTray()
     }, SQUIRREL_STAGE_TIMEOUT_MS)
   })
-  autoUpdater.on('error', (error) => broadcast('update:error', String(error?.message ?? error)))
+  autoUpdater.on('error', (error) => {
+    updateChecking = false
+    updateError = String(error?.message ?? error)
+    broadcast('update:error', updateError)
+  })
   squirrel.on('update-downloaded', () => { squirrelStaged = true })
   const check = () => { void autoUpdater.checkForUpdates().catch(() => { /* reported through the error event */ }) }
   check()
@@ -364,7 +414,8 @@ async function loginProvider(providerId: string): Promise<{ ok: true }> {
 }
 
 function registerIpc(): void {
-  ipcMain.handle('update:state', () => ({ version: app.getVersion(), ready: updateReady, manual: manualUpdateOnly }))
+  ipcMain.handle('update:state', () => currentUpdateState())
+  ipcMain.handle('update:check', () => checkForUpdates())
   // Quitting for an update while a recording is being processed would lose
   // the run, so the choice stays with the user and the window says as much.
   ipcMain.handle('update:install', () => installUpdate())
